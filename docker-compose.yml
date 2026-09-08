@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: utilityscout
+      POSTGRES_PASSWORD: utilityscout
+      POSTGRES_DB: utilityscout
+    ports:
+      - "5432:5432"
+    volumes:
+      - utilityscout-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U utilityscout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  utilityscout:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DATABASE_URL is in .env — inside the compose
+      # network the app must reach Postgres via the service name, not localhost.
+      DATABASE_URL: "postgresql://utilityscout:utilityscout@postgres:5432/utilityscout"
+    volumes:
+      - ./examples:/app/examples:ro
+
+volumes:
+  utilityscout-postgres:

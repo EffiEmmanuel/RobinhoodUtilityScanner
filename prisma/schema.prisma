@@ -1,0 +1,150 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  // Connection URL lives in prisma.config.ts (Prisma 7 config model), sourced
+  // from DATABASE_URL.
+  provider = "postgresql"
+}
+
+// CLASSIFYING/RESEARCHING are transient "claimed by a worker" states used to
+// atomically hand a token to exactly one worker (see pipeline/orchestrator.ts)
+// — without them, two workers can race to pick up the same DETECTED/
+// RESEARCH_QUEUED row and do the (paid) AI work twice.
+enum TokenStatus {
+  DETECTED
+  CLASSIFYING
+  REJECTED
+  RESEARCH_QUEUED
+  RESEARCHING
+  WATCHLISTED
+  ALERTED
+  FAILED
+}
+
+enum ResearchRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model Token {
+  id          String   @id @default(cuid())
+  chain       String
+  address     String
+  name        String?
+  symbol      String?
+  iconUrl     String?
+  headerUrl   String?
+  description String?
+  rawProfile  Json? // raw provider JSON, for debugging
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @updatedAt
+
+  status       TokenStatus @default(DETECTED)
+  utilityClass String?
+
+  classifications Classification[]
+  researchRuns    ResearchRun[]
+  marketSnapshots MarketSnapshot[]
+  alerts          Alert[]
+
+  @@unique([chain, address])
+  @@index([status])
+}
+
+model Classification {
+  id      String @id @default(cuid())
+  tokenId String
+  token   Token  @relation(fields: [tokenId], references: [id])
+
+  utilityProbability   Float
+  memeProbability      Float
+  brandingQuality      Float
+  professionalism      Float
+  visualSpamProbability Float
+  passed               Boolean
+  reasoningSummary     Json // string array
+
+  model     String?
+  createdAt DateTime @default(now())
+
+  @@index([tokenId])
+}
+
+model ResearchRun {
+  id      String @id @default(cuid())
+  tokenId String
+  token   Token  @relation(fields: [tokenId], references: [id])
+
+  status      ResearchRunStatus
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  utilityScore     Float?
+  contractScore    Float?
+  credibilityScore Float?
+  websiteScore     Float?
+  socialScore      Float?
+  liquidityScore   Float?
+  marketScore      Float?
+  holderScore      Float?
+  teamScore        Float?
+  brandingScore    Float?
+  finalScore       Float?
+  confidence       Float?
+
+  hardReject        Boolean @default(false)
+  rejectionReasons  Json? // string array
+  summary           String?
+  risks             Json? // string array
+  positives         Json? // string array
+  rawResearch       Json? // everything gathered, for debugging/backtesting
+
+  createdAt DateTime @default(now())
+
+  @@index([tokenId])
+}
+
+model MarketSnapshot {
+  id      String @id @default(cuid())
+  tokenId String
+  token   Token  @relation(fields: [tokenId], references: [id])
+
+  priceUsd     Float?
+  marketCapUsd Float?
+  fdvUsd       Float?
+  liquidityUsd Float?
+
+  volume5m  Float?
+  volume1h  Float?
+  volume6h  Float?
+  volume24h Float?
+
+  buys5m  Int?
+  sells5m Int?
+  buys1h  Int?
+  sells1h Int?
+
+  pairCreatedAt DateTime?
+  capturedAt    DateTime  @default(now())
+
+  @@index([tokenId, capturedAt])
+}
+
+model Alert {
+  id         String   @id @default(cuid())
+  tokenId    String
+  token      Token    @relation(fields: [tokenId], references: [id])
+  type       String // ALERT | WATCHLIST
+  score      Float?
+  recipient  String
+  providerId String?
+  sentAt     DateTime @default(now())
+
+  @@index([tokenId])
+}

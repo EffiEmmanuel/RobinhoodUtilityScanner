@@ -1,0 +1,43 @@
+{
+  "name": "rh-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UtilityScout - 24/7 Robinhood Chain utility token discovery & research agent",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json && cp -r src/generated dist/generated",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "pg": "^8.13.1",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.1.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "resend": "^4.0.1",
+    "viem": "^2.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "@types/node": "^20.17.6",
+    "prisma": "^7.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

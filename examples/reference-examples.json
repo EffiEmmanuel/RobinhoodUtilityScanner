@@ -1,0 +1,24 @@
+[
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Example: a project with a working product before its token launched",
+    "notes": "Replace these seed entries with real Robinhood Chain examples you've observed. Winners: had a real product/repo/docs predating the token, technical branding, credible team presence.",
+    "peakMultiple": 8.4
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "Example: a utility-branded project that never shipped anything",
+    "notes": "Looked professional (clean logo, buzzword-heavy site) but had no working product, generic docs, and the team was anonymous with no verifiable history.",
+    "peakMultiple": 0.3
+  },
+  {
+    "category": "MEME",
+    "name": "Example: an obvious joke/meme token",
+    "notes": "Name and icon are clearly meme/cultural reference, no claimed utility, description is a joke."
+  },
+  {
+    "category": "SCAM",
+    "name": "Example: a project impersonating a known brand",
+    "notes": "Website/branding copied an existing legitimate project almost exactly; contract address did not match the real project's official links."
+  }
+]

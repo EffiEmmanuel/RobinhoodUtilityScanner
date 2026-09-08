@@ -1,0 +1,222 @@
+import { db } from "../db";
+import { config } from "../config";
+import { logger } from "../logger";
+import { researchMarket, formatMarketForPrompt } from "../research/market";
+import { researchWebsite, formatWebsiteResultForPrompt, type WebsiteResearchResult } from "../research/website";
+import { researchOnchain, formatOnchainResultForPrompt, type OnchainResearchResult } from "../research/onchain";
+import { callStructured } from "../ai/provider";
+import { ResearchSynthesisSchema, RESEARCH_SYNTHESIS_JSON_SCHEMA } from "../ai/schemas";
+import { RESEARCH_SYNTHESIZER_SYSTEM, buildResearchSynthesisPrompt } from "../ai/prompts";
+import { computeScore } from "../scoring";
+import { sendAlertEmail } from "../notify/email";
+import type { DiscoveredTokenProfile } from "../dex/types";
+import { TokenStatus, ResearchRunStatus } from "../generated/prisma";
+
+const UNAVAILABLE_WEBSITE: WebsiteResearchResult = {
+  status: "UNAVAILABLE",
+  githubLinks: [],
+  docsLinks: [],
+  socialLinks: [],
+  appLinks: [],
+  flags: ["website research threw and was skipped"],
+};
+
+const UNAVAILABLE_ONCHAIN: OnchainResearchResult = {
+  status: "UNAVAILABLE",
+  isContract: "UNKNOWN",
+  ownerRenounced: "UNKNOWN",
+  mintCapability: "UNKNOWN",
+  pauseCapability: "UNKNOWN",
+  blacklistCapability: "UNKNOWN",
+  feeControlCapability: "UNKNOWN",
+  verifiedSource: "UNKNOWN",
+  flags: ["on-chain research threw and was skipped"],
+};
+
+function pickWebsiteUrl(profileLinks: DiscoveredTokenProfile["links"], marketWebsites: string[]): string | undefined {
+  const fromProfile = profileLinks.find((l) => l.type === "website" || l.label?.toLowerCase() === "website");
+  return fromProfile?.url ?? marketWebsites[0];
+}
+
+function buildLinksList(
+  profile: DiscoveredTokenProfile | null,
+  website: WebsiteResearchResult,
+  dexUrl: string | undefined
+): { label: string; url: string }[] {
+  const links: { label: string; url: string }[] = [];
+  if (dexUrl) links.push({ label: "DexScreener", url: dexUrl });
+  if (website.url) links.push({ label: "Website", url: website.url });
+  for (const l of profile?.links ?? []) links.push({ label: l.label ?? l.type ?? "Link", url: l.url });
+  for (const s of website.socialLinks) links.push({ label: "Social", url: s });
+  for (const g of website.githubLinks) links.push({ label: "GitHub", url: g });
+  const seen = new Set<string>();
+  return links.filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true))).slice(0, 12);
+}
+
+/**
+ * FR-009 through FR-021: the deep research stage. Only runs after a token
+ * passed the cheap visual classification gate (see classify.ts). Gathers
+ * market/website/on-chain data concurrently (one source failing must not
+ * fail the whole job — PRD §22), synthesizes it with one AI call, scores it
+ * deterministically, and alerts/watchlists/rejects based on the score.
+ */
+export async function researchToken(tokenId: string): Promise<void> {
+  const token = await db.token.findUniqueOrThrow({ where: { id: tokenId } });
+  const startedAt = new Date();
+  const run = await db.researchRun.create({ data: { tokenId, status: ResearchRunStatus.RUNNING, startedAt } });
+
+  const classification = await db.classification.findFirst({
+    where: { tokenId, passed: true },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!classification) {
+    logger.error({ tokenId }, "researchToken called without a passing classification — skipping");
+    await db.researchRun.update({ where: { id: run.id }, data: { status: ResearchRunStatus.FAILED, completedAt: new Date() } });
+    await db.token.update({ where: { id: tokenId }, data: { status: TokenStatus.FAILED } });
+    return;
+  }
+
+  const profile = (token.rawProfile as unknown as DiscoveredTokenProfile) ?? null;
+
+  const [marketSettled, onchainSettled] = await Promise.allSettled([
+    researchMarket(token.chain, token.address),
+    researchOnchain(token.address),
+  ]);
+  const market = marketSettled.status === "fulfilled" ? marketSettled.value : { pairs: [] };
+  const onchain = onchainSettled.status === "fulfilled" ? onchainSettled.value : UNAVAILABLE_ONCHAIN;
+
+  const websiteUrl = pickWebsiteUrl(profile?.links ?? [], market.primaryPair?.websites ?? []);
+  const website = await researchWebsite(websiteUrl).catch(() => UNAVAILABLE_WEBSITE);
+
+  if (market.primaryPair) {
+    await db.marketSnapshot.create({
+      data: {
+        tokenId,
+        priceUsd: market.primaryPair.priceUsd,
+        marketCapUsd: market.primaryPair.marketCapUsd,
+        fdvUsd: market.primaryPair.fdvUsd,
+        liquidityUsd: market.primaryPair.liquidityUsd,
+        volume5m: market.primaryPair.volume5m,
+        volume1h: market.primaryPair.volume1h,
+        volume6h: market.primaryPair.volume6h,
+        volume24h: market.primaryPair.volume24h,
+        buys5m: market.primaryPair.buys5m,
+        sells5m: market.primaryPair.sells5m,
+        buys1h: market.primaryPair.buys1h,
+        sells1h: market.primaryPair.sells1h,
+        pairCreatedAt: market.primaryPair.pairCreatedAt,
+      },
+    });
+  }
+
+  const linkList = buildLinksList(profile, website, market.primaryPair?.url);
+  const linksText = linkList.map((l) => `${l.label}: ${l.url}`).join("\n") || "No links found.";
+
+  let synthesis;
+  try {
+    synthesis = await callStructured({
+      model: config.researchModel,
+      system: RESEARCH_SYNTHESIZER_SYSTEM,
+      prompt: buildResearchSynthesisPrompt({
+        token,
+        market: formatMarketForPrompt(market),
+        website: formatWebsiteResultForPrompt(website),
+        onchain: formatOnchainResultForPrompt(onchain),
+        links: linksText,
+      }),
+      schema: ResearchSynthesisSchema,
+      jsonSchema: RESEARCH_SYNTHESIS_JSON_SCHEMA,
+      toolName: "submit_research_synthesis",
+      maxTokens: 2500,
+    });
+  } catch (err) {
+    logger.error({ tokenId, err: String(err) }, "research synthesis AI call failed");
+    await db.researchRun.update({ where: { id: run.id }, data: { status: ResearchRunStatus.FAILED, completedAt: new Date() } });
+    await db.token.update({ where: { id: tokenId }, data: { status: TokenStatus.FAILED } });
+    return;
+  }
+
+  const score = computeScore({
+    classification: { brandingQuality: classification.brandingQuality, reasoningSummary: classification.reasoningSummary as string[] },
+    synthesis,
+    onchain,
+    market,
+  });
+
+  const completedAt = new Date();
+  await db.researchRun.update({
+    where: { id: run.id },
+    data: {
+      status: ResearchRunStatus.COMPLETED,
+      completedAt,
+      utilityScore: score.factors.utility.score,
+      contractScore: score.factors.contract.score,
+      credibilityScore: score.factors.credibility.score,
+      websiteScore: score.factors.website.score,
+      socialScore: score.factors.social.score,
+      liquidityScore: score.factors.liquidity.score,
+      marketScore: score.factors.market.score,
+      holderScore: score.factors.holders.score,
+      teamScore: score.factors.team.score,
+      brandingScore: score.factors.branding.score,
+      finalScore: score.finalScore,
+      confidence: score.confidence,
+      hardReject: score.hardReject,
+      rejectionReasons: score.rejectionReasons,
+      summary: synthesis.projectSummary,
+      risks: synthesis.risks,
+      positives: synthesis.positives,
+      rawResearch: { market, website, onchain, synthesis } as unknown as object,
+    },
+  });
+
+  let newStatus: TokenStatus;
+  const meetsAlertBar = !score.hardReject && score.finalScore >= config.alertThreshold && score.confidence >= config.minConfidenceToAlert;
+  const meetsWatchlistBar = !score.hardReject && score.finalScore >= config.watchlistThreshold;
+
+  if (meetsAlertBar) {
+    newStatus = TokenStatus.ALERTED;
+  } else if (meetsWatchlistBar) {
+    newStatus = TokenStatus.WATCHLISTED;
+  } else {
+    newStatus = TokenStatus.REJECTED;
+  }
+
+  await db.token.update({
+    where: { id: tokenId },
+    data: { status: newStatus, utilityClass: synthesis.utilityClass },
+  });
+
+  logger.info(
+    { tokenId, address: token.address, finalScore: score.finalScore, confidence: score.confidence, band: score.band, newStatus },
+    "research complete"
+  );
+
+  if (meetsAlertBar && config.alertEmailTo) {
+    try {
+      const providerId = await sendAlertEmail({
+        tokenName: token.name,
+        tokenSymbol: token.symbol,
+        tokenAddress: token.address,
+        detectedAt: token.firstSeenAt,
+        researchCompletedAt: completedAt,
+        score,
+        synthesis,
+        links: linkList,
+        marketSummaryText: formatMarketForPrompt(market),
+      });
+      await db.alert.create({
+        data: {
+          tokenId,
+          type: "ALERT",
+          score: score.finalScore,
+          recipient: config.alertEmailTo,
+          providerId,
+        },
+      });
+      logger.info({ tokenId, address: token.address }, "alert email sent");
+    } catch (err) {
+      logger.error({ tokenId, err: String(err) }, "failed to send alert email");
+    }
+  }
+}
