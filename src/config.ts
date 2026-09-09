@@ -58,7 +58,9 @@ export const config = {
 
   researchCooldownHours: num("RESEARCH_COOLDOWN_HOURS", 6),
 
-  apiPort: num("API_PORT", 3000),
+  // Railway (and most PaaS hosts) inject PORT and expect the app to bind to
+  // it; API_PORT still wins if explicitly set, so local dev is unaffected.
+  apiPort: num("API_PORT", num("PORT", 3000)),
   apiKey: optStr("API_KEY"),
 };
 
