@@ -124,7 +124,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
     circuitBreakerReasons: circuitBreakers.reasons,
     currentLiquidityUsd: pair.liquidityUsd ?? 0,
     liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,
-    sellQuoteAvailable: await isSellable(candidate.token.address, pair),
+    sellQuoteAvailable: await isSellable(candidate.token.address, pair, quote.tokenAmount),
     buySellRatio1h: pair.buys1h !== undefined || pair.sells1h !== undefined
       ? (pair.buys1h ?? 0) / Math.max((pair.buys1h ?? 0) + (pair.sells1h ?? 0), 1)
       : undefined,

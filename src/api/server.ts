@@ -64,16 +64,20 @@ export function buildServer() {
       poller: pollerHealth.running ? "ok" : "stopped",
       lastDiscoveryPoll: pollerHealth.lastDiscoveryPollAt?.toISOString() ?? null,
       lastDiscoveryError: pollerHealth.lastDiscoveryError ?? null,
+      lastOnchainDiscoveryPoll: pollerHealth.lastOnchainDiscoveryPollAt?.toISOString() ?? null,
+      lastOnchainDiscoveryError: pollerHealth.lastOnchainDiscoveryError ?? null,
     };
   });
 
   app.get("/tokens", async (req) => {
-    const { status, limit } = req.query as { status?: string; limit?: string };
+    const { status, limit, offset } = req.query as { status?: string; limit?: string; offset?: string };
     const parsedStatus = parseTokenStatus(status);
     return db.token.findMany({
       where: parsedStatus ? { status: parsedStatus } : undefined,
       orderBy: { firstSeenAt: "desc" },
       take: Math.min(Number(limit) || 50, 200),
+      skip: Math.max(Number(offset) || 0, 0),
+      include: { classifications: { orderBy: { createdAt: "desc" }, take: 1 } },
     });
   });
 

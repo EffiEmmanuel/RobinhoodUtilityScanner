@@ -31,21 +31,21 @@ function deriveEthPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative">): 
  * deciding whether to actually call executeBuyFill/executeSellFill (§17: a
  * fresh quote must exist and be acceptable before a real buy is ever signed).
  */
-export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent">> {
+export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "tokenAmount">> {
   if (!isLiveModeReady()) return getPaperQuote(positionSizeUsd, pair);
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
-  if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100 };
+  if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
   const amountInWei = parseEther((positionSizeUsd / ethPriceUsd).toFixed(18));
   const quote = await getLiveQuote(tokenAddress as `0x${string}`, true, amountInWei);
-  if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100 };
+  if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
 
   const decimals = await getTokenDecimals(getPublicClient(), tokenAddress as `0x${string}`);
   const tokenOut = Number(formatUnits(quote.amountOut, decimals));
   const effectivePriceUsd = tokenOut > 0 ? positionSizeUsd / tokenOut : Infinity;
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((effectivePriceUsd - spotPriceUsd) / spotPriceUsd) * 100) : 0;
-  return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent };
+  return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
 }
 
 export async function executeBuyFill(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<FillResult> {
@@ -148,9 +148,27 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   };
 }
 
-export async function isSellable(tokenAddress: string, pair: MarketPair | undefined): Promise<boolean> {
+/**
+ * A honeypot check as much as a liquidity check: many honeypot contracts
+ * happily quote a sell for a trivial dust amount while reverting on anything
+ * a real position would actually hold (the classic "works in the tester,
+ * fails for real buyers" pattern) — so simulate selling something close to
+ * the real position size whenever the caller has one, not 1 wei. Callers
+ * without a size yet (nothing built on this token so far) still get the
+ * dust-amount fallback, which is still strictly better than no check.
+ */
+export async function isSellable(tokenAddress: string, pair: MarketPair | undefined, realisticTokenAmount?: number): Promise<boolean> {
   if (!isLiveModeReady()) return isPaperSellQuoteAvailable(pair);
   if (!pair) return false;
-  const quote = await getLiveQuote(tokenAddress as `0x${string}`, false, 1n);
+  let amountToSimulate = 1n;
+  if (realisticTokenAmount && realisticTokenAmount > 0) {
+    try {
+      const decimals = await getTokenDecimals(getPublicClient(), tokenAddress as `0x${string}`);
+      amountToSimulate = BigInt(Math.floor(realisticTokenAmount * 10 ** decimals));
+    } catch {
+      amountToSimulate = 1n; // decimals lookup failed — fall back to the dust check rather than skip it
+    }
+  }
+  const quote = await getLiveQuote(tokenAddress as `0x${string}`, false, amountToSimulate);
   return quote !== undefined;
 }

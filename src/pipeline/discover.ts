@@ -5,6 +5,8 @@ import { db } from "../db";
 import { logger } from "../logger";
 import { cheapFilter } from "./cheapFilter";
 import { TokenStatus } from "../generated/prisma";
+import { getPublicClient } from "../trading/live/wallet";
+import { getAdjustedTotalSupply } from "../trading/live/tokenUtils";
 
 /**
  * FR-001/FR-002/FR-003/FR-004: poll DexScreener, keep only the target chain,
@@ -44,7 +46,14 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
     const name = market.primaryPair?.baseTokenName;
     const symbol = market.primaryPair?.baseTokenSymbol;
 
-    const filter = cheapFilter(profile, name);
+    let adjustedTotalSupply: number | undefined;
+    try {
+      adjustedTotalSupply = await getAdjustedTotalSupply(getPublicClient(), profile.tokenAddress as `0x${string}`);
+    } catch (err) {
+      logger.warn({ address: profile.tokenAddress, err: String(err) }, "discovery: could not read token total supply");
+    }
+
+    const filter = cheapFilter(profile, name, adjustedTotalSupply);
 
     await db.token.create({
       data: {

@@ -26,11 +26,18 @@ export const config = {
   dexscreenerBaseUrl: str("DEXSCREENER_BASE_URL", "https://api.dexscreener.com"),
   targetChainId: str("TARGET_CHAIN_ID", "robinhood"),
   discoveryIntervalSeconds: num("DISCOVERY_INTERVAL_SECONDS", 15),
+  // Direct on-chain pool-creation watching (onchainDiscovery.ts) — far tighter
+  // than the DexScreener poll above since it reads chain state directly
+  // instead of waiting on third-party indexing. ~100ms blocks means even a
+  // handful of seconds covers many blocks per poll.
+  onchainDiscoveryIntervalSeconds: num("ONCHAIN_DISCOVERY_INTERVAL_SECONDS", 3),
 
   rhRpcUrl: str("RH_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
 
   geminiApiKey: optStr("GEMINI_API_KEY"),
+  geminiApiKey2: optStr("GEMINI_API_KEY_2"),
+  geminiApiKey3: optStr("GEMINI_API_KEY_3"),
   classifierModel: str("CLASSIFIER_MODEL", "gemini-flash-lite-latest"),
   // Defaults to the same lite model as classification: on a free-tier key,
   // "gemini-flash-latest" resolves to whatever the newest preview model is

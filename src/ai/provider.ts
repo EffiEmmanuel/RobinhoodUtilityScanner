@@ -7,13 +7,34 @@ import { sleep } from "../util/http";
 const RETRY_BACKOFF_MS = [0, 2000, 8000];
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-let client: GoogleGenAI | undefined;
+// Each key is a separate Google account/project with its own independent
+// daily free-tier quota — rotating on exhaustion turns one 500/day ceiling
+// into (up to) 3x that, instead of the whole pipeline stalling once the
+// first key runs dry. Index only ever moves forward (a quota reset is a
+// day-boundary event, not something worth guessing at mid-process) — a
+// redeploy naturally starts back at key 0.
+const API_KEYS = [config.geminiApiKey, config.geminiApiKey2, config.geminiApiKey3].filter((k): k is string => Boolean(k));
+let currentKeyIndex = 0;
+const clients: (GoogleGenAI | undefined)[] = [];
+
 function getClient(): GoogleGenAI {
-  if (!config.geminiApiKey) {
+  if (API_KEYS.length === 0) {
     throw new Error("GEMINI_API_KEY is not set");
   }
-  if (!client) client = new GoogleGenAI({ apiKey: config.geminiApiKey });
-  return client;
+  if (!clients[currentKeyIndex]) {
+    clients[currentKeyIndex] = new GoogleGenAI({ apiKey: API_KEYS[currentKeyIndex] });
+  }
+  return clients[currentKeyIndex] as GoogleGenAI;
+}
+
+/** Returns true if there was another key to rotate to. */
+function rotateToNextKeyIfQuotaExhausted(err: unknown): boolean {
+  const isQuotaExhausted = err instanceof ApiError && err.status === 429;
+  if (!isQuotaExhausted) return false;
+  if (currentKeyIndex >= API_KEYS.length - 1) return false;
+  currentKeyIndex++;
+  logger.warn({ keyIndex: currentKeyIndex, totalKeys: API_KEYS.length }, "Gemini key exhausted its quota — rotating to the next configured key");
+  return true;
 }
 
 export interface ImageInput {
@@ -43,8 +64,6 @@ export async function callStructured<T extends z.ZodTypeAny>(opts: {
   /** 0 disables thinking, -1 is automatic. Omit for the model's default. */
   thinkingBudget?: number;
 }): Promise<z.infer<T>> {
-  const ai = getClient();
-
   const parts: Part[] = [];
   for (const img of opts.images ?? []) {
     parts.push({ inlineData: { mimeType: img.mediaType, data: img.base64 } });
@@ -52,9 +71,20 @@ export async function callStructured<T extends z.ZodTypeAny>(opts: {
   parts.push({ text: opts.prompt });
 
   let lastErr: unknown;
-  let call: NonNullable<Awaited<ReturnType<typeof ai.models.generateContent>>["functionCalls"]>[number] | undefined;
-  for (let attempt = 0; attempt < RETRY_BACKOFF_MS.length; attempt++) {
-    if (RETRY_BACKOFF_MS[attempt]) await sleep(RETRY_BACKOFF_MS[attempt]);
+  let call:
+    | NonNullable<Awaited<ReturnType<InstanceType<typeof GoogleGenAI>["models"]["generateContent"]>>["functionCalls"]>[number]
+    | undefined;
+  // At least one attempt per configured key — otherwise a 3rd/4th key added
+  // later would sit unused because the fixed backoff array ran out of
+  // attempts before rotation ever reached it.
+  const maxAttempts = Math.max(RETRY_BACKOFF_MS.length, API_KEYS.length);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const backoffMs = RETRY_BACKOFF_MS[attempt] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1];
+    if (backoffMs) await sleep(backoffMs);
+    // Re-fetched every attempt (not hoisted above the loop) so a key
+    // rotation from the previous attempt's catch block actually takes
+    // effect on the retry, instead of resending to the exhausted key.
+    const ai = getClient();
     try {
       const response = await ai.models.generateContent({
         model: opts.model,
@@ -83,8 +113,9 @@ export async function callStructured<T extends z.ZodTypeAny>(opts: {
       break;
     } catch (err) {
       lastErr = err;
-      const retryable = err instanceof ApiError && RETRYABLE_STATUS.has(err.status);
-      logger.warn({ toolName: opts.toolName, attempt, retryable, err: String(err) }, "Gemini call failed");
+      const rotated = rotateToNextKeyIfQuotaExhausted(err);
+      const retryable = rotated || (err instanceof ApiError && RETRYABLE_STATUS.has(err.status));
+      logger.warn({ toolName: opts.toolName, attempt, retryable, rotated, err: String(err) }, "Gemini call failed");
       if (!retryable) throw err;
     }
   }

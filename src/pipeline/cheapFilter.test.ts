@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cheapFilter } from "./cheapFilter";
+import { cheapFilter, cheapFilterOnchain } from "./cheapFilter";
 import type { DiscoveredTokenProfile } from "../dex/types";
 
 function profile(overrides: Partial<DiscoveredTokenProfile> = {}): DiscoveredTokenProfile {
@@ -35,6 +35,31 @@ describe("cheapFilter", () => {
 
   it("rejects a malformed contract address", () => {
     const result = cheapFilter(profile({ tokenAddress: "not-an-address" }), "Navier Protocol");
+    expect(result.passed).toBe(false);
+  });
+});
+
+describe("cheapFilterOnchain", () => {
+  const addr = "0x1234567890123456789012345678901234567890";
+
+  it("passes a real name with a reasonable supply, no icon needed", () => {
+    const result = cheapFilterOnchain(addr, "Navier Protocol", 1_000_000);
+    expect(result.passed).toBe(true);
+  });
+
+  it("rejects an absurd (>1 trillion) token supply as a meme-coin signal", () => {
+    const result = cheapFilterOnchain(addr, "Navier Protocol", 5_000_000_000_000);
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes("meme-coin signal"))).toBe(true);
+  });
+
+  it("does not reject on supply when it is unknown (RPC read failed)", () => {
+    const result = cheapFilterOnchain(addr, "Navier Protocol", undefined);
+    expect(result.passed).toBe(true);
+  });
+
+  it("still rejects a missing name regardless of supply", () => {
+    const result = cheapFilterOnchain(addr, undefined, 1_000);
     expect(result.passed).toBe(false);
   });
 });

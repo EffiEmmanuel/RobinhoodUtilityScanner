@@ -1,9 +1,11 @@
+import { ApiError } from "@google/genai";
 import { db } from "../db";
 import { config } from "../config";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
 import { retryAsync } from "../util/retry";
 import { runDiscoveryPoll } from "./discover";
+import { runOnchainDiscoveryPoll } from "./onchainDiscovery";
 import { classifyToken } from "./classify";
 import { researchToken } from "./research";
 import { TokenStatus } from "../generated/prisma";
@@ -11,10 +13,25 @@ import type { Token } from "../generated/prisma";
 
 const WORKER_CONCURRENCY = 2;
 const WORKER_IDLE_DELAY_MS = 3000;
+// A 429 from Gemini here is almost always the free-tier's per-day request
+// cap, not a transient blip — hammering it every 3s just burns DB/CPU and
+// floods logs until the quota resets. Back off for a while instead, and
+// critically: requeue the token to where it came from rather than FAILED —
+// FAILED never gets retried by anything, so treating a quota hit the same as
+// a genuine bug silently drops real candidates for the rest of the day.
+const QUOTA_COOLDOWN_MS = 5 * 60 * 1000;
+let classifyCooldownUntil = 0;
+let researchCooldownUntil = 0;
+
+function isQuotaExhausted(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 429;
+}
 
 export const health = {
   lastDiscoveryPollAt: undefined as Date | undefined,
   lastDiscoveryError: undefined as string | undefined,
+  lastOnchainDiscoveryPollAt: undefined as Date | undefined,
+  lastOnchainDiscoveryError: undefined as string | undefined,
   running: false,
 };
 
@@ -54,26 +71,44 @@ async function recoverStuckTokens(): Promise<void> {
  * this scale.
  */
 async function processOneToken(): Promise<boolean> {
-  const toClassify = await claim(TokenStatus.DETECTED, TokenStatus.CLASSIFYING);
-  if (toClassify) {
-    try {
-      await classifyToken(toClassify.id);
-    } catch (err) {
-      logger.error({ tokenId: toClassify.id, err: String(err) }, "classification failed");
-      await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.FAILED } });
+  const now = Date.now();
+
+  if (now >= classifyCooldownUntil) {
+    const toClassify = await claim(TokenStatus.DETECTED, TokenStatus.CLASSIFYING);
+    if (toClassify) {
+      try {
+        await classifyToken(toClassify.id);
+      } catch (err) {
+        if (isQuotaExhausted(err)) {
+          classifyCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+          logger.warn({ tokenId: toClassify.id, cooldownMs: QUOTA_COOLDOWN_MS }, "classification hit an AI quota/rate limit — requeued, pausing classification briefly");
+          await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.DETECTED } });
+        } else {
+          logger.error({ tokenId: toClassify.id, err: String(err) }, "classification failed");
+          await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.FAILED } });
+        }
+      }
+      return true;
     }
-    return true;
   }
 
-  const toResearch = await claim(TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING);
-  if (toResearch) {
-    try {
-      await researchToken(toResearch.id);
-    } catch (err) {
-      logger.error({ tokenId: toResearch.id, err: String(err) }, "research failed");
-      await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.FAILED } });
+  if (now >= researchCooldownUntil) {
+    const toResearch = await claim(TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING);
+    if (toResearch) {
+      try {
+        await researchToken(toResearch.id);
+      } catch (err) {
+        if (isQuotaExhausted(err)) {
+          researchCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+          logger.warn({ tokenId: toResearch.id, cooldownMs: QUOTA_COOLDOWN_MS }, "research hit an AI quota/rate limit — requeued, pausing research briefly");
+          await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.RESEARCH_QUEUED } });
+        } else {
+          logger.error({ tokenId: toResearch.id, err: String(err) }, "research failed");
+          await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.FAILED } });
+        }
+      }
+      return true;
     }
-    return true;
   }
 
   return false;
@@ -108,6 +143,23 @@ async function discoveryLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
+async function onchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const result = await runOnchainDiscoveryPoll();
+      health.lastOnchainDiscoveryPollAt = new Date();
+      health.lastOnchainDiscoveryError = undefined;
+      if (result.created > 0) {
+        logger.info(result, "on-chain discovery poll complete");
+      }
+    } catch (err) {
+      health.lastOnchainDiscoveryError = String(err);
+      logger.error({ err: String(err) }, "on-chain discovery poll crashed");
+    }
+    await sleep(config.onchainDiscoveryIntervalSeconds * 1000);
+  }
+}
+
 export async function startOrchestrator(): Promise<() => void> {
   // The first DB call of the process, most likely to hit a cold Neon compute.
   await retryAsync("recoverStuckTokens", recoverStuckTokens);
@@ -115,7 +167,11 @@ export async function startOrchestrator(): Promise<() => void> {
   const signal = { stopped: false };
   health.running = true;
 
-  const loops = [discoveryLoop(signal), ...Array.from({ length: WORKER_CONCURRENCY }, (_, i) => workerLoop(i, signal))];
+  const loops = [
+    discoveryLoop(signal),
+    onchainDiscoveryLoop(signal),
+    ...Array.from({ length: WORKER_CONCURRENCY }, (_, i) => workerLoop(i, signal)),
+  ];
 
   Promise.allSettled(loops).then(() => {
     health.running = false;

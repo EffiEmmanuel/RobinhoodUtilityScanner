@@ -331,11 +331,14 @@
   .badge.QUALIFIED, .badge.PLANNING { background: var(--accent-soft); color: var(--accent-strong); }
   .badge.WAITING { background: var(--warn-soft); color: var(--warn); }
   .badge.TRADED { background: var(--good-soft); color: var(--good); }
-  .badge.WATCH_ONLY { background: var(--neutral-soft); color: var(--text-muted); }
+  .badge.WATCH_ONLY, .badge.WATCHLISTED { background: var(--warn-soft); color: var(--warn); }
   .badge.REJECTED, .badge.EXPIRED, .badge.MISSED { background: var(--neutral-soft); color: var(--text-muted); }
   .badge.PAPER { background: var(--neutral-soft); color: var(--text-muted); }
   .badge.SHADOW { background: var(--accent-soft); color: var(--accent-strong); }
   .badge.LIVE { background: var(--live-soft); color: var(--live); }
+  .badge.DETECTED, .badge.CLASSIFYING, .badge.RESEARCH_QUEUED, .badge.RESEARCHING { background: var(--accent-soft); color: var(--accent-strong); }
+  .badge.ALERTED { background: var(--good-soft); color: var(--good); }
+  .badge.FAILED { background: var(--bad-soft); color: var(--bad); }
 
   /* ---- feed lists (candidates / ledger) ---- */
   .feed { display: flex; flex-direction: column; }
@@ -347,16 +350,42 @@
     gap: 3px;
   }
   .feed-row:last-child { border-bottom: none; }
-  .feed-row .line1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .feed-row .name { font-size: 13px; font-weight: 600; }
+  .feed-row .line1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+  .feed-row .name { font-size: 13px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .feed-row .meta {
     font-size: 11.5px;
     color: var(--text-muted);
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .feed-row .time { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+  a.token-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--text-muted); }
+  a.token-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  a.addr-link { color: inherit; text-decoration: none; }
+  a.addr-link:hover { color: var(--accent); }
   .empty-feed { padding: 26px 16px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
+
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .pager #activity-page-label {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    min-width: 3.5em;
+    text-align: center;
+  }
+  .pager button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pager button:disabled:hover { color: var(--text-muted); border-color: var(--border); }
 
   .ledger-amount { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
 
@@ -395,6 +424,16 @@
 
   @media (prefers-reduced-motion: no-preference) {
     .card, .tile { transition: border-color 0.15s ease; }
+  }
+
+  @media (max-width: 640px) {
+    .wrap { padding: 16px 14px 48px; gap: 14px; }
+    header { gap: 10px; }
+    .status-cluster { gap: 8px; }
+    #settings-panel { flex-direction: column; align-items: stretch; }
+    .field input { min-width: 0; width: 100%; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    footer { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
@@ -480,6 +519,22 @@
             </table>
           </div>
         </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Discovery Activity</h2>
+            <span class="count-chip" id="activity-stats">0 seen</span>
+          </div>
+          <div class="feed" id="activity-feed"></div>
+          <div class="pager">
+            <button class="icon-btn" id="activity-prev" title="Previous page" aria-label="Previous page">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3 5 8l5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <span id="activity-page-label">Page 1</span>
+            <button class="icon-btn" id="activity-next" title="Next page" aria-label="Next page">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 3 11 8l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="col">
@@ -496,7 +551,7 @@
 
     <footer>
       <span class="wallet-chip" id="wallet-chip" hidden>
-        <span id="wallet-addr">&mdash;</span>
+        <a id="wallet-addr" class="addr-link" href="#" target="_blank" rel="noopener noreferrer" title="Open on the Robinhood Chain explorer">&mdash;</a>
         <button id="copy-addr-btn">copy</button>
       </span>
       <span class="pill" id="gas-pill" hidden></span>
@@ -516,7 +571,10 @@
     apiBase: safeStorage.get('us_api_base', window.location.origin),
     apiKey: safeStorage.get('us_api_key', ''),
     connected: false,
-    lastUpdated: null
+    lastUpdated: null,
+    activityOffset: 0,
+    activityPageSize: 15,
+    activityHasMore: false
   };
 
   var els = {
@@ -537,6 +595,11 @@
     cbBanner: document.getElementById('cb-banner'),
     cbReasons: document.getElementById('cb-reasons'),
     tiles: document.getElementById('tiles'),
+    activityFeed: document.getElementById('activity-feed'),
+    activityStats: document.getElementById('activity-stats'),
+    activityPrev: document.getElementById('activity-prev'),
+    activityNext: document.getElementById('activity-next'),
+    activityPageLabel: document.getElementById('activity-page-label'),
     positionsBody: document.getElementById('positions-body'),
     positionsCount: document.getElementById('positions-count'),
     closedBody: document.getElementById('closed-body'),
@@ -597,9 +660,20 @@
     var d = Math.round(h / 24);
     return d + 'd ago';
   }
+  function dexScreenerUrl(token) {
+    if (!token || !token.address) return null;
+    return 'https://dexscreener.com/' + encodeURIComponent(token.chain || 'robinhood') + '/' + token.address;
+  }
+  function blockscoutUrl(address) {
+    if (!address) return null;
+    return 'https://robinhoodchain.blockscout.com/address/' + address;
+  }
   function tokenLabel(token) {
     if (!token) return 'Unknown token';
-    return esc(token.symbol || token.name || (token.address ? fmtAddr(token.address) : 'Unknown'));
+    var label = esc(token.symbol || token.name || (token.address ? fmtAddr(token.address) : 'Unknown'));
+    var url = dexScreenerUrl(token);
+    if (!url) return label;
+    return '<a class="token-link" href="' + url + '" target="_blank" rel="noopener noreferrer" title="Open on DexScreener">' + label + '</a>';
   }
 
   // ---------- data fetch ----------
@@ -619,7 +693,8 @@
       fetchJson('/positions'),
       fetchJson('/trades?status=CLOSED&limit=20'),
       fetchJson('/trade-candidates?limit=15'),
-      fetchJson('/ledger?limit=12')
+      fetchJson('/ledger?limit=12'),
+      fetchJson('/tokens?limit=' + state.activityPageSize + '&offset=' + state.activityOffset)
     ]).then(function (results) {
       state.connected = true;
       state.lastUpdated = Date.now();
@@ -628,7 +703,8 @@
         positions: results[1],
         closedTrades: results[2],
         candidates: results[3],
-        ledger: results[4]
+        ledger: results[4],
+        tokens: results[5]
       });
     }).catch(function (err) {
       state.connected = false;
@@ -690,6 +766,7 @@
     if (live.walletConfigured) {
       els.walletChip.hidden = false;
       els.walletAddr.textContent = live.walletAddress || '—';
+      els.walletAddr.href = blockscoutUrl(live.walletAddress) || '#';
       els.walletAddr.title = live.walletAddress || '';
       els.gasPill.hidden = false;
       var gasEth = live.walletGasBalanceEth;
@@ -701,6 +778,7 @@
       els.gasPill.hidden = true;
     }
 
+    renderActivity(data.tokens || []);
     renderPositions(data.positions || []);
     renderClosedTrades(data.closedTrades || []);
     renderCandidates(data.candidates || []);
@@ -752,6 +830,45 @@
     }).join('');
   }
 
+  var IN_PROGRESS_STATUSES = { DETECTED: 1, CLASSIFYING: 1, RESEARCH_QUEUED: 1, RESEARCHING: 1 };
+
+  function renderActivity(rows) {
+    var rejected = rows.filter(function (t) { return t.status === 'REJECTED'; }).length;
+    els.activityStats.textContent = rows.length + ' shown · ' + rejected + ' rejected';
+
+    state.activityHasMore = rows.length === state.activityPageSize;
+    var pageNum = Math.floor(state.activityOffset / state.activityPageSize) + 1;
+    els.activityPageLabel.textContent = 'Page ' + pageNum;
+    els.activityPrev.disabled = state.activityOffset === 0;
+    els.activityNext.disabled = !state.activityHasMore;
+
+    if (!rows.length) {
+      els.activityFeed.innerHTML = '<div class="empty-feed">' +
+        (state.activityOffset > 0 ? 'No more results on this page.' : 'No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.') +
+        '</div>';
+      return;
+    }
+    els.activityFeed.innerHTML = rows.map(function (t) {
+      var cls = (t.classifications && t.classifications[0]) || null;
+      var meta;
+      if (cls) {
+        meta = 'utility ' + Math.round(cls.utilityProbability * 100) + '% · meme ' + Math.round(cls.memeProbability * 100) + '%';
+      } else if (IN_PROGRESS_STATUSES[t.status]) {
+        meta = 'queued for AI classification';
+      } else if (t.status === 'REJECTED') {
+        meta = 'filtered before AI review (name/address check)';
+      } else if (t.status === 'FAILED') {
+        meta = 'pipeline error — see logs';
+      } else {
+        meta = '—';
+      }
+      return '<div class="feed-row">' +
+        '<div class="line1"><span class="name">' + tokenLabel(t) + '</span><span class="badge ' + esc(t.status) + '">' + esc(t.status) + '</span></div>' +
+        '<div class="line1"><span class="meta">' + meta + '</span><span class="time">' + fmtAgo(t.firstSeenAt) + '</span></div>' +
+        '</div>';
+    }).join('');
+  }
+
   function renderCandidates(rows) {
     els.candidatesCount.textContent = rows.length;
     if (!rows.length) {
@@ -791,6 +908,16 @@
     els.settingsPanel.hidden = !els.settingsPanel.hidden;
   });
   els.refreshBtn.addEventListener('click', refreshAll);
+  els.activityPrev.addEventListener('click', function () {
+    if (state.activityOffset === 0) return;
+    state.activityOffset = Math.max(0, state.activityOffset - state.activityPageSize);
+    refreshAll();
+  });
+  els.activityNext.addEventListener('click', function () {
+    if (!state.activityHasMore) return;
+    state.activityOffset += state.activityPageSize;
+    refreshAll();
+  });
   els.saveBtn.addEventListener('click', function () {
     var base = els.apiBaseInput.value.trim() || window.location.origin;
     var key = els.apiKeyInput.value.trim();

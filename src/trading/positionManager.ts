@@ -95,7 +95,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     unrealizedPnlPercent,
     liquidityUsd: pair?.liquidityUsd ?? 0,
     buySellRatio5m,
-    sellQuoteAvailable: await isSellable(token.address, pair),
+    sellQuoteAvailable: await isSellable(token.address, pair, remainingTokens),
     profitStepsTaken,
   });
 
