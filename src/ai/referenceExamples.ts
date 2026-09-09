@@ -7,8 +7,11 @@ const ReferenceExampleSchema = z.object({
   category: z.enum(["WINNER_UTILITY", "LOSER_UTILITY", "MEME", "SCAM", "AMBIGUOUS"]),
   name: z.string().optional(),
   symbol: z.string().optional(),
+  contract: z.string().optional(),
   notes: z.string().optional(),
   peakMultiple: z.number().optional(),
+  entryMcap: z.number().optional(),
+  liquidityAtEntry: z.number().optional(),
 });
 export type ReferenceExample = z.infer<typeof ReferenceExampleSchema>;
 
@@ -37,6 +40,15 @@ export function loadReferenceExamples(): ReferenceExample[] {
 export function formatReferenceExamplesForPrompt(examples: ReferenceExample[]): string {
   if (examples.length === 0) return "No reference examples available.";
   return examples
-    .map((e) => `- [${e.category}] ${e.name ?? "(unnamed)"}${e.peakMultiple ? ` (peak ${e.peakMultiple}x)` : ""}: ${e.notes ?? ""}`)
+    .map((e) => {
+      const stats = [
+        e.peakMultiple ? `peak ${e.peakMultiple}x` : undefined,
+        e.entryMcap ? `mcap ~$${Math.round(e.entryMcap).toLocaleString()}` : undefined,
+        e.liquidityAtEntry ? `liquidity ~$${Math.round(e.liquidityAtEntry).toLocaleString()}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      return `- [${e.category}] ${e.name ?? "(unnamed)"}${stats ? ` (${stats})` : ""}: ${e.notes ?? ""}`;
+    })
     .join("\n");
 }

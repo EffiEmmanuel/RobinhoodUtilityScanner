@@ -24,6 +24,7 @@ interface RawPair {
   baseToken: { address: string; name?: string; symbol?: string };
   quoteToken: { address: string; name?: string; symbol?: string };
   priceUsd?: string;
+  priceNative?: string;
   fdv?: number;
   marketCap?: number;
   pairCreatedAt?: number;
@@ -61,6 +62,7 @@ function normalizePair(raw: RawPair): MarketPair {
     pairAddress: raw.pairAddress,
     url: raw.url,
     priceUsd: raw.priceUsd ? Number(raw.priceUsd) : undefined,
+    priceNative: raw.priceNative ? Number(raw.priceNative) : undefined,
     marketCapUsd: raw.marketCap,
     fdvUsd: raw.fdv,
     liquidityUsd: raw.liquidity?.usd,

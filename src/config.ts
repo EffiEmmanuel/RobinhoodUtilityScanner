@@ -30,9 +30,13 @@ export const config = {
   rhRpcUrl: str("RH_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
 
-  anthropicApiKey: optStr("ANTHROPIC_API_KEY"),
-  classifierModel: str("CLASSIFIER_MODEL", "claude-haiku-4-5-20251001"),
-  researchModel: str("RESEARCH_MODEL", "claude-sonnet-5"),
+  geminiApiKey: optStr("GEMINI_API_KEY"),
+  classifierModel: str("CLASSIFIER_MODEL", "gemini-flash-lite-latest"),
+  // Defaults to the same lite model as classification: on a free-tier key,
+  // "gemini-flash-latest" resolves to whatever the newest preview model is
+  // (gemini-3.8-flash at time of writing), which carries a 20-requests/day
+  // free quota — nowhere near enough for a 24/7 agent. Confirmed live.
+  researchModel: str("RESEARCH_MODEL", "gemini-flash-lite-latest"),
 
   resendApiKey: optStr("RESEND_API_KEY"),
   alertEmailFrom: optStr("ALERT_EMAIL_FROM"),
@@ -60,7 +64,7 @@ export const config = {
 
 export function assertRuntimeConfig() {
   const missing: string[] = [];
-  if (!config.anthropicApiKey) missing.push("ANTHROPIC_API_KEY");
+  if (!config.geminiApiKey) missing.push("GEMINI_API_KEY");
   if (!config.resendApiKey) missing.push("RESEND_API_KEY");
   if (!config.alertEmailFrom) missing.push("ALERT_EMAIL_FROM");
   if (!config.alertEmailTo) missing.push("ALERT_EMAIL_TO");

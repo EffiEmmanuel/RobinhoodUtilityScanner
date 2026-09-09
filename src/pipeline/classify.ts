@@ -36,6 +36,10 @@ export async function classifyToken(tokenId: string): Promise<ClassifyOutcome> {
     toolName: "submit_visual_classification",
     images,
     maxTokens: 1000,
+    // Not disabling thinking here: gemini-flash-lite-latest rejects
+    // thinkingBudget: 0 with a generic 400 (confirmed live) even though the
+    // SDK's types claim 0 is universally valid. Flash-lite is already the
+    // cheap/fast tier, so the default (small, model-chosen) budget is fine.
   });
 
   const passed =

@@ -3,6 +3,7 @@ import { db } from "../db";
 import { config } from "../config";
 import { logger } from "../logger";
 import { health as pollerHealth } from "../pipeline/orchestrator";
+import { registerTradingRoutes } from "../trading/api";
 import { TokenStatus } from "../generated/prisma";
 
 function parseTokenStatus(value: string | undefined): TokenStatus | undefined {
@@ -77,6 +78,8 @@ export function buildServer() {
   app.get("/rejected", async () => {
     return db.token.findMany({ where: { status: TokenStatus.REJECTED }, orderBy: { lastSeenAt: "desc" }, take: 100 });
   });
+
+  registerTradingRoutes(app);
 
   return app;
 }

@@ -52,6 +52,8 @@ model Token {
   researchRuns    ResearchRun[]
   marketSnapshots MarketSnapshot[]
   alerts          Alert[]
+  tradeCandidates TradeCandidate[]
+  trades          Trade[]
 
   @@unique([chain, address])
   @@index([status])
@@ -147,4 +149,563 @@ model Alert {
   sentAt     DateTime @default(now())
 
   @@index([tokenId])
+}
+
+// =============================================================================
+// Trading extension (PRD: utility-scout-autonomous-trading-learning-prd.md)
+//
+// PAPER/SHADOW ONLY in this build — there is no wallet, signer, nonce manager,
+// or live execution provider anywhere in this codebase. TradingMode.LIVE exists
+// in the enum for schema forward-compatibility but nothing ever produces a LIVE
+// trade; see src/trading/config.ts, which fails closed if TRADING_MODE=LIVE is
+// ever set. Every model below still has the fields a future live-execution
+// phase would need (txHash, gas, etc.) so that turning on live trading later is
+// additive, not a migration.
+// =============================================================================
+
+enum TradingMode {
+  PAPER
+  SHADOW
+  LIVE
+}
+
+enum TradeCandidateStatus {
+  QUALIFIED
+  PLANNING
+  WAITING
+  TRADED
+  WATCH_ONLY
+  REJECTED
+  EXPIRED
+  MISSED
+}
+
+enum TradePlanAction {
+  BUY_NOW
+  WAIT_FOR_ENTRY
+  WATCH_ONLY
+  REJECT_TRADE
+}
+
+enum PendingEntryStatus {
+  ACTIVE
+  TRIGGERED
+  REVALIDATING
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum TradeStatus {
+  ENTRY_PENDING
+  ENTRY_SUBMITTED
+  OPEN
+  PARTIALLY_EXITED
+  EXIT_PENDING
+  EXIT_SUBMITTED
+  CLOSED
+  CANCELLED
+  FAILED
+}
+
+enum ExecutionType {
+  BUY
+  SELL
+  APPROVAL
+}
+
+enum ExecutionStatus {
+  CREATED
+  QUOTED
+  SIMULATED
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  DROPPED
+  REPLACED
+}
+
+enum TradeDecision {
+  BUY
+  WAIT
+  SKIP
+  HOLD
+  PARTIAL_SELL
+  SELL
+  CANCEL
+}
+
+enum StrategyStatus {
+  DRAFT
+  BACKTEST
+  SHADOW
+  PRODUCTION
+  RETIRED
+}
+
+enum LedgerEntryType {
+  DEPOSIT
+  WITHDRAWAL
+  BUY
+  SELL
+  GAS
+  APPROVAL_GAS
+  REALIZED_PNL
+  MANUAL_ADJUSTMENT
+}
+
+// A token that already cleared the existing research pipeline (ResearchRun
+// hit at least the watchlist bar and was not hardRejected) becomes a trade
+// candidate. Every candidate is tracked to CandidateOutcome regardless of
+// whether it was ever planned or traded — that's the learning dataset.
+model TradeCandidate {
+  id            String  @id @default(cuid())
+  tokenId       String
+  token         Token   @relation(fields: [tokenId], references: [id])
+  researchRunId String?
+
+  status TradeCandidateStatus @default(QUALIFIED)
+
+  qualityScore       Float?
+  researchConfidence Float?
+  marketRiskScore    Float?
+  technicalScore     Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  plans     TradePlan[]
+  decisions TradeDecisionSnapshot[]
+  outcome   CandidateOutcome?
+  trades    Trade[]
+
+  @@index([status])
+}
+
+model TradePlan {
+  id          String @id @default(cuid())
+  candidateId String
+  candidate   TradeCandidate @relation(fields: [candidateId], references: [id])
+
+  strategyVersionId String
+  strategyVersion   StrategyVersion @relation(fields: [strategyVersionId], references: [id])
+
+  action     TradePlanAction
+  entryStyle String? // MARKET_ENTRY | PULLBACK_ENTRY | BREAKOUT_RETEST_ENTRY
+
+  currentMarketCap    Float?
+  targetEntryMcapMin  Float?
+  targetEntryMcapMax  Float?
+  doNotChaseAboveMcap Float?
+  invalidationMcap    Float?
+
+  estimatedPositionUsd Float?
+  riskScore            Float?
+  confidence           Float?
+
+  planData Json // full AI + deterministic output, for audit
+
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  pendingEntry PendingEntry?
+  trades       Trade[]
+
+  @@index([candidateId])
+}
+
+model PendingEntry {
+  id          String    @id @default(cuid())
+  tradePlanId String    @unique
+  tradePlan   TradePlan @relation(fields: [tradePlanId], references: [id])
+
+  status PendingEntryStatus @default(ACTIVE)
+
+  targetMcapMin Float?
+  targetMcapMax Float?
+
+  lastCheckedAt DateTime?
+  triggeredAt   DateTime?
+  expiresAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+}
+
+model Trade {
+  id String @id @default(cuid())
+
+  tokenId           String
+  token             Token           @relation(fields: [tokenId], references: [id])
+  candidateId       String?
+  candidate         TradeCandidate? @relation(fields: [candidateId], references: [id])
+  tradePlanId       String?
+  tradePlan         TradePlan?      @relation(fields: [tradePlanId], references: [id])
+  strategyVersionId String
+  strategyVersion   StrategyVersion @relation(fields: [strategyVersionId], references: [id])
+
+  mode   TradingMode
+  status TradeStatus @default(ENTRY_PENDING)
+
+  positionSizeUsd  Float
+  entryTokenAmount Float?
+
+  plannedEntryMcap Float?
+  actualEntryMcap  Float?
+  entryPriceUsd    Float?
+
+  openedAt DateTime?
+  closedAt DateTime?
+
+  initialQualityScore Float?
+  initialRiskScore    Float?
+  initialConfidence   Float?
+
+  realizedPnlUsd   Float?
+  realizedMultiple Float?
+
+  mfePercent Float?
+  maePercent Float?
+
+  exitReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  executions  TradeExecution[]
+  snapshots   PositionSnapshot[]
+  exitSignals ExitSignal[]
+  decisions   TradeDecisionSnapshot[]
+  postmortem  TradePostmortem?
+  ledger      LedgerEntry[]
+
+  @@index([status])
+  @@index([tokenId])
+}
+
+model TradeExecution {
+  id      String @id @default(cuid())
+  tradeId String
+  trade   Trade  @relation(fields: [tradeId], references: [id])
+
+  type   ExecutionType
+  status ExecutionStatus
+
+  txHash      String? // always null in this build — no live signer exists yet
+  blockNumber BigInt?
+
+  tokenAmount Float?
+  usdValue    Float?
+
+  expectedPrice Float?
+  actualPrice   Float?
+
+  slippagePercent    Float?
+  priceImpactPercent Float?
+
+  gasUsed       Float?
+  gasCostNative Float?
+  gasCostUsd    Float?
+
+  provider String? // "paper" in this build
+
+  submittedAt DateTime?
+  confirmedAt DateTime?
+
+  rawQuote   Json?
+  rawReceipt Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([tradeId])
+}
+
+model PositionSnapshot {
+  id      String @id @default(cuid())
+  tradeId String
+  trade   Trade  @relation(fields: [tradeId], references: [id])
+
+  priceUsd     Float?
+  marketCapUsd Float?
+  liquidityUsd Float?
+
+  tokenAmountRemaining Float?
+
+  unrealizedPnlUsd     Float?
+  unrealizedPnlPercent Float?
+
+  maxFavorablePercent Float?
+  maxAdversePercent   Float?
+
+  volume5m       Float?
+  buySellRatio5m Float?
+
+  riskScore      Float?
+  technicalState String?
+
+  capturedAt DateTime @default(now())
+
+  @@index([tradeId, capturedAt])
+}
+
+// "Every important decision must create one of these records" — the audit
+// trail that makes every BUY/WAIT/SKIP/SELL reconstructable later: what data
+// existed, what the AI said, what deterministic rules passed/failed, why.
+model TradeDecisionSnapshot {
+  id String @id @default(cuid())
+
+  candidateId String?
+  candidate   TradeCandidate? @relation(fields: [candidateId], references: [id])
+  tradeId     String?
+  trade       Trade?          @relation(fields: [tradeId], references: [id])
+
+  decision TradeDecision
+  stage    String // e.g. "planning" | "entry_revalidation" | "position_monitor" | "exit_evaluation"
+
+  strategyVersionId String
+
+  marketState     Json
+  projectState    Json
+  technicalState  Json
+  portfolioState  Json
+
+  modelName    String?
+  modelVersion String?
+  promptVersion String?
+
+  aiAnalysis         Json?
+  deterministicRules Json
+  finalReasons       Json
+
+  createdAt DateTime @default(now())
+
+  @@index([candidateId])
+  @@index([tradeId])
+}
+
+model ExitSignal {
+  id      String @id @default(cuid())
+  tradeId String
+  trade   Trade  @relation(fields: [tradeId], references: [id])
+
+  type     String // RISK_EXIT | INVALIDATION_EXIT | PARTIAL_PROFIT | PROFIT_TARGET | TRAILING_EXIT | TIME_EXIT | MANUAL_EXIT | EMERGENCY_EXIT
+  severity String // INFO | WARNING | CRITICAL
+
+  triggered Boolean
+  evidence  Json
+
+  createdAt DateTime @default(now())
+
+  @@index([tradeId])
+}
+
+model TradePostmortem {
+  id      String @id @default(cuid())
+  tradeId String @unique
+  trade   Trade  @relation(fields: [tradeId], references: [id])
+
+  result String // WIN | LOSS | BREAKEVEN
+
+  entryQuality Float?
+  exitQuality  Float?
+
+  realizedMultiple Float?
+  mfeMultiple      Float?
+  maePercent       Float?
+
+  timeToPeakMinutes Int?
+  holdingMinutes    Int?
+
+  whatWorked        Json
+  whatFailed        Json
+  missedOpportunity Json?
+  lessons           Json?
+
+  aiSummary String?
+
+  createdAt DateTime @default(now())
+}
+
+// Tracked for EVERY qualified candidate, traded or not — a candidate rejected
+// at a mediocre score that later 10x'd is exactly as valuable to the learning
+// dataset as a traded winner. This is what §61/§62 of the PRD call the core of
+// the learning dataset.
+model CandidateOutcome {
+  id          String         @id @default(cuid())
+  candidateId String         @unique
+  candidate   TradeCandidate @relation(fields: [candidateId], references: [id])
+
+  traded Boolean @default(false)
+
+  marketCapAtDetection Float?
+  marketCapAtPlan      Float?
+
+  maxMarketCap15m Float?
+  maxMarketCap1h  Float?
+  maxMarketCap6h  Float?
+  maxMarketCap24h Float?
+  maxMarketCap48h Float?
+
+  minMarketCap15m Float?
+  minMarketCap1h  Float?
+  minMarketCap6h  Float?
+  minMarketCap24h Float?
+  minMarketCap48h Float?
+
+  maxMultiple24h Float?
+  maxMultiple48h Float?
+  maxDrawdown24h Float?
+
+  hit125x Boolean?
+  hit150x Boolean?
+  hit200x Boolean?
+  hit250x Boolean?
+
+  timeTo150xMinutes Int?
+  timeTo200xMinutes Int?
+  timeTo250xMinutes Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Every trade/plan/decision references a strategyVersionId — rules never
+// change silently. Promotion is DRAFT -> BACKTEST -> SHADOW -> PRODUCTION,
+// never automatic (see src/trading/strategy.ts).
+model StrategyVersion {
+  id String @id @default(cuid())
+
+  name    String
+  version String
+
+  status StrategyStatus @default(DRAFT)
+
+  configuration  Json
+  scoringWeights Json
+  entryRules     Json
+  sizingRules    Json
+  exitRules      Json
+
+  parentVersionId String?
+
+  createdAt  DateTime  @default(now())
+  promotedAt DateTime?
+
+  tradePlans TradePlan[]
+  trades     Trade[]
+
+  @@unique([name, version])
+}
+
+// Simulated portfolio state (PAPER/SHADOW) — there is no real wallet to
+// reconcile against in this build; this is purely ledger-derived accounting.
+model PortfolioSnapshot {
+  id String @id @default(cuid())
+
+  walletAddress String // "paper" in this build
+
+  cashValueUsd         Float?
+  openPositionValueUsd Float?
+  totalEquityUsd       Float?
+
+  realizedPnlUsd   Float?
+  unrealizedPnlUsd Float?
+
+  reserveUsd    Float?
+  deployableUsd Float?
+
+  capturedAt DateTime @default(now())
+
+  @@index([capturedAt])
+}
+
+model LedgerEntry {
+  id String @id @default(cuid())
+
+  type LedgerEntryType
+
+  tradeId     String?
+  trade       Trade?  @relation(fields: [tradeId], references: [id])
+  executionId String?
+
+  amountUsd    Float?
+  amountNative Float?
+
+  txHash String?
+  notes  String?
+
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([tradeId])
+  @@index([occurredAt])
+}
+
+model PortfolioMilestone {
+  id String @id @default(cuid())
+
+  targetUsd Float
+  reached   Boolean @default(false)
+
+  reachedAt     DateTime?
+  equityAtReach Float?
+
+  notificationSent Boolean @default(false)
+
+  createdAt DateTime @default(now())
+}
+
+// §69/§70 — replays REAL historical Trade/PositionSnapshot data (never
+// synthetic data, never future information relative to each simulated
+// decision point) under a candidate strategy configuration to estimate what
+// would have happened with different sizing/exit rules. Results are
+// recommendations for a future StrategyVersion, never applied automatically.
+model BacktestRun {
+  id String @id @default(cuid())
+
+  strategyVersionId String? // the config actually tested, if it came from a saved version
+  configuration     Json // the sizing/exit rules actually tested (inline override or copied from a version)
+
+  fromDate DateTime
+  toDate   DateTime
+
+  totalTrades      Int
+  winRate          Float?
+  averageReturn    Float?
+  medianReturn     Float?
+  maxDrawdown      Float?
+  profitFactor     Float?
+  expectancy       Float?
+  avgHoldingMinutes Float?
+  hit2xRate        Float?
+  hit25xRate       Float?
+  avgMfePercent    Float?
+  avgMaePercent    Float?
+
+  tradesReplayed Json // per-trade detail: original vs simulated exit, for audit
+  notes          String?
+
+  createdAt DateTime @default(now())
+}
+
+// §65/§66 — only ever a recommendation surface. Never referenced by
+// planning.ts/riskEngine.ts; a human decides whether a model's output ever
+// informs a new StrategyVersion.
+model MLModelVersion {
+  id String @id @default(cuid())
+
+  name          String
+  targetLabel   String // e.g. "hit150x"
+  sampleSize    Int
+  dataTier      String // ANALYTICS_ONLY | EXPLORATORY | VALIDATED | STRONG — per §66 thresholds
+
+  featureNames  Json
+  coefficients  Json? // null while dataTier is ANALYTICS_ONLY (correlations only, no trained model)
+  correlations  Json? // feature -> Pearson correlation with the target label
+  trainAccuracy Float?
+
+  trainedAt DateTime @default(now())
 }

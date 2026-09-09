@@ -1,7 +1,7 @@
 import { db } from "../db";
 import { config } from "../config";
 import { logger } from "../logger";
-import { researchMarket, formatMarketForPrompt } from "../research/market";
+import { captureMarketSnapshot, formatMarketForPrompt } from "../research/market";
 import { researchWebsite, formatWebsiteResultForPrompt, type WebsiteResearchResult } from "../research/website";
 import { researchOnchain, formatOnchainResultForPrompt, type OnchainResearchResult } from "../research/onchain";
 import { callStructured } from "../ai/provider";
@@ -79,7 +79,7 @@ export async function researchToken(tokenId: string): Promise<void> {
   const profile = (token.rawProfile as unknown as DiscoveredTokenProfile) ?? null;
 
   const [marketSettled, onchainSettled] = await Promise.allSettled([
-    researchMarket(token.chain, token.address),
+    captureMarketSnapshot(tokenId, token.chain, token.address),
     researchOnchain(token.address),
   ]);
   const market = marketSettled.status === "fulfilled" ? marketSettled.value : { pairs: [] };
@@ -87,27 +87,6 @@ export async function researchToken(tokenId: string): Promise<void> {
 
   const websiteUrl = pickWebsiteUrl(profile?.links ?? [], market.primaryPair?.websites ?? []);
   const website = await researchWebsite(websiteUrl).catch(() => UNAVAILABLE_WEBSITE);
-
-  if (market.primaryPair) {
-    await db.marketSnapshot.create({
-      data: {
-        tokenId,
-        priceUsd: market.primaryPair.priceUsd,
-        marketCapUsd: market.primaryPair.marketCapUsd,
-        fdvUsd: market.primaryPair.fdvUsd,
-        liquidityUsd: market.primaryPair.liquidityUsd,
-        volume5m: market.primaryPair.volume5m,
-        volume1h: market.primaryPair.volume1h,
-        volume6h: market.primaryPair.volume6h,
-        volume24h: market.primaryPair.volume24h,
-        buys5m: market.primaryPair.buys5m,
-        sells5m: market.primaryPair.sells5m,
-        buys1h: market.primaryPair.buys1h,
-        sells1h: market.primaryPair.sells1h,
-        pairCreatedAt: market.primaryPair.pairCreatedAt,
-      },
-    });
-  }
 
   const linkList = buildLinksList(profile, website, market.primaryPair?.url);
   const linksText = linkList.map((l) => `${l.label}: ${l.url}`).join("\n") || "No links found.";
@@ -127,7 +106,9 @@ export async function researchToken(tokenId: string): Promise<void> {
       schema: ResearchSynthesisSchema,
       jsonSchema: RESEARCH_SYNTHESIS_JSON_SCHEMA,
       toolName: "submit_research_synthesis",
-      maxTokens: 2500,
+      // Thinking tokens share this budget with the actual function-call
+      // output, so this needs headroom beyond just the JSON answer's size.
+      maxTokens: 6000,
     });
   } catch (err) {
     logger.error({ tokenId, err: String(err) }, "research synthesis AI call failed");

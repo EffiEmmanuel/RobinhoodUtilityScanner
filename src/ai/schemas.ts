@@ -11,10 +11,11 @@ export const VisualClassificationSchema = z.object({
 });
 export type VisualClassification = z.infer<typeof VisualClassificationSchema>;
 
-// Hand-written JSON Schema companion for the Claude tool call (see ai/provider.ts).
-// zod-to-json-schema hits a TS type-instantiation-depth wall with this zod/TS
-// combo, and there are only two schemas in this app, so keeping both in sync
-// by hand is simpler than fighting the generic inference.
+// Hand-written JSON Schema companion for the Gemini function-call tool (see
+// ai/provider.ts) — passed via `parametersJsonSchema`, which accepts standard
+// JSON Schema directly. zod-to-json-schema hits a TS type-instantiation-depth
+// wall with this zod/TS combo, and there are only two schemas in this app, so
+// keeping both in sync by hand is simpler than fighting the generic inference.
 export const VISUAL_CLASSIFICATION_JSON_SCHEMA = {
   type: "object",
   properties: {

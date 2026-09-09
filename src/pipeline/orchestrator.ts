@@ -2,6 +2,7 @@ import { db } from "../db";
 import { config } from "../config";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
+import { retryAsync } from "../util/retry";
 import { runDiscoveryPoll } from "./discover";
 import { classifyToken } from "./classify";
 import { researchToken } from "./research";
@@ -108,7 +109,8 @@ async function discoveryLoop(signal: { stopped: boolean }): Promise<void> {
 }
 
 export async function startOrchestrator(): Promise<() => void> {
-  await recoverStuckTokens();
+  // The first DB call of the process, most likely to hit a cold Neon compute.
+  await retryAsync("recoverStuckTokens", recoverStuckTokens);
 
   const signal = { stopped: false };
   health.running = true;

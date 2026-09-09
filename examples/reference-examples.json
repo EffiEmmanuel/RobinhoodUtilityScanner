@@ -1,24 +1,152 @@
 [
   {
     "category": "WINNER_UTILITY",
-    "name": "Example: a project with a working product before its token launched",
-    "notes": "Replace these seed entries with real Robinhood Chain examples you've observed. Winners: had a real product/repo/docs predating the token, technical branding, credible team presence.",
-    "peakMultiple": 8.4
+    "name": "Kerf",
+    "symbol": "KERF",
+    "contract": "0x384c3f978950a98523529A205163Bf63a69E8Dd5",
+    "entryMcap": 125000,
+    "liquidityAtEntry": 73000,
+    "notes": "Fintech-style branding ('Liquidity that trades & grows', kerf.finance), Website+Twitter present. 13h old at capture, +1052% 24h, healthy liquidity/mcap ratio (~0.12). On-chain: no mint/pause/blacklist/fee-control selectors found, no owner() function at all (contract has no admin backdoor to renounce)."
+  },
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Route",
+    "symbol": "ROUTE",
+    "contract": "0x4A72B9702f991b790788f8AFA9e7112541f4E8f8",
+    "entryMcap": 7200000,
+    "liquidityAtEntry": 247000,
+    "notes": "Clean minimal wordmark logo, Website+Twitter present. 14h old at capture, +13,708% 24h, six-figure liquidity. On-chain clean (no mint/pause/blacklist, no owner())."
+  },
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Phera",
+    "symbol": "PHERA",
+    "contract": "0x9D4A92aA4Cd18C75316070bf60c34de1CAB99999",
+    "entryMcap": 65000,
+    "liquidityAtEntry": 24000,
+    "notes": "Bold neon gaming/tech wordmark, liquidity shown as locked in the UI, Website+Twitter+Telegram present. IMPORTANT CALIBRATION NOTE: was actually down -35.81% 24h at the moment of capture despite being labeled a win — a 'win' label does not mean the token was up at every point you might see it; don't treat a single negative 24h reading as disqualifying on its own. On-chain clean; 2 much-smaller same-named clone tokens exist but the real one is clearly the dominant pool by size."
+  },
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Agent Sora",
+    "symbol": "AGENTSORA",
+    "contract": "0x84131db02C288F3e5A1c581FAeC1A38Fd83268ba",
+    "entryMcap": 135000,
+    "liquidityAtEntry": 70000,
+    "notes": "Anime-character AI-agent branding — visually meme-adjacent (character art, bold color) but thematically an AI-agent narrative, not a joke name. Heavily boosted (#3 rank, 500 boosts), only 1h old at capture, +1011% 24h. CALIBRATION NOTE: on-chain re-check minutes apart showed market cap swinging wildly ($14.5K to $122K to $101K to $18K) purely from thin-pool price impact — extreme volatility can coexist with a 'win' label; don't read a single snapshot's mcap as stable. On-chain contract itself clean (no mint/pause/blacklist)."
+  },
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Port",
+    "symbol": "PORT",
+    "contract": "0xafa57C4c5a72d36530c8e816ad6E9a5947941536",
+    "entryMcap": 70000,
+    "liquidityAtEntry": 24000,
+    "notes": "One of the few examples with an actual visible product screenshot as its header image (tryport.net mail/envelope UI mockup), not just a logo — real evidence of a built product rather than a claim. IMPORTANT CALIBRATION NOTE: was down -92.67% 24h at the moment of capture despite the win label — likely categorized as a win based on the visible real product, independent of price action at that moment. On-chain clean; a second unrelated same-named 'Port' token also exists on-chain (small, likely coincidental reuse of a common word rather than a targeted clone)."
+  },
+  {
+    "category": "WINNER_UTILITY",
+    "name": "Assay",
+    "symbol": "ASSAY",
+    "contract": "0xE0397a719CFc320efE22628ceb0F19f65e7FF091",
+    "entryMcap": 243000,
+    "liquidityAtEntry": 54000,
+    "notes": "Abstract chart-line icon (thematically fits an analysis/'assay' product name), Website+Twitter present. 35m old at capture, +570% 24h, one of the healthier liquidity/mcap ratios in this whole set (~0.15-0.45 depending on snapshot). On-chain clean; smaller same-named tokens exist elsewhere (likely coincidence, not a targeted clone of this specific pool)."
   },
   {
     "category": "LOSER_UTILITY",
-    "name": "Example: a utility-branded project that never shipped anything",
-    "notes": "Looked professional (clean logo, buzzword-heavy site) but had no working product, generic docs, and the team was anonymous with no verifiable history.",
-    "peakMultiple": 0.3
+    "name": "Scarce",
+    "contract": "0xE890C08EC0813Fb90823c2f6c0626d6b7fEaDe83",
+    "entryMcap": 31000,
+    "liquidityAtEntry": 20000,
+    "notes": "No website link at capture (Twitter only) — weak legitimacy signal for a 1h-old token. VERIFIED ON-CHAIN: at least 5 different 'Scarce'-named tokens were deployed on Robinhood Chain within the same ~17-minute window the same day — a same-day copycat/name-squatting cluster, not a single project with a rocky chart. Negative across all timeframes at capture. Contract itself is clean (no mint/pause/blacklist) — the failure mode here is clone confusion + weak legitimacy signals, not a malicious contract."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "Plinth",
+    "symbol": "PLINTH",
+    "contract": "0x34bD73BAF68B269232F2C45AD5B8C976FAf25731",
+    "entryMcap": 3700,
+    "liquidityAtEntry": 5600,
+    "notes": "STRONGEST 'looked great, still failed' example in this set: polished custom artwork and copy ('THE FLOOR ONLY GOES UP', podium imagery) — genuinely professional-looking branding, arguably the best-produced visual of any token in this whole reference set. Still -92.79% 24h. VERIFIED ON-CHAIN: at least 4 other 'Plinth'-named tokens exist, INCLUDING one using the homoglyph symbol 'PLlNTH' (lowercase L substituted for capital I) — a textbook impersonation/typosquat trick. Liquidity ($5.6K) exceeded market cap ($3.7K) at capture — an inverted ratio that usually means most of the float has already been sold into the pool. Contract itself clean (no mint/pause/blacklist): professional branding is not evidence of legitimacy."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "homopad",
+    "symbol": "HOMOPAD",
+    "contract": "0xD8Ed36FD63d1879E4c8019AD7441d1d95cd1C3C1",
+    "entryMcap": 2900,
+    "liquidityAtEntry": 5000,
+    "notes": "Clean minimal typographic branding, generic short name. Liquidity ($5.0K) exceeded market cap ($2.9K) at capture. Zero trading activity across all timeframes at capture, and re-checking the pool over a week later showed it still sitting at essentially the same tiny size — a stalled/abandoned pool with no organic demand ever materializing, not an active rug so much as a project nobody bought into. Contract clean on-chain."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "K WHEN",
+    "symbol": "KWHEN",
+    "contract": "0x539f46DA15DA03B54B81D8aa7AE3f945a1c70827",
+    "entryMcap": 4400,
+    "liquidityAtEntry": 6100,
+    "notes": "STRONGEST 'narrative alone isn't enough' example in this set: genuinely plausible utility copy ('Program your wallet. Non-custodial wallet automation.' with concrete feature tags — Timed Transfer, Recurring Transfer, Auto Split) that reads like a real product pitch, not buzzword spam. Failed anyway: liquidity ($6.1K) exceeded market cap ($4.4K), dead activity across all timeframes, -30.91% 24h. Contract clean on-chain (no mint/pause/blacklist) — this is a case where the utility narrative would score well on believability alone, but market execution (liquidity, actual demand) still failed."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "Slot",
+    "contract": "0x2829cCBad8310E3DDEe5A214dACe35f0a9Dbfeb2",
+    "entryMcap": 10000,
+    "liquidityAtEntry": 10000,
+    "notes": "Highly specific, technical infra pitch ('A sovereign EVM chain. One block every second.', stated Chain ID 4242, website slot.io) — reads as a legitimate L2/appchain narrative, more specific and verifiable-sounding than most tokens seen on this chain. Liquidity, market cap and FDV were all ~$10.1K at capture AND still ~$10.1K when re-checked later — the pool never moved beyond its seed liquidity at all; zero organic buy/sell volume ever materialized. Lesson: a specific, technically-literate pitch can still attract zero real demand. Contract clean on-chain."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "RH-VRF",
+    "symbol": "RHVRF",
+    "contract": "0xb8276B1ab93474C8675e5c22Aad529D62c6c4cd0",
+    "entryMcap": 4800,
+    "liquidityAtEntry": 6400,
+    "notes": "CLEAREST VERIFIED LIQUIDITY-DRAIN EXAMPLE in this set. Plausible crypto-infra narrative ('Verifiable randomness · Five of nine' — VRF is a real cryptographic primitive). On-chain re-checks taken minutes apart shortly after launch showed pool liquidity collapsing from $7,252 to $5.93 to $0.57 while market cap swung wildly ($6K to $58K to $17K) — a clear signature of liquidity being withdrawn, not organic trading. -90.51% 24h at capture. The token contract itself has no mint/pause/blacklist function — the risk here was liquidity-provider behavior (pulling the pool), not a malicious token contract, which is exactly the kind of thing a pure contract-bytecode check will never catch on its own."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "HEIST",
+    "contract": "0x08A6F1d7793167C7207900361Ff1E4378038daB2",
+    "entryMcap": 18000,
+    "liquidityAtEntry": 12000,
+    "notes": "Clean logo, only a website link at capture (no Twitter). VERIFIED ON-CHAIN: at least 4 other 'Heist'/'HEIST'-named tokens exist on Robinhood Chain, including one much older, larger, unrelated project (~$527K mcap from over a month earlier) and 2-3 same-day small clones — a popular/generic name gets reused by unrelated launches, making it genuinely hard for a buyer to know which 'Heist' they're looking at. -64.67% 24h at capture. Contract clean on-chain."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "Flash AI",
+    "symbol": "FLASH",
+    "contract": "0x771f960027581edc3607A437Eaaa06f483F14224",
+    "entryMcap": 3300,
+    "liquidityAtEntry": 3300,
+    "notes": "MOST SOPHISTICATED PITCH IN THE ENTIRE SET, and it still failed: 'The Internet of Agents. Discovery, payment, and verifiable settlement — in one call.' explicitly citing the real x402 agentic-payments protocol standard, USDC, and 'Open source, MIT'. VERIFIED ON-CHAIN: 3 near-identical 'Flash AI'/FLASH tokens were deployed within the same 7-minute window the same day — near-simultaneous copycat launches racing each other for the same name. -78.29% in just 5 minutes at capture. Contract itself clean on-chain (no mint/pause/blacklist). This is the strongest evidence in the whole set that a highly technical, specifically-named, plausible-sounding infra pitch is not proof of legitimacy."
+  },
+  {
+    "category": "LOSER_UTILITY",
+    "name": "Vault",
+    "symbol": "VAULT",
+    "contract": "0x5D659142cD92A4Dd69DfEbcB1c79287aaEa673cc",
+    "entryMcap": 7700,
+    "liquidityAtEntry": 6800,
+    "notes": "Generic one-word name with a generic stock-style abstract water/bubble header image — no distinctive branding effort visible at all. Useful direct contrast against K WHEN / Slot / Flash AI in this set, which all put in real narrative effort and still failed just as hard — low-effort branding and high-effort branding both failed here, so branding effort alone isn't the differentiator either. Multiple unrelated tokens share similar 'Vault'-ish names on this chain ('Vault Rooms', 'PonsVault'), adding generic-name confusion on top."
   },
   {
     "category": "MEME",
-    "name": "Example: an obvious joke/meme token",
-    "notes": "Name and icon are clearly meme/cultural reference, no claimed utility, description is a joke."
+    "name": "Ascii Pons",
+    "symbol": "ASCIIPONS",
+    "contract": "0x4413dF9A702D1998Abb64b8055cDcC56e81d719E",
+    "entryMcap": 11000,
+    "liquidityAtEntry": 8900,
+    "notes": "ASCII-art pixel-character logo with a 'media/asciipons.txt' tagline — a joke/novelty visual style, leaning meme-adjacent even though the name itself isn't an explicit joke. Good calibration example: visual style alone (retro ASCII/glitch art, novelty typography) can be a real signal of lower quality/meme intent even when the name doesn't scream 'meme'."
   },
   {
-    "category": "SCAM",
-    "name": "Example: a project impersonating a known brand",
-    "notes": "Website/branding copied an existing legitimate project almost exactly; contract address did not match the real project's official links."
+    "category": "LOSER_UTILITY",
+    "name": "Vector Protocol",
+    "symbol": "VECTOR",
+    "contract": "0x6E2D681Fec058BfC754faC6a6237069174B7D97b",
+    "entryMcap": 80000,
+    "liquidityAtEntry": 29000,
+    "notes": "Plausible security/privacy narrative ('Distributed decryption · All nodes contributing'). VERIFIED PUMP-AND-DUMP: capture showed +2,293% 24h alongside a simultaneous -82.76% crash in the preceding 5 minutes; re-checking later showed market cap had fallen all the way back to ~$3.4K, essentially round-tripping back to near its starting size right after the spike. Lesson: a huge 24h percentage gain on a chart can coexist with, and immediately precede, a near-total collapse — momentum alone (even triple-digit-percent momentum) is not a legitimacy signal."
   }
 ]

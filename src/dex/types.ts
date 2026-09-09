@@ -16,6 +16,7 @@ export interface MarketPair {
   pairAddress: string;
   url: string;
   priceUsd?: number;
+  priceNative?: number; // price denominated in the quote token (ETH on Robinhood Chain) — used to convert USD position sizes into wei for live execution
   marketCapUsd?: number;
   fdvUsd?: number;
   liquidityUsd?: number;

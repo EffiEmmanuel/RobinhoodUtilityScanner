@@ -1,6 +1,7 @@
 import { fetchMarketForToken } from "../dex/client";
 import type { MarketSummary } from "../dex/types";
 import { logger } from "../logger";
+import { db } from "../db";
 
 export async function researchMarket(chain: string, address: string): Promise<MarketSummary> {
   try {
@@ -9,6 +10,39 @@ export async function researchMarket(chain: string, address: string): Promise<Ma
     logger.warn({ chain, address, err: String(err) }, "market research failed");
     return { pairs: [] };
   }
+}
+
+/**
+ * Fetches current market data and persists a MarketSnapshot row. Used both by
+ * the one-shot research run and by the trading extension's repeated polling
+ * of active trade candidates (see src/trading/marketAnalysis.ts) — the latter
+ * is what builds up the price/volume history technical indicators need,
+ * since DexScreener's public API has no OHLCV/candles endpoint.
+ */
+export async function captureMarketSnapshot(tokenId: string, chain: string, address: string): Promise<MarketSummary> {
+  const market = await researchMarket(chain, address);
+  const p = market.primaryPair;
+  if (p) {
+    await db.marketSnapshot.create({
+      data: {
+        tokenId,
+        priceUsd: p.priceUsd,
+        marketCapUsd: p.marketCapUsd,
+        fdvUsd: p.fdvUsd,
+        liquidityUsd: p.liquidityUsd,
+        volume5m: p.volume5m,
+        volume1h: p.volume1h,
+        volume6h: p.volume6h,
+        volume24h: p.volume24h,
+        buys5m: p.buys5m,
+        sells5m: p.sells5m,
+        buys1h: p.buys1h,
+        sells1h: p.sells1h,
+        pairCreatedAt: p.pairCreatedAt,
+      },
+    });
+  }
+  return market;
 }
 
 export function formatMarketForPrompt(summary: MarketSummary): string {
