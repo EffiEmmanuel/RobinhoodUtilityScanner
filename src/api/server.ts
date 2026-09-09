@@ -20,6 +20,19 @@ export function buildServer() {
   const app = Fastify({ logger: false });
 
   app.addHook("onRequest", async (req, reply) => {
+    // Read-only data, no secrets ever returned here — CORS is open so the
+    // browser-based monitoring dashboard can poll this from any origin.
+    reply.header("Access-Control-Allow-Origin", "*");
+    reply.header("Access-Control-Allow-Headers", "x-api-key, content-type");
+    // Chrome's Private Network Access policy requires this explicit opt-in
+    // for a public HTTPS page (the dashboard, served from claude.ai) to reach
+    // a loopback/private address like this local server — without it, the
+    // preflight is blocked even though Access-Control-Allow-Origin is set.
+    reply.header("Access-Control-Allow-Private-Network", "true");
+    if (req.method === "OPTIONS") {
+      reply.code(204).send();
+      return;
+    }
     if (!config.apiKey) return; // no auth configured — fine for local/VPS-behind-firewall use
     if (req.headers["x-api-key"] !== config.apiKey) {
       reply.code(401).send({ error: "unauthorized" });

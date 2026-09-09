@@ -21,7 +21,11 @@ const basePrisma = new PrismaClient({
 // centrally, is far more robust than adding retry logic at every call site —
 // every `db.*` call anywhere in the app gets this for free.
 const RETRYABLE_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "EPIPE", "P1001", "P1008", "P1017", "P2024"]);
-const RETRY_BACKOFF_MS = [0, 500, 2000];
+// Matches util/retry.ts's own cold-start-aware backoff — a Neon wake-from-
+// suspend has been observed taking up to ~76s, and the old [0,500,2000] budget
+// here (2.5s total) gave up long before that, surfacing as spurious tick
+// failures in the position monitor / orchestrator loops instead of recovering.
+const RETRY_BACKOFF_MS = [0, 2000, 5000, 15000, 30000];
 
 function isRetryableDbError(err: unknown): boolean {
   const code = (err as { code?: string })?.code;
