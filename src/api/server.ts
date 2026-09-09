@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import Fastify from "fastify";
 import { db } from "../db";
 import { config } from "../config";
@@ -6,15 +8,18 @@ import { health as pollerHealth } from "../pipeline/orchestrator";
 import { registerTradingRoutes } from "../trading/api";
 import { TokenStatus } from "../generated/prisma";
 
+// Read once at startup — served as a static page, not templated.
+const dashboardHtml = readFileSync(join(__dirname, "dashboard.html"), "utf-8");
+
 function parseTokenStatus(value: string | undefined): TokenStatus | undefined {
   if (value && (Object.values(TokenStatus) as string[]).includes(value)) return value as TokenStatus;
   return undefined;
 }
 
 /**
- * Minimal read-only admin surface (§19/§28). Deliberately not a dashboard —
- * just enough to inspect what the agent is doing without opening the DB
- * directly. Query Postgres (or `yarn db:studio`) for anything deeper.
+ * Read-only admin/data API (§19/§28), plus a static monitoring dashboard at
+ * /dashboard served from the same origin — avoids the CORS/CSP problems of
+ * hosting the dashboard anywhere else and talking to this API cross-origin.
  */
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -33,10 +38,17 @@ export function buildServer() {
       reply.code(204).send();
       return;
     }
+    // Static page and infra health checks (Railway, uptime monitors) stay
+    // key-free — neither returns anything sensitive.
+    if (req.url.startsWith("/dashboard") || req.url.startsWith("/health")) return;
     if (!config.apiKey) return; // no auth configured — fine for local/VPS-behind-firewall use
     if (req.headers["x-api-key"] !== config.apiKey) {
       reply.code(401).send({ error: "unauthorized" });
     }
+  });
+
+  app.get("/dashboard", async (_req, reply) => {
+    reply.type("text/html").send(dashboardHtml);
   });
 
   app.get("/health", async () => {
