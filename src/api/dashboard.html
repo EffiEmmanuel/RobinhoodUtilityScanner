@@ -2139,6 +2139,53 @@
             sections.push('<div class="modal-section"><p class="modal-note">' + note + "</p></div>");
           }
 
+          // Token.status (above) is the research pipeline's own verdict.
+          // TradeCandidate.status is a separate, stricter gate specifically
+          // for risking real capital — a token can be WATCHLISTED (research
+          // liked it) while its trade candidate is REJECTED (didn't clear
+          // MIN_TRADE_QUALITY_SCORE etc). Shown as its own section so the two
+          // never read as a contradiction.
+          var candidate = (token.tradeCandidates && token.tradeCandidates[0]) || null;
+          if (candidate) {
+            var candDecision = (candidate.decisions && candidate.decisions[0]) || null;
+            var eligibilityNote;
+            if (candidate.status === "REJECTED") {
+              eligibilityNote =
+                "Did not clear the bar to actually risk capital on this token. This is a separate, stricter check than the research status above, and — unless the pipeline changes — it is not retried automatically once a candidate exists.";
+            } else if (candidate.status === "TRADED") {
+              eligibilityNote = "This token was actually traded.";
+            } else if (
+              candidate.status === "QUALIFIED" ||
+              candidate.status === "PLANNING" ||
+              candidate.status === "WAITING"
+            ) {
+              eligibilityNote = "Cleared the trading gate and is being considered for an actual trade.";
+            } else {
+              eligibilityNote = "";
+            }
+            sections.push(
+              '<div class="modal-section"><h4>Trade eligibility</h4>' +
+                '<span class="badge ' +
+                esc(candidate.status) +
+                '" style="display:inline-block;margin-bottom:8px;">' +
+                esc(candidate.status) +
+                "</span>" +
+                (eligibilityNote ? '<p class="modal-note">' + eligibilityNote + "</p>" : "") +
+                '<div class="stat-grid">' +
+                statChip("Quality", candidate.qualityScore) +
+                statChip("Confidence", candidate.researchConfidence) +
+                "</div>" +
+                (candDecision && candDecision.finalReasons
+                  ? listBlock("Why", candDecision.finalReasons)
+                  : "") +
+                "</div>"
+            );
+          } else if (token.status === "WATCHLISTED" || token.status === "ALERTED") {
+            sections.push(
+              '<div class="modal-section"><h4>Trade eligibility</h4><p class="modal-note">No trade candidate has been generated for this token yet.</p></div>'
+            );
+          }
+
           if (snap) {
             sections.push(
               '<div class="modal-section"><h4>Latest market snapshot</h4><div class="stat-grid">' +

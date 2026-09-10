@@ -127,6 +127,18 @@ export function buildServer() {
         researchRuns: { orderBy: { createdAt: "desc" } },
         marketSnapshots: { orderBy: { capturedAt: "desc" }, take: 20 },
         alerts: { orderBy: { sentAt: "desc" } },
+        // Token.status (ALERTED/WATCHLISTED/REJECTED/...) tracks the research
+        // pipeline's own verdict; TradeCandidate.status tracks a separate,
+        // stricter gate (MIN_TRADE_QUALITY_SCORE etc.) specifically for
+        // risking capital — a token can be WATCHLISTED (research liked it)
+        // while its one-and-only TradeCandidate is REJECTED (didn't clear the
+        // trading bar). Included here so the dashboard can show both together
+        // instead of just the token's own status, which reads as a
+        // contradiction without this.
+        tradeCandidates: {
+          orderBy: { createdAt: "desc" },
+          include: { decisions: { where: { stage: "candidate_eligibility" }, orderBy: { createdAt: "desc" }, take: 1 } },
+        },
       },
     });
     if (!token) return reply.code(404).send({ error: "not found" });
