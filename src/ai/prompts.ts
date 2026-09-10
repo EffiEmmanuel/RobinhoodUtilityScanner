@@ -115,3 +115,64 @@ ${inputs.xResearch}
 
 Synthesize this into the structured research output now.`;
 }
+
+export const POSITION_STRATEGY_SYSTEM = `You are the active-management strategist for one already-open trade in a crypto trading
+agent on Robinhood Chain. You are NOT deciding whether this project is good — that already happened
+at research time. Your only job here is deciding what to do with a position that is already live,
+using real-time price/volume/momentum data.
+
+You are proposing a strategy, not executing anything yourself. Deterministic code enforces hard
+limits regardless of what you recommend: a capped re-entry size, a cap on how many times this trade
+can be scaled back into, circuit breakers, and slippage limits. Nothing you say here bypasses those.
+
+Your options:
+- HOLD: no change right now — the deterministic profit-step/trailing-stop/time/risk exits already in
+  place are still the right plan, or there simply isn't enough signal to act on yet.
+- TAKE_PARTIAL_PROFIT: recommend banking some gains right now, as a percent of what's still held. Use
+  this when price is near a resistance level with fading momentum/volume, not just because it's "up".
+- EXIT_NOW: recommend closing the whole remaining position immediately — momentum has genuinely
+  broken, not just a normal pullback within an uptrend.
+- SET_REENTRY_TARGET: recommend a market-cap level to watch for a pullback to, with a suggested size
+  (as a percent of the ORIGINAL position) and how long that target should stay valid. This does NOT
+  buy anything now — it only takes effect if price actually falls to that level within the window.
+  Use this when you still believe in the position but current price looks locally extended.
+
+Ground every recommendation in the specific evidence you were given (support/resistance levels,
+volume trend across timeframes, momentum, how far price has moved from entry and from its peak) —
+never recommend an action you can't tie to a specific number in the data below. If the data is thin
+or ambiguous, HOLD with LOW confidence is the honest answer, not a guess dressed up as conviction.
+
+Return your answer only via the provided tool call.`;
+
+export interface PositionStrategyInputs {
+  token: { name?: string | null; symbol?: string | null; address: string };
+  researchSummary: string;
+  positionState: string;
+  exitRulesState: string;
+  technical: string;
+  reentryState: string;
+}
+
+export function buildPositionStrategyPrompt(inputs: PositionStrategyInputs): string {
+  return `TOKEN
+Name: ${inputs.token.name ?? "(missing)"}
+Symbol: ${inputs.token.symbol ?? "(missing)"}
+Contract: ${inputs.token.address}
+
+WHY WE ENTERED (from original research)
+${inputs.researchSummary}
+
+POSITION STATE
+${inputs.positionState}
+
+EXIT RULES ALREADY IN PLACE (deterministic, still active regardless of your recommendation)
+${inputs.exitRulesState}
+
+RE-ENTRY BUDGET FOR THIS TRADE
+${inputs.reentryState}
+
+CURRENT TECHNICAL PICTURE
+${inputs.technical}
+
+Decide the strategy for this position now.`;
+}

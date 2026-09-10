@@ -380,6 +380,19 @@ model Trade {
 
   exitReason String?
 
+  // Position-scaling (§trading/positionStrategy.ts) — a market-cap level the
+  // AI strategy review recommended buying back into on a pullback, executed
+  // automatically by the deterministic position monitor if/when price
+  // actually reaches it, never by the AI call itself. reentryCount is a hard
+  // cap enforced in code regardless of how many times the AI proposes one.
+  reentryCount             Int       @default(0)
+  pendingReentryTargetMcap Float?
+  pendingReentryUsd        Float?
+  pendingReentryExpiresAt  DateTime?
+  pendingReentryReason     String?
+
+  lastStrategyReviewAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

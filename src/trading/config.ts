@@ -69,8 +69,21 @@ export const tradingConfig = {
 
   // Entry lifecycle.
   defaultEntryPlanTtlMinutes: num("DEFAULT_ENTRY_PLAN_TTL_MINUTES", 360),
-  positionMonitorIntervalSeconds: num("POSITION_MONITOR_INTERVAL_SECONDS", 20),
+  // Tightened from 20s — deliberately not literally 1s: DexScreener's public
+  // API has no confirmed rate-limit headroom for that at 24/7 scale, and this
+  // is still the cheap, free, deterministic layer, not an AI call. Raise or
+  // lower once real behavior against the live API is observed.
+  positionMonitorIntervalSeconds: num("POSITION_MONITOR_INTERVAL_SECONDS", 5),
   pendingEntryMonitorIntervalSeconds: num("PENDING_ENTRY_MONITOR_INTERVAL_SECONDS", 20),
+
+  // Active position management (§trading/positionStrategy.ts) — the AI
+  // reviews an open position's strategy periodically (not on every cheap
+  // monitor tick), proposing partial-profit/exit/re-entry-target decisions
+  // that deterministic code then enforces or executes. Hard caps here bound
+  // it regardless of what the AI recommends.
+  positionStrategyReviewIntervalMinutes: num("POSITION_STRATEGY_REVIEW_INTERVAL_MINUTES", 5),
+  maxReentriesPerTrade: num("MAX_REENTRIES_PER_TRADE", 1),
+  maxReentryPercentOfOriginal: num("MAX_REENTRY_PERCENT_OF_ORIGINAL", 50),
 
   // Slippage / price-impact ceilings, used by the paper fill model (§29/§88)
   // even though nothing is actually routed on-chain in this build.

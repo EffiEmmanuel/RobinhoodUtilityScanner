@@ -96,6 +96,42 @@ export const ResearchSynthesisSchema = z.object({
 });
 export type ResearchSynthesis = z.infer<typeof ResearchSynthesisSchema>;
 
+// §"position_monitor" strategy review (see trading/positionStrategy.ts) — a
+// periodic/triggered check-in on an OPEN trade, not a new research pass. The
+// AI proposes a strategy; deterministic code still enforces hard caps
+// (re-entry size, re-entry count, circuit breakers, slippage) regardless of
+// what's recommended here — this schema is advisory input, not an order.
+export const PositionStrategyActionEnum = z.enum(["HOLD", "TAKE_PARTIAL_PROFIT", "EXIT_NOW", "SET_REENTRY_TARGET"]);
+
+export const PositionStrategySchema = z.object({
+  action: PositionStrategyActionEnum,
+  // Only meaningful when action === "TAKE_PARTIAL_PROFIT".
+  sellPercentOfRemaining: z.number().min(1).max(100).optional(),
+  // Only meaningful when action === "SET_REENTRY_TARGET" — a level to watch
+  // for, not an instruction to buy right now. The deterministic position
+  // monitor executes automatically if/when price actually reaches it.
+  reentryTargetMarketCapUsd: z.number().positive().optional(),
+  reentrySizePercentOfOriginal: z.number().min(1).max(100).optional(),
+  reentryValidForMinutes: z.number().min(5).max(720).optional(),
+  reasoning: z.string(),
+  confidence: z.enum(["LOW", "MEDIUM", "HIGH"]),
+});
+export type PositionStrategyDecision = z.infer<typeof PositionStrategySchema>;
+
+export const POSITION_STRATEGY_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["HOLD", "TAKE_PARTIAL_PROFIT", "EXIT_NOW", "SET_REENTRY_TARGET"] },
+    sellPercentOfRemaining: { type: "number", minimum: 1, maximum: 100 },
+    reentryTargetMarketCapUsd: { type: "number", exclusiveMinimum: 0 },
+    reentrySizePercentOfOriginal: { type: "number", minimum: 1, maximum: 100 },
+    reentryValidForMinutes: { type: "number", minimum: 5, maximum: 720 },
+    reasoning: { type: "string" },
+    confidence: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+  },
+  required: ["action", "reasoning", "confidence"],
+} as const;
+
 export const RESEARCH_SYNTHESIS_JSON_SCHEMA = {
   type: "object",
   properties: {

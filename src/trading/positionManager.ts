@@ -3,7 +3,7 @@ import { logger } from "../logger";
 import { TradeStatus, LedgerEntryType } from "../generated/prisma";
 import type { Trade } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
-import { pollCandidateMarket } from "./marketAnalysis";
+import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis";
 import { validatePosition, validateExit } from "./riskEngine";
 import { executeSellFill, getSellEstimate, isSellable, type FillResult } from "./executionFacade";
 import { recordLedgerEntry, recordPortfolioSnapshot } from "./portfolio";
@@ -11,9 +11,12 @@ import { getActiveStrategyVersion, type ExitRules } from "./strategy";
 import { sendPartialProfitEmail, sendTradeClosedEmail } from "./notifications";
 import { generatePostmortem } from "./postmortem";
 import { checkPortfolioMilestones } from "./milestones";
+import { tradingConfig } from "./config";
+import { shouldRunStrategyReview, runPositionStrategyReview, applyReentryTarget, checkAndExecutePendingReentry } from "./positionStrategy";
+import type { PositionStrategyDecision } from "../ai/schemas";
 
 interface ExitDecision {
-  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT";
+  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
   isEmergency: boolean;
@@ -47,6 +50,13 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
   const pair = market.primaryPair;
 
+  // Deterministic, cheap, runs every tick regardless of the AI review cadence
+  // below: executes a previously AI-proposed re-entry buy only if (and once)
+  // price has actually fallen to that target — the AI never buys directly.
+  await checkAndExecutePendingReentry(trade, token, pair).catch((err) =>
+    logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
+  );
+
   const remainingTokens = await getRemainingTokenAmount(trade);
   if (remainingTokens <= 0) {
     // fully exited via prior partial sells but never explicitly closed — close now
@@ -69,6 +79,11 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       ? (pair.buys5m ?? 0) / Math.max((pair.buys5m ?? 0) + (pair.sells5m ?? 0), 1)
       : undefined;
 
+  // Continuous, free, deterministic technical read — computed every tick
+  // regardless of whether an AI strategy review runs this cycle, so the
+  // stored PositionSnapshot history is always complete for later analysis.
+  const technical = await computeTechnicalFeatures(trade.tokenId, pair);
+
   await db.positionSnapshot.create({
     data: {
       tradeId: trade.id,
@@ -82,10 +97,39 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       maxAdversePercent: newMae,
       volume5m: pair?.volume5m,
       buySellRatio5m,
+      technicalState: JSON.stringify(technical),
     },
   });
 
   const profitStepsTaken = await db.exitSignal.count({ where: { tradeId: trade.id, type: "PROFIT_TARGET" } });
+
+  // Periodic AI strategy review (not every tick) — proposes a partial-profit,
+  // full-exit, or re-entry-target recommendation. Deterministic code below is
+  // what actually executes anything; a HOLD or a review failure just falls
+  // through to the same profit-step/trailing/time exits as before this
+  // feature existed.
+  if (shouldRunStrategyReview(trade)) {
+    let aiDecision: PositionStrategyDecision | null = null;
+    try {
+      aiDecision = await runPositionStrategyReview({
+        trade,
+        token,
+        plan,
+        pair,
+        remainingTokens,
+        currentMultiple,
+        unrealizedPnlPercent,
+        profitStepsTaken,
+      });
+    } catch (err) {
+      logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
+    }
+    if (aiDecision) {
+      const acted = await applyAiStrategyDecision(trade, token.address, pair, remainingTokens, aiDecision);
+      if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
+    }
+  }
+
   const decision = evaluateExits({
     trade,
     plan,
@@ -108,12 +152,57 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   await executeSell(trade, token.address, remainingTokens, decision, pair);
 }
 
+/**
+ * Applies an AI strategy decision that requires action right now. HOLD and
+ * SET_REENTRY_TARGET never sell — SET_REENTRY_TARGET only stores a future
+ * buy trigger (see applyReentryTarget/checkAndExecutePendingReentry).
+ * Returns true only when a sell was actually executed this tick.
+ */
+async function applyAiStrategyDecision(
+  trade: Trade,
+  tokenAddress: string,
+  pair: MarketPair | undefined,
+  remainingTokens: number,
+  decision: PositionStrategyDecision
+): Promise<boolean> {
+  if (decision.action === "SET_REENTRY_TARGET") {
+    await applyReentryTarget(trade, decision);
+    return false;
+  }
+  if (decision.action === "HOLD") return false;
+
+  if (!pair) {
+    logger.warn({ tradeId: trade.id, action: decision.action }, "AI strategy proposed an exit but no market data to fill against — will retry next review");
+    return false;
+  }
+
+  const exitDecision: ExitDecision =
+    decision.action === "EXIT_NOW"
+      ? { type: "AI_STRATEGY_EXIT", sellPercentOfRemaining: 100, reason: `AI strategy: ${decision.reasoning}`, isEmergency: false }
+      : {
+          type: "PARTIAL_PROFIT",
+          sellPercentOfRemaining: Math.min(decision.sellPercentOfRemaining ?? 25, 100),
+          reason: `AI strategy: ${decision.reasoning}`,
+          isEmergency: false,
+        };
+
+  await executeSell(trade, tokenAddress, remainingTokens, exitDecision, pair);
+  return true;
+}
+
+/**
+ * Aggregates every BUY (the original entry plus any re-entries executed by
+ * checkAndExecutePendingReentry) minus every SELL, rather than trusting the
+ * scalar entryTokenAmount alone — that field only ever reflects the original
+ * fill, so it silently under-counts a position once a re-entry buy adds to it.
+ */
 async function getRemainingTokenAmount(trade: Trade): Promise<number> {
-  const sells = await db.tradeExecution.aggregate({
-    where: { tradeId: trade.id, type: "SELL" },
-    _sum: { tokenAmount: true },
-  });
-  return (trade.entryTokenAmount ?? 0) - (sells._sum.tokenAmount ?? 0);
+  const [buys, sells] = await Promise.all([
+    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "BUY" }, _sum: { tokenAmount: true } }),
+    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "SELL" }, _sum: { tokenAmount: true } }),
+  ]);
+  const totalBought = buys._sum.tokenAmount ?? trade.entryTokenAmount ?? 0;
+  return totalBought - (sells._sum.tokenAmount ?? 0);
 }
 
 function evaluateExits(ctx: {
