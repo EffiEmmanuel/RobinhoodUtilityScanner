@@ -1265,14 +1265,116 @@
                 <h2>Candidate Pipeline</h2>
                 <span class="count-chip" id="candidates-count">0</span>
               </div>
+              <div class="search-row" id="candidates-search-row">
+                <input
+                  type="text"
+                  id="candidates-search"
+                  placeholder="Search by name, symbol, or contract address…"
+                  autocomplete="off"
+                />
+                <button
+                  class="search-clear"
+                  id="candidates-search-clear"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  &times;
+                </button>
+              </div>
               <div class="feed" id="candidates-feed"></div>
+              <div class="pager">
+                <button
+                  class="icon-btn"
+                  id="candidates-prev"
+                  title="Previous page"
+                  aria-label="Previous page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M10 3 5 8l5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+                <span id="candidates-page-label">Page 1</span>
+                <button
+                  class="icon-btn"
+                  id="candidates-next"
+                  title="Next page"
+                  aria-label="Next page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M6 3 11 8l-5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
             </div>
             <div class="card">
               <div class="card-head">
                 <h2>Profile Updates</h2>
                 <span class="count-chip" id="profile-updates-count">0</span>
               </div>
+              <div class="search-row" id="profile-updates-search-row">
+                <input
+                  type="text"
+                  id="profile-updates-search"
+                  placeholder="Search by name, symbol, or contract address…"
+                  autocomplete="off"
+                />
+                <button
+                  class="search-clear"
+                  id="profile-updates-search-clear"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  &times;
+                </button>
+              </div>
               <div class="feed" id="profile-updates-feed"></div>
+              <div class="pager">
+                <button
+                  class="icon-btn"
+                  id="profile-updates-prev"
+                  title="Previous page"
+                  aria-label="Previous page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M10 3 5 8l5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+                <span id="profile-updates-page-label">Page 1</span>
+                <button
+                  class="icon-btn"
+                  id="profile-updates-next"
+                  title="Next page"
+                  aria-label="Next page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M6 3 11 8l-5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
             </div>
             <div class="card">
               <div class="card-head">
@@ -1354,6 +1456,14 @@
           activityPageSize: 15,
           activityHasMore: false,
           activitySearch: "",
+          candidatesOffset: 0,
+          candidatesPageSize: 15,
+          candidatesHasMore: false,
+          candidatesSearch: "",
+          profileUpdatesOffset: 0,
+          profileUpdatesPageSize: 15,
+          profileUpdatesHasMore: false,
+          profileUpdatesSearch: "",
         };
 
         var els = {
@@ -1388,8 +1498,20 @@
           closedCount: document.getElementById("closed-count"),
           candidatesFeed: document.getElementById("candidates-feed"),
           candidatesCount: document.getElementById("candidates-count"),
+          candidatesPrev: document.getElementById("candidates-prev"),
+          candidatesNext: document.getElementById("candidates-next"),
+          candidatesPageLabel: document.getElementById("candidates-page-label"),
+          candidatesSearchRow: document.getElementById("candidates-search-row"),
+          candidatesSearch: document.getElementById("candidates-search"),
+          candidatesSearchClear: document.getElementById("candidates-search-clear"),
           profileUpdatesFeed: document.getElementById("profile-updates-feed"),
           profileUpdatesCount: document.getElementById("profile-updates-count"),
+          profileUpdatesPrev: document.getElementById("profile-updates-prev"),
+          profileUpdatesNext: document.getElementById("profile-updates-next"),
+          profileUpdatesPageLabel: document.getElementById("profile-updates-page-label"),
+          profileUpdatesSearchRow: document.getElementById("profile-updates-search-row"),
+          profileUpdatesSearch: document.getElementById("profile-updates-search"),
+          profileUpdatesSearchClear: document.getElementById("profile-updates-search-clear"),
           ledgerFeed: document.getElementById("ledger-feed"),
           ledgerCount: document.getElementById("ledger-count"),
           walletChip: document.getElementById("wallet-chip"),
@@ -1421,6 +1543,27 @@
               maximumFractionDigits: 2,
             })
           );
+        }
+        function fmtEth(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          return (
+            "Ξ" +
+            n.toLocaleString(undefined, {
+              minimumFractionDigits: 4,
+              maximumFractionDigits: 5,
+            })
+          );
+        }
+        // ETH is the volatile native asset here — a bare USD figure implies
+        // more stability/precision than a fluctuating balance actually has.
+        // Shows the real ETH amount first, with the current USD equivalent
+        // (derived from a live on-chain-data rate, not a fixed/stale one) in
+        // brackets — falls back to plain USD if no current rate is available,
+        // never fabricates a rate.
+        function fmtEthWithUsd(usdValue, ethPriceUsd, ethValue) {
+          if (ethPriceUsd === null || ethPriceUsd === undefined || ethPriceUsd <= 0) return fmtUsd(usdValue);
+          var eth = ethValue !== undefined && ethValue !== null ? ethValue : usdValue / ethPriceUsd;
+          return fmtEth(eth) + ' <span style="color:var(--text-muted);font-size:0.75em;">(~' + fmtUsd(usdValue) + ")</span>";
         }
         function fmtPercentSpan(n) {
           if (n === null || n === undefined || isNaN(n)) return "&mdash;";
@@ -1551,9 +1694,25 @@
             fetchJson("/trading/status"),
             fetchJson("/positions"),
             fetchJson("/trades?status=CLOSED&limit=20"),
-            fetchJson("/trade-candidates?limit=15"),
+            fetchJson(
+              "/trade-candidates?limit=" +
+                state.candidatesPageSize +
+                "&offset=" +
+                state.candidatesOffset +
+                (state.candidatesSearch
+                  ? "&q=" + encodeURIComponent(state.candidatesSearch)
+                  : "")
+            ),
             fetchJson("/ledger?limit=12"),
-            fetchJson("/profile-updates?limit=15"),
+            fetchJson(
+              "/profile-updates?limit=" +
+                state.profileUpdatesPageSize +
+                "&offset=" +
+                state.profileUpdatesOffset +
+                (state.profileUpdatesSearch
+                  ? "&q=" + encodeURIComponent(state.profileUpdatesSearch)
+                  : "")
+            ),
             fetchJson(
               "/tokens?limit=" +
                 state.activityPageSize +
@@ -1629,17 +1788,19 @@
             els.cbBanner.hidden = true;
           }
 
-          // portfolio tiles
+          // portfolio tiles — ETH-primary with a live USD equivalent in
+          // brackets (see fmtEthWithUsd) whenever a current ETH/USD rate is
+          // available; falls back to plain USD otherwise.
           var p = s.portfolio || {};
           var tiles = [
-            { label: "Total Equity", value: fmtUsd(p.totalEquityUsd) },
-            { label: "Cash", value: fmtUsd(p.cashUsd) },
-            { label: "Deployed", value: fmtUsd(p.deployedUsd) },
+            { label: "Total Equity", value: fmtEthWithUsd(p.totalEquityUsd, p.ethPriceUsd) },
+            { label: "Cash", value: fmtEthWithUsd(p.cashUsd, p.ethPriceUsd, p.cashEth) },
+            { label: "Deployed", value: fmtEthWithUsd(p.deployedUsd, p.ethPriceUsd) },
             {
               label: "Available to Deploy",
-              value: fmtUsd(p.availableToDeployUsd),
+              value: fmtEthWithUsd(p.availableToDeployUsd, p.ethPriceUsd),
             },
-            { label: "Reserve Target", value: fmtUsd(p.reserveTargetUsd) },
+            { label: "Reserve Target", value: fmtEthWithUsd(p.reserveTargetUsd, p.ethPriceUsd) },
             {
               label: "Open Positions",
               value:
@@ -1684,9 +1845,9 @@
           renderActivity(data.tokens || []);
           renderPositions(data.positions || []);
           renderClosedTrades(data.closedTrades || []);
-          renderCandidates(data.candidates || []);
+          renderCandidates((data.candidates && data.candidates.candidates) || [], (data.candidates && data.candidates.hasMore) || false);
           renderLedger(data.ledger || []);
-          renderProfileUpdates(data.profileUpdates || []);
+          renderProfileUpdates((data.profileUpdates && data.profileUpdates.updates) || [], (data.profileUpdates && data.profileUpdates.hasMore) || false);
 
           els.lastUpdated.textContent = "updated just now";
         }
@@ -1867,11 +2028,26 @@
             .join("");
         }
 
-        function renderCandidates(rows) {
+        function renderCandidates(rows, hasMore) {
           els.candidatesCount.textContent = rows.length;
+
+          state.candidatesHasMore = hasMore;
+          var candPageNum =
+            Math.floor(state.candidatesOffset / state.candidatesPageSize) + 1;
+          els.candidatesPageLabel.textContent = "Page " + candPageNum;
+          els.candidatesPrev.disabled = state.candidatesOffset === 0;
+          els.candidatesNext.disabled = !state.candidatesHasMore;
+
           if (!rows.length) {
-            els.candidatesFeed.innerHTML =
-              '<div class="empty-feed">No candidates qualified yet.</div>';
+            var candEmptyMsg;
+            if (state.candidatesSearch) {
+              candEmptyMsg = 'No candidates match “' + esc(state.candidatesSearch) + '”.';
+            } else if (state.candidatesOffset > 0) {
+              candEmptyMsg = "No more results on this page.";
+            } else {
+              candEmptyMsg = "No candidates qualified yet.";
+            }
+            els.candidatesFeed.innerHTML = '<div class="empty-feed">' + candEmptyMsg + "</div>";
             return;
           }
           els.candidatesFeed.innerHTML = rows
@@ -1909,11 +2085,26 @@
             .join("");
         }
 
-        function renderProfileUpdates(rows) {
+        function renderProfileUpdates(rows, hasMore) {
           els.profileUpdatesCount.textContent = rows.length;
+
+          state.profileUpdatesHasMore = hasMore;
+          var puPageNum =
+            Math.floor(state.profileUpdatesOffset / state.profileUpdatesPageSize) + 1;
+          els.profileUpdatesPageLabel.textContent = "Page " + puPageNum;
+          els.profileUpdatesPrev.disabled = state.profileUpdatesOffset === 0;
+          els.profileUpdatesNext.disabled = !state.profileUpdatesHasMore;
+
           if (!rows.length) {
-            els.profileUpdatesFeed.innerHTML =
-              '<div class="empty-feed">No rejected tokens have gained new profile data yet.</div>';
+            var puEmptyMsg;
+            if (state.profileUpdatesSearch) {
+              puEmptyMsg = 'No profile updates match “' + esc(state.profileUpdatesSearch) + '”.';
+            } else if (state.profileUpdatesOffset > 0) {
+              puEmptyMsg = "No more results on this page.";
+            } else {
+              puEmptyMsg = "No rejected tokens have gained new profile data yet.";
+            }
+            els.profileUpdatesFeed.innerHTML = '<div class="empty-feed">' + puEmptyMsg + "</div>";
             return;
           }
           els.profileUpdatesFeed.innerHTML = rows
@@ -2015,6 +2206,66 @@
           els.activitySearch.value = "";
           applyActivitySearch("");
           els.activitySearch.focus();
+        });
+        els.candidatesPrev.addEventListener("click", function () {
+          if (state.candidatesOffset === 0) return;
+          state.candidatesOffset = Math.max(0, state.candidatesOffset - state.candidatesPageSize);
+          refreshAll();
+        });
+        els.candidatesNext.addEventListener("click", function () {
+          if (!state.candidatesHasMore) return;
+          state.candidatesOffset += state.candidatesPageSize;
+          refreshAll();
+        });
+        var candidatesSearchDebounce;
+        function applyCandidatesSearch(value) {
+          state.candidatesSearch = value.trim();
+          state.candidatesOffset = 0;
+          els.candidatesSearchRow.className = "search-row" + (state.candidatesSearch ? " has-value" : "");
+          refreshAll();
+        }
+        els.candidatesSearch.addEventListener("input", function () {
+          clearTimeout(candidatesSearchDebounce);
+          var value = els.candidatesSearch.value;
+          candidatesSearchDebounce = setTimeout(function () {
+            applyCandidatesSearch(value);
+          }, 300);
+        });
+        els.candidatesSearchClear.addEventListener("click", function () {
+          clearTimeout(candidatesSearchDebounce);
+          els.candidatesSearch.value = "";
+          applyCandidatesSearch("");
+          els.candidatesSearch.focus();
+        });
+        els.profileUpdatesPrev.addEventListener("click", function () {
+          if (state.profileUpdatesOffset === 0) return;
+          state.profileUpdatesOffset = Math.max(0, state.profileUpdatesOffset - state.profileUpdatesPageSize);
+          refreshAll();
+        });
+        els.profileUpdatesNext.addEventListener("click", function () {
+          if (!state.profileUpdatesHasMore) return;
+          state.profileUpdatesOffset += state.profileUpdatesPageSize;
+          refreshAll();
+        });
+        var profileUpdatesSearchDebounce;
+        function applyProfileUpdatesSearch(value) {
+          state.profileUpdatesSearch = value.trim();
+          state.profileUpdatesOffset = 0;
+          els.profileUpdatesSearchRow.className = "search-row" + (state.profileUpdatesSearch ? " has-value" : "");
+          refreshAll();
+        }
+        els.profileUpdatesSearch.addEventListener("input", function () {
+          clearTimeout(profileUpdatesSearchDebounce);
+          var value = els.profileUpdatesSearch.value;
+          profileUpdatesSearchDebounce = setTimeout(function () {
+            applyProfileUpdatesSearch(value);
+          }, 300);
+        });
+        els.profileUpdatesSearchClear.addEventListener("click", function () {
+          clearTimeout(profileUpdatesSearchDebounce);
+          els.profileUpdatesSearch.value = "";
+          applyProfileUpdatesSearch("");
+          els.profileUpdatesSearch.focus();
         });
         els.saveBtn.addEventListener("click", function () {
           var base = els.apiBaseInput.value.trim() || window.location.origin;

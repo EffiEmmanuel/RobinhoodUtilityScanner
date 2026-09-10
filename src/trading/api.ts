@@ -48,13 +48,54 @@ export function registerTradingRoutes(app: FastifyInstance): void {
   });
 
   app.get("/trade-candidates", async (req) => {
-    const { status, limit } = req.query as { status?: string; limit?: string };
-    return db.tradeCandidate.findMany({
-      where: status ? { status: status as never } : undefined,
-      orderBy: { createdAt: "desc" },
-      take: Math.min(Number(limit) || 50, 200),
-      include: { token: true, outcome: true },
-    });
+    const { status, limit, offset, q } = req.query as { status?: string; limit?: string; offset?: string; q?: string };
+    const take = Math.min(Number(limit) || 50, 200);
+    const skip = Math.max(Number(offset) || 0, 0);
+    const search = q?.trim();
+    const searchFilter = search
+      ? search.startsWith("0x")
+        ? { token: { address: { contains: search, mode: "insensitive" as const } } }
+        : {
+            token: {
+              OR: [
+                { name: { contains: search, mode: "insensitive" as const } },
+                { symbol: { contains: search, mode: "insensitive" as const } },
+                { address: { contains: search, mode: "insensitive" as const } },
+              ],
+            },
+          }
+      : {};
+
+    // An explicit status filter behaves as a plain paginated query — the
+    // WAITING-first bucketing below is specifically the "no filter" default
+    // dashboard view, where a candidate actively waiting for an entry
+    // trigger is the single most important thing to spot at a glance and
+    // shouldn't be pushed off-page by pagination.
+    if (status) {
+      return db.tradeCandidate.findMany({
+        where: { status: status as never, ...searchFilter },
+        orderBy: { createdAt: "desc" },
+        take,
+        skip,
+        include: { token: true, outcome: true },
+      });
+    }
+
+    const [waiting, rest] = await Promise.all([
+      db.tradeCandidate.findMany({
+        where: { status: "WAITING" as never, ...searchFilter },
+        orderBy: { createdAt: "desc" },
+        include: { token: true, outcome: true },
+      }),
+      db.tradeCandidate.findMany({
+        where: { status: { not: "WAITING" as never }, ...searchFilter },
+        orderBy: { createdAt: "desc" },
+        take,
+        skip,
+        include: { token: true, outcome: true },
+      }),
+    ]);
+    return { candidates: [...waiting, ...rest], hasMore: rest.length === take };
   });
 
   app.get("/trade-candidates/:id", async (req, reply) => {

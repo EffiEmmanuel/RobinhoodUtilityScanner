@@ -106,12 +106,31 @@ export function buildServer() {
   });
 
   app.get("/profile-updates", async (req) => {
-    const { limit } = req.query as { limit?: string };
-    return db.profileUpdate.findMany({
+    const { limit, offset, q } = req.query as { limit?: string; offset?: string; q?: string };
+    const take = Math.min(Number(limit) || 20, 100);
+    const skip = Math.max(Number(offset) || 0, 0);
+    const search = q?.trim();
+    const searchFilter = search
+      ? search.startsWith("0x")
+        ? { token: { address: { contains: search, mode: "insensitive" as const } } }
+        : {
+            token: {
+              OR: [
+                { name: { contains: search, mode: "insensitive" as const } },
+                { symbol: { contains: search, mode: "insensitive" as const } },
+                { address: { contains: search, mode: "insensitive" as const } },
+              ],
+            },
+          }
+      : {};
+    const updates = await db.profileUpdate.findMany({
+      where: searchFilter,
       orderBy: { detectedAt: "desc" },
-      take: Math.min(Number(limit) || 20, 100),
+      take,
+      skip,
       include: { token: { select: { id: true, name: true, symbol: true, address: true, status: true } } },
     });
+    return { updates, hasMore: updates.length === take };
   });
 
   app.post("/tokens/submit", async (req, reply) => {
