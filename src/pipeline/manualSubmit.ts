@@ -4,6 +4,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { getPublicClient } from "../trading/live/wallet";
 import { getTokenNameSymbol } from "../trading/live/tokenUtils";
+import { researchMarket } from "../research/market";
 import { TokenStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
 
@@ -81,12 +82,19 @@ export async function submitManualToken(rawAddress: string): Promise<ManualSubmi
     logger.warn({ address, err: String(err) }, "manual submission: could not read token name/symbol");
   }
 
+  // A manually-submitted CA otherwise skips DexScreener entirely, so the
+  // classifier saw no icon/header/description regardless of what DexScreener
+  // actually shows for the token — same fallback source discover.ts uses.
+  const market = await researchMarket(config.targetChainId, address);
+
   const created = await db.token.create({
     data: {
       chain: config.targetChainId,
       address,
       name,
       symbol,
+      iconUrl: market.primaryPair?.imageUrl,
+      headerUrl: market.primaryPair?.headerUrl,
       status: TokenStatus.DETECTED,
       rawProfile: { manual: true, submittedAt: new Date().toISOString() },
     },

@@ -77,8 +77,15 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
     const data = {
       name,
       symbol,
-      iconUrl: profile.icon,
-      headerUrl: profile.header,
+      // profile.icon/header come from the narrow token-profiles "submitted
+      // profile" feed, which most legitimate tokens never populate. Fall back
+      // to the pair/market endpoint's info.imageUrl/header (market.primaryPair)
+      // — what DexScreener's own token page actually renders an icon from for
+      // virtually any pair — instead of treating "no submitted profile" as "no
+      // image" (see FR-005/FR-007 classification, which otherwise wrongly
+      // scores real projects as having no visual assets).
+      iconUrl: profile.icon ?? market.primaryPair?.imageUrl,
+      headerUrl: profile.header ?? market.primaryPair?.headerUrl,
       description: profile.description,
       rawProfile: profile as unknown as object,
       status: filter.passed ? TokenStatus.DETECTED : TokenStatus.REJECTED,

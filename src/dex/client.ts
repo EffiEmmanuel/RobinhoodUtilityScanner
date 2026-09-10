@@ -80,6 +80,8 @@ function normalizePair(raw: RawPair): MarketPair {
     baseTokenName: raw.baseToken?.name,
     baseTokenSymbol: raw.baseToken?.symbol,
     quoteSymbol: raw.quoteToken?.symbol,
+    imageUrl: raw.info?.imageUrl,
+    headerUrl: raw.info?.header,
     websites: (raw.info?.websites ?? []).map((w) => w.url),
     socials: (raw.info?.socials ?? []).map((s) => ({ type: s.type, url: s.url })),
   };

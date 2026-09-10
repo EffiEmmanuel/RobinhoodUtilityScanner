@@ -34,6 +34,12 @@ export interface MarketPair {
   baseTokenName?: string;
   baseTokenSymbol?: string;
   quoteSymbol?: string;
+  // DexScreener renders these on a token's page for virtually any pair,
+  // independent of whether the project ever submitted the separate, narrower
+  // token-profiles "update token info" product (see DiscoveredTokenProfile
+  // above) — a real fallback source, not a duplicate of it.
+  imageUrl?: string;
+  headerUrl?: string;
   websites: string[];
   socials: { type: string; url: string }[];
 }
