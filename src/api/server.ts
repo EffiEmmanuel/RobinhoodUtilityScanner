@@ -5,6 +5,7 @@ import { db } from "../db";
 import { config } from "../config";
 import { logger } from "../logger";
 import { health as pollerHealth } from "../pipeline/orchestrator";
+import { submitManualToken } from "../pipeline/manualSubmit";
 import { registerTradingRoutes } from "../trading/api";
 import { TokenStatus } from "../generated/prisma";
 
@@ -17,9 +18,13 @@ function parseTokenStatus(value: string | undefined): TokenStatus | undefined {
 }
 
 /**
- * Read-only admin/data API (§19/§28), plus a static monitoring dashboard at
- * /dashboard served from the same origin — avoids the CORS/CSP problems of
- * hosting the dashboard anywhere else and talking to this API cross-origin.
+ * Mostly read-only admin/data API (§19/§28), plus a static monitoring
+ * dashboard at /dashboard served from the same origin — avoids the CORS/CSP
+ * problems of hosting the dashboard anywhere else and talking to this API
+ * cross-origin. The one write endpoint, POST /tokens/submit, only ever queues
+ * a token into the existing autonomous pipeline (see pipeline/manualSubmit.ts)
+ * — it never places a trade itself, so the "no manual execution trigger" rule
+ * in trading/api.ts still holds.
  */
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -79,6 +84,18 @@ export function buildServer() {
       skip: Math.max(Number(offset) || 0, 0),
       include: { classifications: { orderBy: { createdAt: "desc" }, take: 1 } },
     });
+  });
+
+  app.post("/tokens/submit", async (req, reply) => {
+    const { address } = (req.body ?? {}) as { address?: string };
+    if (!address || typeof address !== "string" || !address.trim()) {
+      return reply.code(400).send({ error: "body must include `address`" });
+    }
+    try {
+      return await submitManualToken(address);
+    } catch (err) {
+      return reply.code(400).send({ error: String((err as Error).message ?? err) });
+    }
   });
 
   app.get("/tokens/:id", async (req, reply) => {
