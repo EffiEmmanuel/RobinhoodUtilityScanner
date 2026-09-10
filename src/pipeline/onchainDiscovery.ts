@@ -97,6 +97,7 @@ export async function runOnchainDiscoveryPoll(): Promise<{ scanned: number; crea
           name,
           symbol,
           status: filter.passed ? TokenStatus.AWAITING_DEX_PROFILE : TokenStatus.REJECTED,
+          cheapFilterReasons: filter.passed ? undefined : (filter.reasons as unknown as object),
         },
       });
       created++;

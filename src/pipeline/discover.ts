@@ -4,7 +4,7 @@ import { config } from "../config";
 import { db } from "../db";
 import { logger } from "../logger";
 import { cheapFilter } from "./cheapFilter";
-import { TokenStatus } from "../generated/prisma";
+import { TokenStatus, Prisma } from "../generated/prisma";
 import { getPublicClient } from "../trading/live/wallet";
 import { getAdjustedTotalSupply } from "../trading/live/tokenUtils";
 import { searchXForContractAddress } from "../research/xSearch";
@@ -82,6 +82,7 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
       description: profile.description,
       rawProfile: profile as unknown as object,
       status: filter.passed ? TokenStatus.DETECTED : TokenStatus.REJECTED,
+      cheapFilterReasons: filter.passed ? Prisma.JsonNull : (filter.reasons as unknown as object),
     };
 
     if (existing) {

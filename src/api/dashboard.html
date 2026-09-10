@@ -574,6 +574,178 @@
         font-family: var(--font-mono);
         flex-shrink: 0;
       }
+      .feed-row.clickable,
+      tr.clickable {
+        cursor: pointer;
+      }
+      .feed-row.clickable:hover,
+      tr.clickable:hover td {
+        background: var(--surface-2);
+      }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 100;
+      }
+      .modal-overlay[hidden] {
+        display: none;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        width: 100%;
+        max-width: 560px;
+        max-height: min(720px, 90vh);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      }
+      .modal-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--border);
+      }
+      .modal-head h3 {
+        margin: 0 0 4px;
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .modal-sub {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        color: var(--text-muted);
+        word-break: break-all;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      #token-modal-close {
+        border: none;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        width: 28px;
+        height: 28px;
+        border-radius: 100px;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      #token-modal-close:hover {
+        color: var(--text);
+      }
+      .modal-body {
+        padding: 4px 18px 18px;
+        overflow-y: auto;
+      }
+      .modal-section {
+        padding: 14px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .modal-section:last-child {
+        border-bottom: none;
+      }
+      .modal-section h4 {
+        margin: 0 0 8px;
+        font-size: 11.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+      }
+      .modal-section h5 {
+        margin: 10px 0 6px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .modal-note {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      .modal-summary {
+        margin: 0 0 10px;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .modal-flag {
+        display: inline-block;
+        font-size: 11.5px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 4px;
+        margin: 0 0 10px;
+      }
+      .modal-flag.bad {
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+      .reason-list {
+        margin: 6px 0 0;
+        padding-left: 18px;
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+        gap: 8px;
+      }
+      .stat-chip {
+        background: var(--surface-2);
+        border-radius: 8px;
+        padding: 7px 9px;
+      }
+      .stat-chip .stat-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--text-muted);
+        display: block;
+      }
+      .stat-chip .stat-value {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 14px;
+        font-weight: 600;
+        display: block;
+        margin-top: 2px;
+      }
+      .modal-links {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .modal-links a {
+        font-size: 12.5px;
+        color: var(--accent-strong);
+        text-decoration: none;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 10px;
+      }
+      .modal-links a:hover {
+        border-color: var(--accent);
+      }
+      .modal-loading {
+        padding: 30px 0;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 12.5px;
+      }
       a.token-link {
         color: inherit;
         text-decoration: none;
@@ -1055,6 +1227,27 @@
       </div>
     </div>
 
+    <div class="modal-overlay" id="token-modal-overlay" hidden>
+      <div
+        class="modal"
+        id="token-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="token-modal-title"
+      >
+        <div class="modal-head">
+          <div>
+            <h3 id="token-modal-title">&mdash;</h3>
+            <div class="modal-sub" id="token-modal-sub">&mdash;</div>
+          </div>
+          <button id="token-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body" id="token-modal-body">
+          <div class="modal-loading">Loading&hellip;</div>
+        </div>
+      </div>
+    </div>
+
     <script>
       (function () {
         var safeStorage = {
@@ -1121,6 +1314,11 @@
           manualInput: document.getElementById("manual-address-input"),
           manualBtn: document.getElementById("manual-submit-btn"),
           manualMsg: document.getElementById("manual-submit-msg"),
+          tokenModalOverlay: document.getElementById("token-modal-overlay"),
+          tokenModalTitle: document.getElementById("token-modal-title"),
+          tokenModalSub: document.getElementById("token-modal-sub"),
+          tokenModalBody: document.getElementById("token-modal-body"),
+          tokenModalClose: document.getElementById("token-modal-close"),
         };
 
         els.apiBaseInput.value = state.apiBase;
@@ -1405,7 +1603,9 @@
               var pnlUsd = snap ? snap.unrealizedPnlUsd : null;
               var pnlPct = snap ? snap.unrealizedPnlPercent : null;
               return (
-                "<tr>" +
+                '<tr class="clickable" data-token-id="' +
+                esc(t.token && t.token.id) +
+                '">' +
                 '<td class="token-cell">' +
                 tokenLabel(t.token) +
                 "</td>" +
@@ -1445,7 +1645,9 @@
           els.closedBody.innerHTML = rows
             .map(function (t) {
               return (
-                "<tr>" +
+                '<tr class="clickable" data-token-id="' +
+                esc(t.token && t.token.id) +
+                '">' +
                 '<td class="token-cell">' +
                 tokenLabel(t.token) +
                 "</td>" +
@@ -1526,6 +1728,8 @@
                   "on-chain only, no real DexScreener profile yet — not sent to AI";
               } else if (IN_PROGRESS_STATUSES[t.status]) {
                 meta = "queued for AI classification";
+              } else if (t.status === "REJECTED" && t.cheapFilterReasons && t.cheapFilterReasons.length) {
+                meta = "filtered before AI review — " + t.cheapFilterReasons.join("; ");
               } else if (t.status === "REJECTED") {
                 meta = "filtered before AI review (name/address check)";
               } else if (t.status === "FAILED") {
@@ -1534,7 +1738,9 @@
                 meta = "—";
               }
               return (
-                '<div class="feed-row">' +
+                '<div class="feed-row clickable" data-token-id="' +
+                esc(t.id) +
+                '">' +
                 '<div class="line1"><span class="name">' +
                 tokenLabel(t) +
                 '</span><span class="badge ' +
@@ -1572,7 +1778,9 @@
                   ? c.researchConfidence.toFixed(0)
                   : "—";
               return (
-                '<div class="feed-row">' +
+                '<div class="feed-row clickable" data-token-id="' +
+                esc(c.token && c.token.id) +
+                '">' +
                 '<div class="line1"><span class="name">' +
                 tokenLabel(c.token) +
                 '</span><span class="badge ' +
@@ -1732,6 +1940,205 @@
           sel.removeAllRanges();
           sel.addRange(range);
         }
+
+        // ---------- token detail modal ----------
+        function statChip(label, value, opts) {
+          opts = opts || {};
+          var display;
+          if (value === null || value === undefined || isNaN(value)) {
+            display = "&mdash;";
+          } else if (opts.isFraction) {
+            display = Math.round(value * 100) + "%";
+          } else if (opts.isUsd) {
+            display = fmtUsd(value);
+          } else {
+            display = Math.round(value * 10) / 10;
+          }
+          return (
+            '<div class="stat-chip"><span class="stat-label">' +
+            esc(label) +
+            '</span><span class="stat-value">' +
+            display +
+            "</span></div>"
+          );
+        }
+        function listBlock(title, arr) {
+          if (!arr || !arr.length) return "";
+          return (
+            "<h5>" +
+            esc(title) +
+            '</h5><ul class="reason-list">' +
+            arr
+              .map(function (r) {
+                return "<li>" + esc(r) + "</li>";
+              })
+              .join("") +
+            "</ul>"
+          );
+        }
+
+        function renderTokenModal(token) {
+          els.tokenModalTitle.textContent =
+            token.symbol || token.name || fmtAddr(token.address).replace(/&hellip;/, "…");
+          els.tokenModalSub.innerHTML =
+            esc(token.address) +
+            ' <span class="badge ' +
+            esc(token.status) +
+            '">' +
+            esc(token.status) +
+            "</span>";
+
+          var cls = (token.classifications && token.classifications[0]) || null;
+          var run = (token.researchRuns && token.researchRuns[0]) || null;
+          var snap = (token.marketSnapshots && token.marketSnapshots[0]) || null;
+          var sections = [];
+
+          if (token.cheapFilterReasons && token.cheapFilterReasons.length) {
+            sections.push(
+              '<div class="modal-section"><h4>Why it was filtered</h4>' +
+                '<p class="modal-note">Rejected before ever reaching AI review — none of this cost an AI call.</p>' +
+                listBlock("Reasons", token.cheapFilterReasons) +
+                "</div>"
+            );
+          } else if (cls && cls.passed === false) {
+            sections.push(
+              '<div class="modal-section"><h4>Why it was rejected</h4>' +
+                '<p class="modal-note">Rejected at visual classification — never reached full research.</p>' +
+                '<div class="stat-grid">' +
+                statChip("Utility", cls.utilityProbability, { isFraction: true }) +
+                statChip("Meme", cls.memeProbability, { isFraction: true }) +
+                statChip("Branding", cls.brandingQuality, { isFraction: true }) +
+                statChip("Professional", cls.professionalism, { isFraction: true }) +
+                statChip("Visual spam", cls.visualSpamProbability, { isFraction: true }) +
+                "</div>" +
+                listBlock("Reasoning", cls.reasoningSummary) +
+                "</div>"
+            );
+          } else if (run) {
+            sections.push(
+              '<div class="modal-section"><h4>Research findings</h4>' +
+                (run.summary ? '<p class="modal-summary">' + esc(run.summary) + "</p>" : "") +
+                (run.hardReject
+                  ? '<p class="modal-flag bad">Hard-rejected by deterministic rules</p>'
+                  : "") +
+                '<div class="stat-grid">' +
+                statChip("Final", run.finalScore) +
+                statChip("Confidence", run.confidence) +
+                statChip("Utility", run.utilityScore) +
+                statChip("Contract", run.contractScore) +
+                statChip("Credibility", run.credibilityScore) +
+                statChip("Website", run.websiteScore) +
+                statChip("Social", run.socialScore) +
+                statChip("Liquidity", run.liquidityScore) +
+                statChip("Market", run.marketScore) +
+                statChip("Holders", run.holderScore) +
+                statChip("Team", run.teamScore) +
+                statChip("Branding", run.brandingScore) +
+                "</div>" +
+                listBlock("Rejection reasons", run.rejectionReasons) +
+                listBlock("Risks", run.risks) +
+                listBlock("Positives", run.positives) +
+                "</div>"
+            );
+          } else {
+            var note;
+            if (token.status === "AWAITING_DEX_PROFILE") {
+              note =
+                "Discovered on-chain, but no real DexScreener profile has appeared yet — being watched for real trading activity every check cycle (last checked " +
+                fmtAgo(token.lastSeenAt) +
+                ").";
+            } else if (IN_PROGRESS_STATUSES[token.status]) {
+              note = "Still in the pipeline — no result yet.";
+            } else {
+              note = "No classification or research has run for this token.";
+            }
+            sections.push('<div class="modal-section"><p class="modal-note">' + note + "</p></div>");
+          }
+
+          if (snap) {
+            sections.push(
+              '<div class="modal-section"><h4>Latest market snapshot</h4><div class="stat-grid">' +
+                statChip("Price", snap.priceUsd, { isUsd: true }) +
+                statChip("Market cap", snap.marketCapUsd, { isUsd: true }) +
+                statChip("Liquidity", snap.liquidityUsd, { isUsd: true }) +
+                '</div><p class="modal-note" style="margin-top:8px;">captured ' +
+                fmtAgo(snap.capturedAt) +
+                "</p></div>"
+            );
+          }
+
+          if (token.xFindings && token.xFindings.tweetCount) {
+            sections.push(
+              '<div class="modal-section"><h4>X (Twitter) activity</h4><p class="modal-note">' +
+                token.xFindings.tweetCount +
+                " mention(s), " +
+                (token.xFindings.totalEngagement || 0) +
+                " total engagement" +
+                "</p></div>"
+            );
+          }
+
+          var links = [];
+          var dexUrl = dexScreenerUrl(token);
+          if (dexUrl) links.push('<a href="' + dexUrl + '" target="_blank" rel="noopener noreferrer">DexScreener</a>');
+          var blockUrl = blockscoutUrl(token.address);
+          if (blockUrl) links.push('<a href="' + blockUrl + '" target="_blank" rel="noopener noreferrer">Blockscout</a>');
+          if (links.length) {
+            sections.push(
+              '<div class="modal-section"><h4>Links</h4><div class="modal-links">' + links.join("") + "</div></div>"
+            );
+          }
+
+          sections.push(
+            '<div class="modal-section"><h4>Timeline</h4><p class="modal-note">First seen ' +
+              fmtAgo(token.firstSeenAt) +
+              " &middot; last updated " +
+              fmtAgo(token.lastSeenAt) +
+              "</p></div>"
+          );
+
+          els.tokenModalBody.innerHTML = sections.join("");
+        }
+
+        function openTokenModal(tokenId) {
+          if (!tokenId) return;
+          els.tokenModalTitle.textContent = "Loading…";
+          els.tokenModalSub.textContent = "";
+          els.tokenModalBody.innerHTML = '<div class="modal-loading">Loading&hellip;</div>';
+          els.tokenModalOverlay.hidden = false;
+          fetchJson("/tokens/" + encodeURIComponent(tokenId))
+            .then(renderTokenModal)
+            .catch(function (err) {
+              els.tokenModalTitle.textContent = "Could not load token";
+              els.tokenModalBody.innerHTML =
+                '<div class="modal-section"><p class="modal-note">' +
+                esc(err && err.message ? err.message : "Unknown error") +
+                "</p></div>";
+            });
+        }
+        function closeTokenModal() {
+          els.tokenModalOverlay.hidden = true;
+        }
+        els.tokenModalClose.addEventListener("click", closeTokenModal);
+        els.tokenModalOverlay.addEventListener("click", function (e) {
+          if (e.target === els.tokenModalOverlay) closeTokenModal();
+        });
+        document.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && !els.tokenModalOverlay.hidden) closeTokenModal();
+        });
+        function wireTokenClicks(container) {
+          container.addEventListener("click", function (e) {
+            if (e.target.closest("a")) return; // let DexScreener/explorer links navigate normally
+            var row = e.target.closest("[data-token-id]");
+            if (row && row.getAttribute("data-token-id")) {
+              openTokenModal(row.getAttribute("data-token-id"));
+            }
+          });
+        }
+        wireTokenClicks(els.activityFeed);
+        wireTokenClicks(els.candidatesFeed);
+        wireTokenClicks(els.positionsBody);
+        wireTokenClicks(els.closedBody);
 
         // ---------- ticking "last updated" label when data is stale ----------
         setInterval(function () {

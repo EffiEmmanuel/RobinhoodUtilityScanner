@@ -56,6 +56,13 @@ model Token {
   xCheckedAt DateTime?
   xFindings  Json?
 
+  // Set only when cheapFilter/cheapFilterOnchain rejects a token pre-AI (see
+  // pipeline/cheapFilter.ts) — string array. Without this, a cheap-filter
+  // rejection had no persisted reason at all once the log line scrolled by;
+  // the dashboard's per-token detail view reads this to answer "why was this
+  // rejected" for the tokens that never even reached AI classification.
+  cheapFilterReasons Json?
+
   classifications Classification[]
   researchRuns    ResearchRun[]
   marketSnapshots MarketSnapshot[]
