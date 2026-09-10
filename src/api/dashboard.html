@@ -578,6 +578,42 @@
       tr.clickable {
         cursor: pointer;
       }
+      .search-row {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        position: relative;
+      }
+      .search-row input {
+        width: 100%;
+        font-family: var(--font-sans);
+        font-size: 12.5px;
+        padding: 8px 30px 8px 11px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .search-row input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .search-row .search-clear {
+        position: absolute;
+        right: 24px;
+        top: 50%;
+        transform: translateY(-50%);
+        border: none;
+        background: none;
+        color: var(--text-muted);
+        font-size: 15px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 4px;
+        display: none;
+      }
+      .search-row.has-value .search-clear {
+        display: block;
+      }
       .feed-row.clickable:hover,
       tr.clickable:hover td {
         background: var(--surface-2);
@@ -1148,6 +1184,22 @@
                 <h2>Discovery Activity</h2>
                 <span class="count-chip" id="activity-stats">0 seen</span>
               </div>
+              <div class="search-row" id="activity-search-row">
+                <input
+                  type="text"
+                  id="activity-search"
+                  placeholder="Search by name, symbol, or contract address…"
+                  autocomplete="off"
+                />
+                <button
+                  class="search-clear"
+                  id="activity-search-clear"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  &times;
+                </button>
+              </div>
               <div class="feed" id="activity-feed"></div>
               <div class="pager">
                 <button
@@ -1274,6 +1326,7 @@
           activityOffset: 0,
           activityPageSize: 15,
           activityHasMore: false,
+          activitySearch: "",
         };
 
         var els = {
@@ -1299,6 +1352,9 @@
           activityPrev: document.getElementById("activity-prev"),
           activityNext: document.getElementById("activity-next"),
           activityPageLabel: document.getElementById("activity-page-label"),
+          activitySearchRow: document.getElementById("activity-search-row"),
+          activitySearch: document.getElementById("activity-search"),
+          activitySearchClear: document.getElementById("activity-search-clear"),
           positionsBody: document.getElementById("positions-body"),
           positionsCount: document.getElementById("positions-count"),
           closedBody: document.getElementById("closed-body"),
@@ -1459,7 +1515,10 @@
               "/tokens?limit=" +
                 state.activityPageSize +
                 "&offset=" +
-                state.activityOffset
+                state.activityOffset +
+                (state.activitySearch
+                  ? "&q=" + encodeURIComponent(state.activitySearch)
+                  : "")
             ),
           ])
             .then(function (results) {
@@ -1704,12 +1763,16 @@
           els.activityNext.disabled = !state.activityHasMore;
 
           if (!rows.length) {
-            els.activityFeed.innerHTML =
-              '<div class="empty-feed">' +
-              (state.activityOffset > 0
-                ? "No more results on this page."
-                : "No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.") +
-              "</div>";
+            var emptyMsg;
+            if (state.activitySearch) {
+              emptyMsg = 'No tokens match “' + esc(state.activitySearch) + '”.';
+            } else if (state.activityOffset > 0) {
+              emptyMsg = "No more results on this page.";
+            } else {
+              emptyMsg =
+                "No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.";
+            }
+            els.activityFeed.innerHTML = '<div class="empty-feed">' + emptyMsg + "</div>";
             return;
           }
           els.activityFeed.innerHTML = rows
@@ -1854,6 +1917,27 @@
           if (!state.activityHasMore) return;
           state.activityOffset += state.activityPageSize;
           refreshAll();
+        });
+        var activitySearchDebounce;
+        function applyActivitySearch(value) {
+          state.activitySearch = value.trim();
+          state.activityOffset = 0;
+          els.activitySearchRow.className =
+            "search-row" + (state.activitySearch ? " has-value" : "");
+          refreshAll();
+        }
+        els.activitySearch.addEventListener("input", function () {
+          clearTimeout(activitySearchDebounce);
+          var value = els.activitySearch.value;
+          activitySearchDebounce = setTimeout(function () {
+            applyActivitySearch(value);
+          }, 300);
+        });
+        els.activitySearchClear.addEventListener("click", function () {
+          clearTimeout(activitySearchDebounce);
+          els.activitySearch.value = "";
+          applyActivitySearch("");
+          els.activitySearch.focus();
         });
         els.saveBtn.addEventListener("click", function () {
           var base = els.apiBaseInput.value.trim() || window.location.origin;

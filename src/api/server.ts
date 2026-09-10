@@ -77,10 +77,27 @@ export function buildServer() {
   });
 
   app.get("/tokens", async (req) => {
-    const { status, limit, offset } = req.query as { status?: string; limit?: string; offset?: string };
+    const { status, limit, offset, q } = req.query as { status?: string; limit?: string; offset?: string; q?: string };
     const parsedStatus = parseTokenStatus(status);
+    const search = q?.trim();
     return db.token.findMany({
-      where: parsedStatus ? { status: parsedStatus } : undefined,
+      where: {
+        ...(parsedStatus ? { status: parsedStatus } : {}),
+        // A bare "0x..." search only ever matches address — matching it against
+        // name/symbol too would be pointless noise and could even accidentally
+        // match a token whose name/symbol happens to look hex-ish.
+        ...(search
+          ? search.startsWith("0x")
+            ? { address: { contains: search, mode: "insensitive" } }
+            : {
+                OR: [
+                  { name: { contains: search, mode: "insensitive" } },
+                  { symbol: { contains: search, mode: "insensitive" } },
+                  { address: { contains: search, mode: "insensitive" } },
+                ],
+              }
+          : {}),
+      },
       orderBy: { firstSeenAt: "desc" },
       take: Math.min(Number(limit) || 50, 200),
       skip: Math.max(Number(offset) || 0, 0),
