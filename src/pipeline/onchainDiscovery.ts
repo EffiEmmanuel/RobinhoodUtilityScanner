@@ -6,6 +6,7 @@ import { db } from "../db";
 import { logger } from "../logger";
 import { cheapFilterOnchain } from "./cheapFilter";
 import { TokenStatus } from "../generated/prisma";
+import { fetchMarketForToken } from "../dex/client";
 
 /**
  * Watches PoolManager's own Initialize events directly on-chain — far faster
@@ -89,6 +90,49 @@ export async function runOnchainDiscoveryPoll(): Promise<{ scanned: number; crea
 
     const filter = cheapFilterOnchain(tokenAddress, name, adjustedTotalSupply);
 
+    // Query DexScreener directly for every qualifying token, immediately —
+    // not just Uniswap's own on-chain event. A real, indexed DexScreener pair
+    // (icon/header/website/social via the pair endpoint's `info` field) is
+    // often available within seconds of pool creation for a genuine project,
+    // entirely independent of the separate "submitted profile" product the
+    // AWAITING_DEX_PROFILE wait was built around. Confirmed live: hundreds of
+    // tokens sat parked 20+ minutes to 24 hours despite DexScreener already
+    // showing a real profile the moment they were checked manually. Checking
+    // here — once, at discovery — is what actually gets a legitimate token to
+    // the AI pipeline promptly instead of only via the later periodic sweep
+    // (promoteActiveAwaitingProfile, which still exists as the fallback for
+    // tokens DexScreener genuinely hasn't indexed yet).
+    let status: TokenStatus = filter.passed ? TokenStatus.AWAITING_DEX_PROFILE : TokenStatus.REJECTED;
+    let iconUrl: string | undefined;
+    let headerUrl: string | undefined;
+    let rawProfile: object | undefined;
+
+    if (filter.passed) {
+      try {
+        const market = await fetchMarketForToken(config.targetChainId, tokenAddress);
+        const pair = market.primaryPair;
+        const hasRealProfile = Boolean(pair?.imageUrl || pair?.headerUrl || (pair?.websites.length ?? 0) > 0 || (pair?.socials.length ?? 0) > 0);
+        if (pair && hasRealProfile) {
+          status = TokenStatus.DETECTED;
+          iconUrl = pair.imageUrl;
+          headerUrl = pair.headerUrl;
+          rawProfile = {
+            source: "token-pairs-info-fallback-immediate",
+            chainId: config.targetChainId,
+            tokenAddress,
+            icon: pair.imageUrl,
+            header: pair.headerUrl,
+            links: [
+              ...pair.websites.map((url) => ({ type: "website", url })),
+              ...pair.socials.map((s) => ({ type: s.type, url: s.url })),
+            ],
+          };
+        }
+      } catch (err) {
+        logger.warn({ tokenAddress, err: String(err) }, "on-chain discovery: immediate DexScreener check failed — falling back to AWAITING_DEX_PROFILE");
+      }
+    }
+
     try {
       await db.token.create({
         data: {
@@ -96,7 +140,10 @@ export async function runOnchainDiscoveryPoll(): Promise<{ scanned: number; crea
           address: tokenAddress,
           name,
           symbol,
-          status: filter.passed ? TokenStatus.AWAITING_DEX_PROFILE : TokenStatus.REJECTED,
+          status,
+          iconUrl,
+          headerUrl,
+          rawProfile,
           cheapFilterReasons: filter.passed ? undefined : (filter.reasons as unknown as object),
         },
       });

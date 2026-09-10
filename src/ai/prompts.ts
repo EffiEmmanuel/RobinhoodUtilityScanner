@@ -162,8 +162,21 @@ export interface PositionStrategyInputs {
   reentryState: string;
 }
 
+// User-observed (anecdotal, not yet statistically confirmed against our own
+// trade data) activity-window pattern, in the user's local time (UTC+1):
+// pumps tend to concentrate ~22:00-03:00/04:00, new project launches cluster
+// ~12:00-16:30. Given as soft context to weigh alongside real market/
+// technical data — never a hard rule on its own.
+function timeContextLine(): string {
+  const now = new Date();
+  const localHour = (now.getUTCHours() + 1) % 24; // UTC+1
+  return `Current time: ${now.toISOString()} (~${String(localHour).padStart(2, "0")}:00 in the user's local time, UTC+1). The user has anecdotally observed that pumps tend to concentrate roughly 22:00-03:00/04:00 local time, and strong new project launches cluster roughly 12:00-16:30 local time — this is not yet statistically confirmed against our own data, so treat it as soft context, not a rule. Don't manufacture false confidence from the clock alone; weigh it only alongside real market/technical evidence.`;
+}
+
 export function buildPositionStrategyPrompt(inputs: PositionStrategyInputs): string {
-  return `TOKEN
+  return `${timeContextLine()}
+
+TOKEN
 Name: ${inputs.token.name ?? "(missing)"}
 Symbol: ${inputs.token.symbol ?? "(missing)"}
 Contract: ${inputs.token.address}

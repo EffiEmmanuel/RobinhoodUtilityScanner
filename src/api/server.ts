@@ -146,8 +146,17 @@ export function buildServer() {
         // contradiction without this.
         tradeCandidates: {
           orderBy: { createdAt: "desc" },
-          include: { decisions: { where: { stage: "candidate_eligibility" }, orderBy: { createdAt: "desc" }, take: 1 } },
+          include: {
+            decisions: { where: { stage: "candidate_eligibility" }, orderBy: { createdAt: "desc" }, take: 1 },
+            // The actual target-entry/exit-plan data for "what are we
+            // planning to do with this token" — the dashboard shows this as
+            // its own section regardless of whether a trade has opened yet.
+            plans: { orderBy: { createdAt: "desc" }, include: { pendingEntry: true } },
+          },
         },
+        // Real entry/exit/PnL once a trade has actually opened — separate
+        // from tradeCandidates.plans, which is the pre-trade target.
+        trades: { orderBy: { createdAt: "desc" }, include: { postmortem: true } },
       },
     });
     if (!token) return reply.code(404).send({ error: "not found" });

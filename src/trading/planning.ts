@@ -81,20 +81,23 @@ export async function planCandidate(candidateId: string): Promise<void> {
   }
 
   const action = analysis.recommendedAction;
+  const currentMcap = market.primaryPair?.marketCapUsd;
+  const clampedZone = clampPullbackTarget(currentMcap, analysis.targetEntryMcapMin, analysis.targetEntryMcapMax);
+
   const plan = await db.tradePlan.create({
     data: {
       candidateId: candidate.id,
       strategyVersionId: strategy.id,
       action,
       entryStyle: analysis.entryStyle,
-      currentMarketCap: market.primaryPair?.marketCapUsd,
-      targetEntryMcapMin: analysis.targetEntryMcapMin,
-      targetEntryMcapMax: analysis.targetEntryMcapMax,
+      currentMarketCap: currentMcap,
+      targetEntryMcapMin: clampedZone.min,
+      targetEntryMcapMax: clampedZone.max,
       doNotChaseAboveMcap: analysis.doNotChaseAboveMcap,
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, liquidityUsd } as unknown as object,
+      planData: { analysis, freshEval, liquidityUsd, pullbackClamped: clampedZone.clamped } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });
@@ -115,14 +118,15 @@ export async function planCandidate(candidateId: string): Promise<void> {
   );
 
   if (action === TradePlanAction.BUY_NOW || action === TradePlanAction.WAIT_FOR_ENTRY) {
-    const currentMcap = market.primaryPair?.marketCapUsd;
     await db.pendingEntry.create({
       data: {
         tradePlanId: plan.id,
         status: PendingEntryStatus.ACTIVE,
         // BUY_NOW: trigger immediately by targeting a window around current mcap.
-        targetMcapMin: action === TradePlanAction.BUY_NOW ? (currentMcap ?? 0) * 0.9 : analysis.targetEntryMcapMin,
-        targetMcapMax: action === TradePlanAction.BUY_NOW ? (currentMcap ?? 0) * 1.1 : analysis.targetEntryMcapMax,
+        // WAIT_FOR_ENTRY: the CLAMPED zone, not the AI's raw proposal — see
+        // clampPullbackTarget below.
+        targetMcapMin: action === TradePlanAction.BUY_NOW ? (currentMcap ?? 0) * 0.9 : clampedZone.min,
+        targetMcapMax: action === TradePlanAction.BUY_NOW ? (currentMcap ?? 0) * 1.1 : clampedZone.max,
         expiresAt: plan.expiresAt,
       },
     });
@@ -134,6 +138,36 @@ export async function planCandidate(candidateId: string): Promise<void> {
   }
 
   logger.info({ candidateId, planId: plan.id, action, regime: analysis.marketRegime }, "trade plan generated");
+}
+
+/**
+ * Deterministic backstop on the AI's proposed WAIT_FOR_ENTRY zone — nothing
+ * previously bounded how deep a pullback it could demand. Confirmed live: a
+ * 42% pullback requirement on a token that had already moved +217% in 5
+ * minutes, with no cap. On a chain where fast movers tend to keep running or
+ * collapse outright rather than gently mean-revert, an unbounded target risks
+ * the plan expiring having never triggered at all — never entering is not a
+ * "safe" outcome for a system whose entire point is entering trades.
+ *
+ * If the AI's proposed ceiling (targetEntryMcapMax) already asks for less than
+ * config.maxPullbackWaitPercent, it's left untouched (a more conservative AI
+ * call is respected). Otherwise the whole zone is shifted up so its ceiling
+ * sits at exactly that cap, preserving the AI's original zone width.
+ */
+function clampPullbackTarget(
+  currentMcap: number | undefined,
+  min: number | null | undefined,
+  max: number | null | undefined
+): { min: number | undefined; max: number | undefined; clamped: boolean } {
+  if (!currentMcap || min === null || min === undefined || max === null || max === undefined) {
+    return { min: min ?? undefined, max: max ?? undefined, clamped: false };
+  }
+  const shallowestAllowedMax = currentMcap * (1 - tradingConfig.maxPullbackWaitPercent / 100);
+  if (max >= shallowestAllowedMax) {
+    return { min, max, clamped: false };
+  }
+  const zoneWidth = Math.max(0, max - min);
+  return { min: shallowestAllowedMax - zoneWidth, max: shallowestAllowedMax, clamped: true };
 }
 
 function strategyTtlMs(strategy: { configuration: unknown }): number {

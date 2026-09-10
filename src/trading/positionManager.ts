@@ -50,6 +50,11 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
   const pair = market.primaryPair;
 
+  // Same fix as entryMonitor.ts: an open position is checked every tick here,
+  // but Token.lastSeenAt otherwise only reflects the base discovery poll's
+  // cadence — misleading on the dashboard for a token we're actively holding.
+  await db.token.update({ where: { id: trade.tokenId }, data: { lastSeenAt: new Date() } }).catch(() => {});
+
   // Deterministic, cheap, runs every tick regardless of the AI review cadence
   // below: executes a previously AI-proposed re-entry buy only if (and once)
   // price has actually fallen to that target — the AI never buys directly.

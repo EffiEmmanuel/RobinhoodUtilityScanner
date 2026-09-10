@@ -1,3 +1,15 @@
+// User-observed (anecdotal, not yet statistically confirmed against our own
+// trade data — see learning.ts once there's enough closed-trade volume to
+// check it for real) activity-window pattern, in the user's local time
+// (UTC+1): pumps tend to concentrate ~22:00-03:00/04:00, new project
+// launches cluster ~12:00-16:30. Given to the AI as soft context to weigh
+// alongside actual market/technical data — never a hard rule on its own.
+function timeContextLine(): string {
+  const now = new Date();
+  const localHour = (now.getUTCHours() + 1) % 24; // UTC+1
+  return `Current time: ${now.toISOString()} (~${String(localHour).padStart(2, "0")}:00 in the user's local time, UTC+1). The user has anecdotally observed that pumps tend to concentrate roughly 22:00-03:00/04:00 local time, and strong new project launches cluster roughly 12:00-16:30 local time — this is not yet statistically confirmed against our own data, so treat it as soft context, not a rule. Don't manufacture false confidence from the clock alone; weigh it only alongside real market/technical evidence.`;
+}
+
 // §84 — the AI's job is to interpret market state and propose an action; it
 // never sets the final position size and never bypasses deterministic risk
 // rules (src/trading/riskEngine.ts always runs after this, and can downgrade
@@ -35,7 +47,9 @@ export interface TradeAnalysisInputs {
 }
 
 export function buildTradeAnalysisPrompt(inputs: TradeAnalysisInputs): string {
-  return `TOKEN
+  return `${timeContextLine()}
+
+TOKEN
 Name: ${inputs.token.name ?? "(missing)"}
 Symbol: ${inputs.token.symbol ?? "(missing)"}
 

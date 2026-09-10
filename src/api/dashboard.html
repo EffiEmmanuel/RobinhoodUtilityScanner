@@ -2090,6 +2090,27 @@
             "</span></div>"
           );
         }
+        function kvTable(rows) {
+          var filtered = rows.filter(function (r) {
+            return r[1] !== null && r[1] !== undefined && r[1] !== "";
+          });
+          if (!filtered.length) return "";
+          return (
+            '<table class="kv-table"><tbody>' +
+            filtered
+              .map(function (r) {
+                return (
+                  '<tr><td style="white-space:normal;color:var(--text-muted);width:46%;">' +
+                  esc(r[0]) +
+                  '</td><td style="white-space:normal;">' +
+                  r[1] +
+                  "</td></tr>"
+                );
+              })
+              .join("") +
+            "</tbody></table>"
+          );
+        }
         function listBlock(title, arr) {
           if (!arr || !arr.length) return "";
           return (
@@ -2227,6 +2248,70 @@
           } else if (token.status === "WATCHLISTED" || token.status === "ALERTED") {
             sections.push(
               '<div class="modal-section"><h4>Trade eligibility</h4><p class="modal-note">No trade candidate has been generated for this token yet.</p></div>'
+            );
+          }
+
+          // What we're actually planning/doing with this token: the target
+          // entry zone before a trade opens, then real entry/PnL once one
+          // does — kept as one section so it reads as one continuous story
+          // rather than the plan and the position looking unrelated.
+          var plan = (candidate && candidate.plans && candidate.plans[0]) || null;
+          var trade = (token.trades && token.trades[0]) || null;
+          if (plan || trade) {
+            var planRows = [];
+            if (plan) {
+              planRows.push([
+                "Planned action",
+                esc(plan.action) + (plan.entryStyle ? " (" + esc(plan.entryStyle) + ")" : ""),
+              ]);
+              if (plan.currentMarketCap != null) planRows.push(["Market cap at plan time", fmtUsd(plan.currentMarketCap)]);
+              if (plan.targetEntryMcapMin != null || plan.targetEntryMcapMax != null) {
+                planRows.push(["Target entry zone", fmtUsd(plan.targetEntryMcapMin) + " &ndash; " + fmtUsd(plan.targetEntryMcapMax)]);
+              }
+              if (plan.doNotChaseAboveMcap != null) planRows.push(["Do not chase above", fmtUsd(plan.doNotChaseAboveMcap)]);
+              if (plan.invalidationMcap != null) planRows.push(["Invalidation level", fmtUsd(plan.invalidationMcap)]);
+              if (plan.pendingEntry) {
+                planRows.push([
+                  "Entry monitor status",
+                  '<span class="badge ' + esc(plan.pendingEntry.status) + '">' + esc(plan.pendingEntry.status) + "</span>",
+                ]);
+                if (plan.pendingEntry.lastCheckedAt) planRows.push(["Last checked", fmtAgo(plan.pendingEntry.lastCheckedAt)]);
+              }
+              if (plan.expiresAt) planRows.push(["Plan expires", fmtAgo(plan.expiresAt)]);
+              if (plan.riskScore != null) planRows.push(["AI risk score", Math.round(plan.riskScore) + "/100"]);
+            }
+            if (trade) {
+              planRows.push([
+                "Position status",
+                '<span class="badge ' + esc(trade.status) + '">' + esc(trade.status) + "</span>",
+              ]);
+              planRows.push(["Mode", esc(trade.mode)]);
+              if (trade.actualEntryMcap != null) planRows.push(["Entry market cap", fmtUsd(trade.actualEntryMcap)]);
+              planRows.push(["Position size", fmtUsd(trade.positionSizeUsd)]);
+              if (trade.status === "CLOSED") {
+                if (trade.realizedPnlUsd != null) {
+                  var pnlCls = trade.realizedPnlUsd >= 0 ? "num-good" : "num-bad";
+                  planRows.push([
+                    "Realized PnL",
+                    '<span class="' + pnlCls + '">' + (trade.realizedPnlUsd >= 0 ? "+" : "") + fmtUsd(trade.realizedPnlUsd) + "</span>",
+                  ]);
+                }
+                if (trade.realizedMultiple != null) planRows.push(["Realized multiple", trade.realizedMultiple.toFixed(2) + "x"]);
+                if (trade.exitReason) planRows.push(["Exit reason", esc(trade.exitReason)]);
+                if (trade.closedAt) planRows.push(["Closed", fmtAgo(trade.closedAt)]);
+              } else {
+                if (trade.mfePercent != null) planRows.push(["Best so far (MFE)", (trade.mfePercent >= 0 ? "+" : "") + trade.mfePercent.toFixed(1) + "%"]);
+                if (trade.maePercent != null) planRows.push(["Worst so far (MAE)", trade.maePercent.toFixed(1) + "%"]);
+                if (trade.openedAt) planRows.push(["Opened", fmtAgo(trade.openedAt)]);
+              }
+            } else if (plan && (plan.action === "WAIT_FOR_ENTRY" || plan.action === "BUY_NOW")) {
+              planRows.push(["Position status", "Not entered yet"]);
+            }
+            sections.push(
+              '<div class="modal-section"><h4>Trade plan &amp; position</h4>' +
+                '<p class="modal-note">Exit strategy (profit-taking steps, trailing stop) is governed by the active strategy version, applied once a position opens.</p>' +
+                kvTable(planRows) +
+                "</div>"
             );
           }
 

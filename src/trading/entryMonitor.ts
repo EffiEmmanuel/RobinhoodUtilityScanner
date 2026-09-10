@@ -78,6 +78,14 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
   const pair = market.primaryPair;
   const mcap = pair?.marketCapUsd;
 
+  // Token.lastSeenAt (@updatedAt) otherwise only reflects the base discovery
+  // poll's own cadence, not this loop's — a token with an active pending
+  // entry gets checked continuously here, but the dashboard's "last updated"
+  // timestamp on the token stayed frozen at whenever it last appeared in
+  // DexScreener's "latest profiles" feed, which can be a poor, misleading
+  // proxy for "we're actively watching this" once it's in the trading funnel.
+  await db.token.update({ where: { id: candidate.tokenId }, data: { lastSeenAt: new Date() } }).catch(() => {});
+
   const inZone =
     mcap !== undefined &&
     entry.targetMcapMin !== null &&

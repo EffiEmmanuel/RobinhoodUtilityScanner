@@ -69,6 +69,15 @@ export const tradingConfig = {
 
   // Entry lifecycle.
   defaultEntryPlanTtlMinutes: num("DEFAULT_ENTRY_PLAN_TTL_MINUTES", 360),
+  // Hard cap on how deep a pullback the AI's WAIT_FOR_ENTRY plan is allowed to
+  // demand before entering (planning.ts clamps targetEntryMcapMax to this).
+  // Nothing deterministic previously bounded this — confirmed live: the AI
+  // proposed a 42% pullback requirement on a token that had already moved
+  // +217% in 5 minutes, on a chain where fast movers tend to keep running or
+  // collapse outright rather than gently mean-revert. An unbounded target
+  // risks never triggering at all before the plan expires, which is not a
+  // "safe" outcome for a system whose whole point is entering trades.
+  maxPullbackWaitPercent: num("MAX_PULLBACK_WAIT_PERCENT", 20),
   // Tightened from 20s — deliberately not literally 1s: DexScreener's public
   // API has no confirmed rate-limit headroom for that at 24/7 scale, and this
   // is still the cheap, free, deterministic layer, not an AI call. Raise or
@@ -82,7 +91,14 @@ export const tradingConfig = {
   // that deterministic code then enforces or executes. Hard caps here bound
   // it regardless of what the AI recommends.
   positionStrategyReviewIntervalMinutes: num("POSITION_STRATEGY_REVIEW_INTERVAL_MINUTES", 5),
-  maxReentriesPerTrade: num("MAX_REENTRIES_PER_TRADE", 1),
+  // Raised from 1: the AI strategy review (positionStrategy.ts) already
+  // implements exactly a buy-the-dip/sell-the-resistance cycle via repeated
+  // TAKE_PARTIAL_PROFIT + SET_REENTRY_TARGET decisions — capping it at one
+  // re-entry turned that into a single-shot instead of the ongoing cycle it
+  // was designed for. Each re-entry is still capped at
+  // maxReentryPercentOfOriginal of the ORIGINAL position (not compounding),
+  // and every one still passes the same entry-risk gate a fresh trade would.
+  maxReentriesPerTrade: num("MAX_REENTRIES_PER_TRADE", 5),
   maxReentryPercentOfOriginal: num("MAX_REENTRY_PERCENT_OF_ORIGINAL", 50),
 
   // Slippage / price-impact ceilings, used by the paper fill model (§29/§88)
