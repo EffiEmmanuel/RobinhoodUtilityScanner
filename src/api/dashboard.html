@@ -1683,13 +1683,29 @@
           els.manualMsg.textContent = "Queuing…";
           postJson("/tokens/submit", { address: address })
             .then(function (token) {
-              els.manualMsg.className = "ok";
               var label =
                 token.symbol ||
                 token.name ||
                 fmtAddr(token.address).replace(/&hellip;/, "…");
-              els.manualMsg.textContent =
-                "Queued " + label + " — status: " + token.status;
+              if (token.submitAction === "ALREADY_EVALUATED") {
+                els.manualMsg.className = "err";
+                els.manualMsg.textContent =
+                  label +
+                  " was already fully evaluated — status: " +
+                  token.status +
+                  " (nothing new to do; it isn't re-queued automatically since it already has a result)";
+              } else if (token.submitAction === "ALREADY_IN_PROGRESS") {
+                els.manualMsg.className = "ok";
+                els.manualMsg.textContent =
+                  label + " is already being evaluated — status: " + token.status;
+              } else {
+                els.manualMsg.className = "ok";
+                els.manualMsg.textContent =
+                  (token.submitAction === "REQUEUED" ? "Re-queued " : "Queued ") +
+                  label +
+                  " — status: " +
+                  token.status;
+              }
               els.manualInput.value = "";
               refreshAll();
             })

@@ -13,12 +13,16 @@ import type { Token } from "../generated/prisma";
 
 const WORKER_CONCURRENCY = 2;
 const WORKER_IDLE_DELAY_MS = 3000;
-// Deliberately slower than the discovery loops — each run can fetch market
-// data for up to 50 waiting tokens, and DexScreener's public API is shared
-// with the core discovery polls that matter more; no need to hammer it every
-// few seconds for a check that's inherently about tokens still hours from
-// expiring anyway.
-const AWAITING_PROFILE_ACTIVITY_INTERVAL_SECONDS = 300;
+// Still slower than the discovery loops (each run can fetch market data for
+// up to 100 waiting tokens, and DexScreener's public API is shared with the
+// core discovery polls that matter more) but tightened from 5 minutes to 1 —
+// a real DexScreener profile appearing is caught almost immediately by
+// discoveryLoop's 15s poll (see runDiscoveryPoll), but a token that never
+// gets an official profile relies entirely on this sweep noticing its real
+// trading activity, so making it wait a full 5 minutes was needless latency
+// once the fair round-robin ordering below made a wider sweep interval
+// unnecessary for correctness.
+const AWAITING_PROFILE_ACTIVITY_INTERVAL_SECONDS = 60;
 // A 429 from Gemini here is almost always the free-tier's per-day request
 // cap, not a transient blip — hammering it every 3s just burns DB/CPU and
 // floods logs until the quota resets. Back off for a while instead, and

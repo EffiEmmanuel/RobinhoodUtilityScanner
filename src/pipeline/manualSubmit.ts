@@ -41,7 +41,17 @@ function extractAddress(input: string): `0x${string}` {
  * trading/api.ts's "no manual execution trigger" rule intact: the AI still
  * decides entry and whether to trade at all.
  */
-export async function submitManualToken(rawAddress: string): Promise<Token> {
+export interface ManualSubmitResult {
+  token: Token;
+  // Tells the caller (the dashboard) whether this submission actually
+  // triggered new work or just handed back a token that's already mid-flight
+  // or already fully evaluated — without this, "already ALERTED" and "freshly
+  // queued" render identically as "Queued X — status: Y" and a re-submission
+  // of an already-processed token looks indistinguishable from a no-op bug.
+  action: "CREATED" | "REQUEUED" | "ALREADY_IN_PROGRESS" | "ALREADY_EVALUATED";
+}
+
+export async function submitManualToken(rawAddress: string): Promise<ManualSubmitResult> {
   const address = extractAddress(rawAddress);
 
   const existing = await db.token.findUnique({
@@ -50,14 +60,15 @@ export async function submitManualToken(rawAddress: string): Promise<Token> {
 
   if (existing) {
     if (!REPROCESSABLE_STATUSES.has(existing.status)) {
-      return existing; // already in flight or already evaluated — nothing to do
+      const inProgressStatuses = new Set<TokenStatus>([TokenStatus.CLASSIFYING, TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING]);
+      return { token: existing, action: inProgressStatuses.has(existing.status) ? "ALREADY_IN_PROGRESS" : "ALREADY_EVALUATED" };
     }
     const reset = await db.token.update({
       where: { id: existing.id },
       data: { status: TokenStatus.DETECTED, lastSeenAt: new Date() },
     });
     logger.info({ tokenId: reset.id, address }, "manual submission: re-queued a previously rejected/failed token");
-    return reset;
+    return { token: reset, action: "REQUEUED" };
   }
 
   let name: string | undefined;
@@ -82,5 +93,5 @@ export async function submitManualToken(rawAddress: string): Promise<Token> {
   });
 
   logger.info({ tokenId: created.id, address }, "manually submitted token queued for AI evaluation");
-  return created;
+  return { token: created, action: "CREATED" };
 }

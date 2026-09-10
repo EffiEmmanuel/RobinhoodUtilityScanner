@@ -94,7 +94,8 @@ export function buildServer() {
       return reply.code(400).send({ error: "body must include `address`" });
     }
     try {
-      return await submitManualToken(address);
+      const result = await submitManualToken(address);
+      return { ...result.token, submitAction: result.action };
     } catch (err) {
       return reply.code(400).send({ error: String((err as Error).message ?? err) });
     }

@@ -140,7 +140,13 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
   const cutoff = new Date(Date.now() - config.awaitingProfileMinAgeMinutes * 60_000);
   const candidates = await db.token.findMany({
     where: { status: TokenStatus.AWAITING_DEX_PROFILE, firstSeenAt: { lte: cutoff } },
-    take: 50, // bounds cost per sweep regardless of backlog size
+    // Least-recently-checked first (lastSeenAt doubles as "last time this
+    // sweep actually looked at it" — see the touch-on-every-check below),
+    // not firstSeenAt. A backlog bigger than one sweep's cap still rotates
+    // fairly this way instead of a fixed subset at the front of the queue
+    // permanently starving everything behind it until the 24h expiry.
+    orderBy: { lastSeenAt: "asc" },
+    take: 100, // bounds cost per sweep regardless of backlog size
   });
 
   let promoted = 0;
@@ -156,7 +162,7 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
       market = await researchMarket(token.chain, token.address);
     } catch (err) {
       logger.warn({ tokenId: token.id, address: token.address, err: String(err) }, "activity check: could not fetch market data");
-      continue;
+      continue; // leave lastSeenAt untouched so a fetch failure gets retried sooner, not pushed to the back of the queue
     }
     const pair = market.primaryPair;
     if (!pair) continue;
@@ -172,6 +178,11 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
       );
     } else if (liquidityUsd >= MIN_LIQUIDITY_USD_WORTH_AN_X_CHECK && !token.xCheckedAt && config.xBearerToken) {
       xCandidates.push({ token, liquidityUsd });
+    } else {
+      // Checked this sweep, still not active enough to promote or X-check —
+      // touch lastSeenAt so it's provably "just checked, still waiting" (not
+      // stuck/ignored) and rotates to the back of the next sweep's queue.
+      await db.token.update({ where: { id: token.id }, data: { lastSeenAt: new Date() } });
     }
   }
 
