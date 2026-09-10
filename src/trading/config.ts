@@ -85,12 +85,43 @@ export const tradingConfig = {
   positionMonitorIntervalSeconds: num("POSITION_MONITOR_INTERVAL_SECONDS", 5),
   pendingEntryMonitorIntervalSeconds: num("PENDING_ENTRY_MONITOR_INTERVAL_SECONDS", 20),
 
+  // A WAIT_FOR_ENTRY plan's target zone/risk score was previously frozen at
+  // whatever the AI saw once, at plan-creation time — confirmed live: a plan
+  // created against a token at its all-time-high stayed unchanged while that
+  // token swung between $100K-$380K mcap for over an hour. Re-run the trade
+  // analysis (fresh market/technical data, a new plan+pending entry replacing
+  // the stale one) whenever either condition is met, whichever comes first.
+  // Tightened from 15: same AI-rate-limit tradeoff as
+  // positionStrategyReviewIntervalMinutes above — the deterministic "is price
+  // in the target zone" check already runs continuously (no AI cost, bound
+  // only by DexScreener's response time) regardless of this value; this only
+  // controls how often the target zone/risk score itself gets recalculated.
+  pendingPlanReviewIntervalMinutes: num("PENDING_PLAN_REVIEW_INTERVAL_MINUTES", 3),
+  pendingPlanReplanOnDriftPercent: num("PENDING_PLAN_REPLAN_ON_DRIFT_PERCENT", 25),
+
+  // The AI's own riskScore (0-100, market-timing risk — extended/parabolic
+  // scores high) was computed and stored but never actually gated a real
+  // entry. Confirmed live: an 85/100-risk plan would have gone on to execute
+  // a real buy the moment price happened to dip into its target zone, with
+  // nothing checking that the AI itself called this risky. This requires the
+  // MOST RECENT plan's risk score (refreshed by the review above) to be at or
+  // below this ceiling before a trigger is allowed to proceed to sizing/
+  // execution — a stale "still risky" plan blocks the trade instead of
+  // silently trusting an old number.
+  maxEntryRiskScore: num("MAX_ENTRY_RISK_SCORE", 50),
+
   // Active position management (§trading/positionStrategy.ts) — the AI
   // reviews an open position's strategy periodically (not on every cheap
   // monitor tick), proposing partial-profit/exit/re-entry-target decisions
   // that deterministic code then enforces or executes. Hard caps here bound
   // it regardless of what the AI recommends.
-  positionStrategyReviewIntervalMinutes: num("POSITION_STRATEGY_REVIEW_INTERVAL_MINUTES", 5),
+  // Tightened from 5: this is an AI call (Gemini), shared rate-limit budget
+  // with classification/research/planning — going much faster (e.g. seconds)
+  // risks exhausting that budget and breaking the rest of the pipeline. The
+  // deterministic exit checks (stop-loss/profit-target/trailing/time) run
+  // every positionMonitorIntervalSeconds (5s) regardless of this value — this
+  // setting only controls how often the smarter contextual layer refreshes.
+  positionStrategyReviewIntervalMinutes: num("POSITION_STRATEGY_REVIEW_INTERVAL_MINUTES", 2),
   // Raised from 1: the AI strategy review (positionStrategy.ts) already
   // implements exactly a buy-the-dip/sell-the-resistance cycle via repeated
   // TAKE_PARTIAL_PROFIT + SET_REENTRY_TARGET decisions — capping it at one

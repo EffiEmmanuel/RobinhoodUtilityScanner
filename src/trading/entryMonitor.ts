@@ -19,6 +19,7 @@ import { getBuyEstimate, executeBuyFill, isSellable, type FillResult } from "./e
 import { getActiveStrategyVersion, type SizingRules } from "./strategy";
 import { tradingConfig } from "./config";
 import { sendTradeEntryEmail } from "./notifications";
+import { planCandidate } from "./planning";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   const result = await db.pendingEntry.updateMany({ where: { id, status: from }, data: { status: to } });
@@ -86,6 +87,29 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
   // proxy for "we're actively watching this" once it's in the trading funnel.
   await db.token.update({ where: { id: candidate.tokenId }, data: { lastSeenAt: new Date() } }).catch(() => {});
 
+  // Stale-plan check: a WAIT_FOR_ENTRY target zone and risk score were
+  // otherwise frozen at whatever the AI saw once, at plan-creation time.
+  // Confirmed live: a plan stayed unchanged while its token swung between
+  // $100K-$380K mcap for over an hour. Re-run the trade analysis with fresh
+  // market/technical data whenever the plan is old enough OR price has
+  // drifted far enough from where it was created — whichever comes first.
+  const planAgeMinutes = (Date.now() - plan.createdAt.getTime()) / 60_000;
+  const priceDriftPercent =
+    mcap !== undefined && plan.currentMarketCap ? (Math.abs(mcap - plan.currentMarketCap) / plan.currentMarketCap) * 100 : 0;
+  if (planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes || priceDriftPercent >= tradingConfig.pendingPlanReplanOnDriftPercent) {
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.CANCELLED, lastCheckedAt: new Date() } });
+    logger.info(
+      { pendingEntryId: entry.id, candidateId: candidate.id, planAgeMinutes: Math.round(planAgeMinutes), priceDriftPercent: Math.round(priceDriftPercent) },
+      "trade plan is stale — re-running analysis with fresh market data"
+    );
+    try {
+      await planCandidate(candidate.id);
+    } catch (err) {
+      logger.error({ candidateId: candidate.id, err: String(err) }, "re-plan failed — candidate has no active pending entry until the next planning pass picks it up");
+    }
+    return;
+  }
+
   const inZone =
     mcap !== undefined &&
     entry.targetMcapMin !== null &&
@@ -95,6 +119,19 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
 
   if (!inZone) {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE, lastCheckedAt: new Date() } });
+    return;
+  }
+
+  // Price is in zone, but only proceed if the AI's own risk assessment is
+  // still acceptably low — not just true back when the plan was created.
+  // The staleness check above guarantees this plan is recent, so this is a
+  // meaningful, current read, not a stale number being trusted blindly.
+  if (plan.riskScore !== null && plan.riskScore !== undefined && plan.riskScore > tradingConfig.maxEntryRiskScore) {
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE, lastCheckedAt: new Date() } });
+    logger.info(
+      { pendingEntryId: entry.id, candidateId: candidate.id, riskScore: plan.riskScore, ceiling: tradingConfig.maxEntryRiskScore },
+      "entry deferred — AI risk score exceeds the ceiling required to actually enter"
+    );
     return;
   }
 
