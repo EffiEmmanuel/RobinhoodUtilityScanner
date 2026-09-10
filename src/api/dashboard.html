@@ -1249,6 +1249,13 @@
             </div>
             <div class="card">
               <div class="card-head">
+                <h2>Profile Updates</h2>
+                <span class="count-chip" id="profile-updates-count">0</span>
+              </div>
+              <div class="feed" id="profile-updates-feed"></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
                 <h2>Ledger</h2>
                 <span class="count-chip" id="ledger-count">0</span>
               </div>
@@ -1361,6 +1368,8 @@
           closedCount: document.getElementById("closed-count"),
           candidatesFeed: document.getElementById("candidates-feed"),
           candidatesCount: document.getElementById("candidates-count"),
+          profileUpdatesFeed: document.getElementById("profile-updates-feed"),
+          profileUpdatesCount: document.getElementById("profile-updates-count"),
           ledgerFeed: document.getElementById("ledger-feed"),
           ledgerCount: document.getElementById("ledger-count"),
           walletChip: document.getElementById("wallet-chip"),
@@ -1511,6 +1520,7 @@
             fetchJson("/trades?status=CLOSED&limit=20"),
             fetchJson("/trade-candidates?limit=15"),
             fetchJson("/ledger?limit=12"),
+            fetchJson("/profile-updates?limit=15"),
             fetchJson(
               "/tokens?limit=" +
                 state.activityPageSize +
@@ -1530,7 +1540,8 @@
                 closedTrades: results[2],
                 candidates: results[3],
                 ledger: results[4],
-                tokens: results[5],
+                profileUpdates: results[5],
+                tokens: results[6],
               });
             })
             .catch(function (err) {
@@ -1642,6 +1653,7 @@
           renderClosedTrades(data.closedTrades || []);
           renderCandidates(data.candidates || []);
           renderLedger(data.ledger || []);
+          renderProfileUpdates(data.profileUpdates || []);
 
           els.lastUpdated.textContent = "updated just now";
         }
@@ -1857,6 +1869,38 @@
                 conf +
                 '</span><span class="time">' +
                 fmtAgo(c.createdAt) +
+                "</span></div>" +
+                "</div>"
+              );
+            })
+            .join("");
+        }
+
+        function renderProfileUpdates(rows) {
+          els.profileUpdatesCount.textContent = rows.length;
+          if (!rows.length) {
+            els.profileUpdatesFeed.innerHTML =
+              '<div class="empty-feed">No rejected tokens have gained new profile data yet.</div>';
+            return;
+          }
+          els.profileUpdatesFeed.innerHTML = rows
+            .map(function (u) {
+              var fields = (u.changedFields || []).join(", ") || "—";
+              return (
+                '<div class="feed-row clickable" data-token-id="' +
+                esc(u.token && u.token.id) +
+                '">' +
+                '<div class="line1"><span class="name">' +
+                tokenLabel(u.token) +
+                '</span><span class="badge ' +
+                esc(u.token && u.token.status) +
+                '">' +
+                esc(u.token && u.token.status) +
+                "</span></div>" +
+                '<div class="line1"><span class="meta">new: ' +
+                esc(fields) +
+                '</span><span class="time">' +
+                fmtAgo(u.detectedAt) +
                 "</span></div>" +
                 "</div>"
               );
@@ -2268,6 +2312,7 @@
         }
         wireTokenClicks(els.activityFeed);
         wireTokenClicks(els.candidatesFeed);
+        wireTokenClicks(els.profileUpdatesFeed);
         wireTokenClicks(els.positionsBody);
         wireTokenClicks(els.closedBody);
 

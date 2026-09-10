@@ -69,9 +69,35 @@ model Token {
   alerts          Alert[]
   tradeCandidates TradeCandidate[]
   trades          Trade[]
+  profileUpdates  ProfileUpdate[]
 
   @@unique([chain, address])
   @@index([status])
+}
+
+// A separate table (not just a flag on Token) so a token's profile-change
+// history stays visible even after it's requeued and re-rejected again —
+// discovery only diffs a REJECTED token's profile against what's already
+// stored (see pipeline/discover.ts's diffTokenProfile), so this only ever
+// fires for a token that already failed once and just gained new real
+// data (an icon, a description, a website/social link) worth another look.
+model ProfileUpdate {
+  id      String @id @default(cuid())
+  tokenId String
+  token   Token  @relation(fields: [tokenId], references: [id])
+
+  changedFields   Json // string[] — which fields newly appeared, e.g. ["icon","links"]
+  previousProfile Json?
+  newProfile      Json
+
+  // Always true today (a detected change always requeues a REJECTED token —
+  // see discover.ts) but modeled as its own field rather than assumed, since
+  // a future caller of this table may want to distinguish "detected but not
+  // acted on" from "detected and requeued."
+  requeued   Boolean  @default(true)
+  detectedAt DateTime @default(now())
+
+  @@index([tokenId])
 }
 
 model Classification {

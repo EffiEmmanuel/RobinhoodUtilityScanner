@@ -105,6 +105,15 @@ export function buildServer() {
     });
   });
 
+  app.get("/profile-updates", async (req) => {
+    const { limit } = req.query as { limit?: string };
+    return db.profileUpdate.findMany({
+      orderBy: { detectedAt: "desc" },
+      take: Math.min(Number(limit) || 20, 100),
+      include: { token: { select: { id: true, name: true, symbol: true, address: true, status: true } } },
+    });
+  });
+
   app.post("/tokens/submit", async (req, reply) => {
     const { address } = (req.body ?? {}) as { address?: string };
     if (!address || typeof address !== "string" || !address.trim()) {

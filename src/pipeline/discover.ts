@@ -5,9 +5,34 @@ import { db } from "../db";
 import { logger } from "../logger";
 import { cheapFilter } from "./cheapFilter";
 import { TokenStatus, Prisma } from "../generated/prisma";
+import type { Token } from "../generated/prisma";
 import { getPublicClient } from "../trading/live/wallet";
 import { getAdjustedTotalSupply } from "../trading/live/tokenUtils";
 import { searchXForContractAddress } from "../research/xSearch";
+import type { DiscoveredTokenProfile } from "../dex/types";
+
+/**
+ * A REJECTED token's DexScreener profile can change after the fact — a
+ * project adds a real icon, description, or website/social link days after
+ * launch. discover.ts only ever sees a token again when DexScreener's own
+ * "latest updated profiles" feed surfaces it (that's the poll this function
+ * feeds), so this only needs to compare against what we already stored, not
+ * poll anything extra. Only additions count — a field disappearing isn't
+ * "new signal" worth spending another classification call on.
+ */
+function diffTokenProfile(
+  existing: Pick<Token, "iconUrl" | "headerUrl" | "description" | "rawProfile">,
+  profile: DiscoveredTokenProfile
+): string[] {
+  const changed: string[] = [];
+  if (!existing.iconUrl && profile.icon) changed.push("icon");
+  if (!existing.headerUrl && profile.header) changed.push("header");
+  if (!existing.description && profile.description) changed.push("description");
+  const prevLinks = ((existing.rawProfile as { links?: { url: string }[] } | null)?.links ?? []).map((l) => l.url).sort();
+  const newLinks = (profile.links ?? []).map((l) => l.url).sort();
+  if (newLinks.length > prevLinks.length) changed.push("links");
+  return changed;
+}
 
 // A much lower bar than the full promotion threshold — just "has any real
 // trading happened at all", to decide whether a token is even worth
@@ -51,7 +76,14 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
       where: { chain_address: { chain: profile.chainId, address: profile.tokenAddress } },
     });
 
-    if (existing && existing.status !== TokenStatus.AWAITING_DEX_PROFILE) {
+    // Only a REJECTED token gets re-examined on a profile change — anything
+    // mid-pipeline or already WATCHLISTED/ALERTED has its own lifecycle and
+    // shouldn't be disturbed by a routine poll just because it happens to
+    // reappear in DexScreener's "latest updated" feed.
+    const changedFields =
+      existing && existing.status === TokenStatus.REJECTED ? diffTokenProfile(existing, profile) : [];
+
+    if (existing && existing.status !== TokenStatus.AWAITING_DEX_PROFILE && changedFields.length === 0) {
       await db.token.update({
         where: { id: existing.id },
         data: { lastSeenAt: new Date() },
@@ -99,10 +131,25 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
       // other profile that fails the cheap filter) instead of another
       // unrelated on-chain clone quietly claiming the row via a race.
       await db.token.update({ where: { id: existing.id }, data });
-      logger.info(
-        { address: profile.tokenAddress, passed: filter.passed, reasons: filter.reasons },
-        "on-chain-discovered token confirmed by a real DexScreener profile"
-      );
+      if (changedFields.length > 0) {
+        await db.profileUpdate.create({
+          data: {
+            tokenId: existing.id,
+            changedFields: changedFields as unknown as object,
+            previousProfile: existing.rawProfile ?? Prisma.JsonNull,
+            newProfile: profile as unknown as object,
+          },
+        });
+        logger.info(
+          { tokenId: existing.id, address: profile.tokenAddress, changedFields, passed: filter.passed },
+          "previously-rejected token's DexScreener profile changed — requeued into the AI pipeline"
+        );
+      } else {
+        logger.info(
+          { address: profile.tokenAddress, passed: filter.passed, reasons: filter.reasons },
+          "on-chain-discovered token confirmed by a real DexScreener profile"
+        );
+      }
     } else {
       await db.token.create({ data: { chain: profile.chainId, address: profile.tokenAddress, ...data } });
       created++;
@@ -177,12 +224,46 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
 
     const hourlyTxns = (pair.buys1h ?? 0) + (pair.sells1h ?? 0);
     const liquidityUsd = pair.liquidityUsd ?? 0;
-    if (liquidityUsd >= config.awaitingProfileMinLiquidityUsd && hourlyTxns >= config.awaitingProfileMinHourlyTxns) {
-      await db.token.update({ where: { id: token.id }, data: { status: TokenStatus.DETECTED } });
+    // The real bug this was missing: DexScreener renders a real icon/header/
+    // website/social presence on a token's page (via the pair endpoint's
+    // `info` field) for virtually any pair, entirely independent of the
+    // narrow "submitted a token-profile" product this whole AWAITING state
+    // exists to wait for (see discover.ts's main-loop comment on `info.*`).
+    // A token can sit here forever with $0 activity yet a fully real,
+    // browsable DexScreener page — confirmed live (Sonera and hundreds of
+    // others). This checks the actual signal instead of only a liquidity/
+    // volume proxy for it.
+    const hasRealProfile = Boolean(pair.imageUrl || pair.headerUrl || pair.websites.length > 0 || pair.socials.length > 0);
+    const hasRealActivity = liquidityUsd >= config.awaitingProfileMinLiquidityUsd && hourlyTxns >= config.awaitingProfileMinHourlyTxns;
+    if (hasRealProfile || hasRealActivity) {
+      // Populate the same profile fields discover.ts's main loop and
+      // manualSubmit.ts already fall back to — without this, a token
+      // promoted here still reaches classification blind (icon/header/
+      // description null), the exact bug already fixed for the other two
+      // discovery paths but missed here.
+      await db.token.update({
+        where: { id: token.id },
+        data: {
+          status: TokenStatus.DETECTED,
+          iconUrl: pair.imageUrl,
+          headerUrl: pair.headerUrl,
+          rawProfile: {
+            source: "token-pairs-info-fallback",
+            chainId: token.chain,
+            tokenAddress: token.address,
+            icon: pair.imageUrl,
+            header: pair.headerUrl,
+            links: [
+              ...pair.websites.map((url) => ({ type: "website", url })),
+              ...pair.socials.map((s) => ({ type: s.type, url: s.url })),
+            ],
+          } as unknown as object,
+        },
+      });
       promoted++;
       logger.info(
-        { tokenId: token.id, address: token.address, liquidityUsd, hourlyTxns },
-        "promoted AWAITING_DEX_PROFILE token to AI review on real trading activity — no profile ever submitted"
+        { tokenId: token.id, address: token.address, liquidityUsd, hourlyTxns, hasRealProfile, hasRealActivity },
+        `promoted AWAITING_DEX_PROFILE token to AI review on ${hasRealProfile ? "a real DexScreener profile" : "real trading activity"}`
       );
     } else if (liquidityUsd >= MIN_LIQUIDITY_USD_WORTH_AN_X_CHECK && !token.xCheckedAt && config.xBearerToken) {
       xCandidates.push({ token, liquidityUsd });
