@@ -337,6 +337,7 @@
   .badge.SHADOW { background: var(--accent-soft); color: var(--accent-strong); }
   .badge.LIVE { background: var(--live-soft); color: var(--live); }
   .badge.DETECTED, .badge.CLASSIFYING, .badge.RESEARCH_QUEUED, .badge.RESEARCHING { background: var(--accent-soft); color: var(--accent-strong); }
+  .badge.AWAITING_DEX_PROFILE { background: var(--neutral-soft); color: var(--text-muted); }
   .badge.ALERTED { background: var(--good-soft); color: var(--good); }
   .badge.FAILED { background: var(--bad-soft); color: var(--bad); }
 
@@ -883,7 +884,8 @@
 
   function renderActivity(rows) {
     var rejected = rows.filter(function (t) { return t.status === 'REJECTED'; }).length;
-    els.activityStats.textContent = rows.length + ' shown · ' + rejected + ' rejected';
+    var awaiting = rows.filter(function (t) { return t.status === 'AWAITING_DEX_PROFILE'; }).length;
+    els.activityStats.textContent = rows.length + ' shown · ' + rejected + ' rejected · ' + awaiting + ' awaiting profile';
 
     state.activityHasMore = rows.length === state.activityPageSize;
     var pageNum = Math.floor(state.activityOffset / state.activityPageSize) + 1;
@@ -902,6 +904,8 @@
       var meta;
       if (cls) {
         meta = 'utility ' + Math.round(cls.utilityProbability * 100) + '% · meme ' + Math.round(cls.memeProbability * 100) + '%';
+      } else if (t.status === 'AWAITING_DEX_PROFILE') {
+        meta = 'on-chain only, no real DexScreener profile yet — not sent to AI';
       } else if (IN_PROGRESS_STATUSES[t.status]) {
         meta = 'queued for AI classification';
       } else if (t.status === 'REJECTED') {

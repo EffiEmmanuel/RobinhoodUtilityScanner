@@ -31,6 +31,14 @@ export const config = {
   // instead of waiting on third-party indexing. ~100ms blocks means even a
   // handful of seconds covers many blocks per poll.
   onchainDiscoveryIntervalSeconds: num("ONCHAIN_DISCOVERY_INTERVAL_SECONDS", 3),
+  // On-chain discovery is 6-7x the volume of the DexScreener feed and almost
+  // entirely copycats/spam (confirmed live: 11 of 12 tokens sharing a single
+  // trending name were bare on-chain clones with zero profile info) — every
+  // one of those was still costing a paid AI classification call for nothing.
+  // A token found on-chain now waits here, never touching AI, until
+  // DexScreener's own profile feed confirms it's real; if that never happens
+  // within this window it's dropped as noise instead of piling up forever.
+  awaitingDexProfileExpiryHours: num("AWAITING_DEX_PROFILE_EXPIRY_HOURS", 24),
 
   rhRpcUrl: str("RH_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),

@@ -8,16 +8,17 @@ import { cheapFilterOnchain } from "./cheapFilter";
 import { TokenStatus } from "../generated/prisma";
 
 /**
- * Watches PoolManager's own Initialize events directly on-chain instead of
- * waiting on DexScreener to index a new pair — the same mechanism
- * poolDiscovery.ts uses to find a specific token's pool, run continuously
- * for every new ETH-paired pool instead. This exists purely to shrink the
- * detection-to-research latency: it does NOT relax the quality bar anywhere
- * downstream — a token found this way goes through the exact same
- * cheap-filter/classify/research/candidate pipeline as one found via
- * DexScreener, just starting sooner. DexScreener discovery keeps running
- * unchanged as a second, independent path (and the natural catch-up for
- * anything this misses, e.g. during a restart gap).
+ * Watches PoolManager's own Initialize events directly on-chain — far faster
+ * than waiting on DexScreener to index a new pair, but confirmed live to be
+ * mostly copycat/spam noise (a single trending name had 11 bare on-chain
+ * clones to 1 real, DexScreener-profiled project). A token found this way
+ * does NOT go to AI: it lands in AWAITING_DEX_PROFILE and only becomes
+ * eligible for classification once discover.ts's DexScreener poll confirms
+ * a real profile for the same address (see enrichAwaitingProfile there) — the
+ * quality bar itself is unchanged, this only gates *when* AI ever gets
+ * involved. Anything that never gets a DexScreener profile within
+ * config.awaitingDexProfileExpiryHours is swept to REJECTED by
+ * expireStaleAwaitingProfile() instead of sitting in limbo forever.
  */
 let lastProcessedBlock: bigint | undefined;
 
@@ -49,11 +50,17 @@ export async function runOnchainDiscoveryPoll(): Promise<{ scanned: number; crea
   const seenThisBatch = new Set<string>();
 
   for (const log of logs) {
-    const tokenAddress = (log.args as { currency1?: `0x${string}` }).currency1;
-    if (!tokenAddress) continue;
-    const key = tokenAddress.toLowerCase();
-    if (seenThisBatch.has(key)) continue;
-    seenThisBatch.add(key);
+    const rawAddress = (log.args as { currency1?: `0x${string}` }).currency1;
+    if (!rawAddress) continue;
+    // Normalized once, used everywhere below — RPC calls are case-insensitive
+    // regardless, but our own DB uniqueness isn't, and viem returns this
+    // EIP-55 checksummed while DexScreener returns it lowercase. Without this,
+    // the same real contract can end up as two separate rows (confirmed live:
+    // 67 duplicate tokens from exactly this casing mismatch), each re-paying
+    // for its own classification/research.
+    const tokenAddress = rawAddress.toLowerCase() as `0x${string}`;
+    if (seenThisBatch.has(tokenAddress)) continue;
+    seenThisBatch.add(tokenAddress);
 
     const existing = await db.token.findUnique({
       where: { chain_address: { chain: config.targetChainId, address: tokenAddress } },
@@ -89,7 +96,7 @@ export async function runOnchainDiscoveryPoll(): Promise<{ scanned: number; crea
           address: tokenAddress,
           name,
           symbol,
-          status: filter.passed ? TokenStatus.DETECTED : TokenStatus.REJECTED,
+          status: filter.passed ? TokenStatus.AWAITING_DEX_PROFILE : TokenStatus.REJECTED,
         },
       });
       created++;

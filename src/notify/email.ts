@@ -83,6 +83,41 @@ export function buildAlertHtml(input: AlertEmailInput): string {
   return `<pre style="font-family: ui-monospace, monospace; white-space: pre-wrap; font-size: 13px;">${escapeHtml(text)}</pre>`;
 }
 
+/**
+ * Fired the moment ai/provider.ts rotates off an exhausted Gemini key — most
+ * important the first time (index 0 -> 1), since that's the paid key running
+ * dry and needing a top-up. Fire-and-forget from the caller's perspective:
+ * never let an alert-email failure break classification/research.
+ */
+export async function sendGeminiKeyRotationAlert(input: {
+  fromKeyIndex: number;
+  toKeyIndex: number;
+  totalKeys: number;
+  errorMessage: string;
+}): Promise<void> {
+  if (!config.alertEmailFrom || !config.alertEmailTo) {
+    logger.warn("ALERT_EMAIL_FROM/ALERT_EMAIL_TO not configured; skipping Gemini key rotation alert");
+    return;
+  }
+  const keyLabel = input.fromKeyIndex === 0 ? "your primary (paid) key" : `backup key #${input.fromKeyIndex + 1}`;
+  const subject = `⚠️ Gemini ${keyLabel} ran out — now on key ${input.toKeyIndex + 1} of ${input.totalKeys}`;
+  const text = [
+    `${keyLabel[0].toUpperCase()}${keyLabel.slice(1)} for the Gemini API just ran out of usable quota/credits.`,
+    `The bot automatically switched to key #${input.toKeyIndex + 1} of ${input.totalKeys} — classification and research keep running, nothing stopped.`,
+    "",
+    input.fromKeyIndex === 0
+      ? "Top up billing/credits on the primary Google Cloud project to switch back to it — the bot will keep using the backup key until then."
+      : "This was already a backup key, so all configured keys may now be low — check billing on each.",
+    "",
+    `Error seen: ${input.errorMessage}`,
+  ].join("\n");
+  try {
+    await getResend().emails.send({ from: config.alertEmailFrom, to: config.alertEmailTo, subject, text });
+  } catch (err) {
+    logger.error({ err: String(err) }, "failed to send Gemini key rotation alert email");
+  }
+}
+
 export async function sendAlertEmail(input: AlertEmailInput): Promise<string | undefined> {
   if (!config.alertEmailFrom || !config.alertEmailTo) {
     logger.warn("ALERT_EMAIL_FROM/ALERT_EMAIL_TO not configured; skipping email send");

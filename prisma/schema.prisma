@@ -14,6 +14,7 @@ datasource db {
 // — without them, two workers can race to pick up the same DETECTED/
 // RESEARCH_QUEUED row and do the (paid) AI work twice.
 enum TokenStatus {
+  AWAITING_DEX_PROFILE
   DETECTED
   CLASSIFYING
   REJECTED

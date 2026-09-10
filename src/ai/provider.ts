@@ -3,6 +3,7 @@ import type { z } from "zod";
 import { config } from "../config";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
+import { sendGeminiKeyRotationAlert } from "../notify/email";
 
 const RETRY_BACKOFF_MS = [0, 2000, 8000];
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -27,13 +28,31 @@ function getClient(): GoogleGenAI {
   return clients[currentKeyIndex] as GoogleGenAI;
 }
 
+// Status alone isn't a fully reliable signal for "this key/billing account is
+// out of usable balance" — a hard-capped budget or depleted prepaid credits
+// on a *paid* project isn't guaranteed to come back as exactly 429, unlike
+// the free-tier daily quota. Treat 403 as exhaustion too, and fall back to
+// matching the message for the wording Google actually uses either way.
+function looksLikeQuotaOrBillingExhaustion(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  if (err.status === 429 || err.status === 403) return true;
+  const message = String(err.message ?? "").toLowerCase();
+  return message.includes("quota") || message.includes("resource_exhausted") || message.includes("billing");
+}
+
 /** Returns true if there was another key to rotate to. */
 function rotateToNextKeyIfQuotaExhausted(err: unknown): boolean {
-  const isQuotaExhausted = err instanceof ApiError && err.status === 429;
-  if (!isQuotaExhausted) return false;
+  if (!looksLikeQuotaOrBillingExhaustion(err)) return false;
   if (currentKeyIndex >= API_KEYS.length - 1) return false;
+  const fromKeyIndex = currentKeyIndex;
   currentKeyIndex++;
-  logger.warn({ keyIndex: currentKeyIndex, totalKeys: API_KEYS.length }, "Gemini key exhausted its quota — rotating to the next configured key");
+  logger.warn({ keyIndex: currentKeyIndex, totalKeys: API_KEYS.length }, "Gemini key exhausted its quota/billing — rotating to the next configured key");
+  sendGeminiKeyRotationAlert({
+    fromKeyIndex,
+    toKeyIndex: currentKeyIndex,
+    totalKeys: API_KEYS.length,
+    errorMessage: String((err as ApiError).message ?? err),
+  }).catch((emailErr) => logger.error({ err: String(emailErr) }, "sendGeminiKeyRotationAlert threw unexpectedly"));
   return true;
 }
 

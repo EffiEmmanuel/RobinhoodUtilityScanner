@@ -8,17 +8,23 @@ import { TokenStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
 
 // A human pasting a CA in has already vouched for it, so a manual submission
-// re-queues even a token the automated pipeline previously gave up on.
-// Anything else (already mid-pipeline, or already scored) is left alone.
-const REPROCESSABLE_STATUSES = new Set<TokenStatus>([TokenStatus.REJECTED, TokenStatus.FAILED]);
+// re-queues even a token the automated pipeline previously gave up on (or is
+// still waiting on a DexScreener profile for — a human override skips that
+// wait entirely). Anything else (already mid-pipeline, or already scored) is
+// left alone.
+const REPROCESSABLE_STATUSES = new Set<TokenStatus>([TokenStatus.REJECTED, TokenStatus.FAILED, TokenStatus.AWAITING_DEX_PROFILE]);
 
 /** Pulls a 0x address out of raw input — accepts a bare address or something
- * like a pasted DexScreener/explorer URL with the address in the path. */
+ * like a pasted DexScreener/explorer URL with the address in the path.
+ * Lowercased (not EIP-55 checksummed) to match discover.ts/onchainDiscovery.ts
+ * — our own dedup constraint is a case-sensitive string compare, so a mixed
+ * check-summed address here would silently create a duplicate row instead of
+ * finding the real one. */
 function extractAddress(input: string): `0x${string}` {
   const trimmed = input.trim();
-  if (isAddress(trimmed)) return getAddress(trimmed);
+  if (isAddress(trimmed)) return getAddress(trimmed).toLowerCase() as `0x${string}`;
   const match = trimmed.match(/0x[a-fA-F0-9]{40}/);
-  if (match && isAddress(match[0])) return getAddress(match[0]);
+  if (match && isAddress(match[0])) return getAddress(match[0]).toLowerCase() as `0x${string}`;
   throw new Error(`"${input}" doesn't contain a valid contract address`);
 }
 
