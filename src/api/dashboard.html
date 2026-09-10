@@ -1,1038 +1,1734 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UtilityScout Terminal</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
-<style>
-  :root {
-    --bg: #f6f8f6;
-    --surface: #ffffff;
-    --surface-2: #eef2ef;
-    --border: #dde3de;
-    --text: #141a17;
-    --text-muted: #5c6864;
-    --accent: #0f7a72;
-    --accent-soft: #e3f3f1;
-    --accent-strong: #0b5a54;
-    --good: #1a8f5a;
-    --good-soft: #e4f3ea;
-    --warn: #93650f;
-    --warn-soft: #f7edd8;
-    --bad: #b23434;
-    --bad-soft: #fbe8e6;
-    --live: #ad2a22;
-    --live-soft: #fbe3e1;
-    --neutral-soft: #eef1ef;
-    --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
-    --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #0a0f0e;
-      --surface: #121917;
-      --surface-2: #17211f;
-      --border: #23322f;
-      --text: #e7ede9;
-      --text-muted: #8ba098;
-      --accent: #3fd8c6;
-      --accent-soft: #12302c;
-      --accent-strong: #8ff2e4;
-      --good: #4fdb8e;
-      --good-soft: #10321f;
-      --warn: #f2ba52;
-      --warn-soft: #35270f;
-      --bad: #f2726d;
-      --bad-soft: #341918;
-      --live: #ff7a72;
-      --live-soft: #3c1917;
-      --neutral-soft: #1b2422;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #0a0f0e;
-    --surface: #121917;
-    --surface-2: #17211f;
-    --border: #23322f;
-    --text: #e7ede9;
-    --text-muted: #8ba098;
-    --accent: #3fd8c6;
-    --accent-soft: #12302c;
-    --accent-strong: #8ff2e4;
-    --good: #4fdb8e;
-    --good-soft: #10321f;
-    --warn: #f2ba52;
-    --warn-soft: #35270f;
-    --bad: #f2726d;
-    --bad-soft: #341918;
-    --live: #ff7a72;
-    --live-soft: #3c1917;
-    --neutral-soft: #1b2422;
-  }
-  html { color-scheme: light dark; }
-  :root[data-theme="light"] { color-scheme: light; }
-  :root[data-theme="dark"] { color-scheme: dark; }
-
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans);
-    -webkit-font-smoothing: antialiased;
-  }
-  img { max-width: 100%; }
-  [hidden] { display: none !important; }
-  .wrap {
-    max-width: 1320px;
-    margin: 0 auto;
-    padding: 22px 24px 72px;
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-  }
-
-  /* ---- header ---- */
-  header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  .brand { display: flex; align-items: center; gap: 11px; }
-  .brand h1 {
-    margin: 0;
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-  }
-  .brand .sub {
-    margin-top: 1px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .mark { flex-shrink: 0; }
-
-  .status-cluster { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 10px;
-    border-radius: 100px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    white-space: nowrap;
-  }
-  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-  .dot.good { background: var(--good); box-shadow: 0 0 0 3px var(--good-soft); }
-  .dot.bad { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
-  .dot.neutral { background: var(--text-muted); }
-
-  .badge-mode {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    padding: 5px 9px;
-    border-radius: 5px;
-  }
-  .badge-mode.PAPER { background: var(--neutral-soft); color: var(--text-muted); }
-  .badge-mode.SHADOW { background: var(--accent-soft); color: var(--accent-strong); }
-  .badge-mode.LIVE { background: var(--live-soft); color: var(--live); }
-
-  button.icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px; height: 30px;
-    border-radius: 7px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-  button.icon-btn:hover { color: var(--text); border-color: var(--accent); }
-  button.icon-btn:focus-visible, a:focus-visible, input:focus-visible, button:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .last-updated { font-size: 11.5px; color: var(--text-muted); font-family: var(--font-mono); }
-
-  /* ---- settings panel ---- */
-  #settings-panel {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px 16px;
-    align-items: flex-end;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-  }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  .field label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
-  .field input {
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    padding: 7px 9px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    min-width: 230px;
-  }
-  .field input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .settings-hint { font-size: 11.5px; color: var(--text-muted); flex-basis: 100%; line-height: 1.5; }
-  .btn-primary {
-    font-family: var(--font-sans);
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 8px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #ffffff;
-    cursor: pointer;
-  }
-  .btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
-
-  /* ---- disconnected state ---- */
-  #disconnected {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--warn);
-    border-radius: 10px;
-    padding: 22px 24px;
-  }
-  #disconnected h2 { margin: 0; font-size: 15px; }
-  #disconnected p { margin: 0; font-size: 13px; color: var(--text-muted); line-height: 1.6; max-width: 60ch; }
-  #disconnected code {
-    font-family: var(--font-mono);
-    background: var(--surface-2);
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 12px;
-  }
-
-  /* ---- circuit breaker banner ---- */
-  .cb-banner {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    background: var(--bad-soft);
-    border-left: 3px solid var(--bad);
-    border-radius: 8px;
-    padding: 13px 16px;
-  }
-  .cb-banner strong { font-size: 13px; }
-  .cb-banner ul { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text); }
-  .cb-banner li { margin-bottom: 2px; }
-
-  /* ---- tiles ---- */
-  .tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
-    gap: 12px;
-  }
-  .tile {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
-  .tile .value {
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-    font-size: 23px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-  .tile .sub { font-size: 11.5px; color: var(--text-muted); font-family: var(--font-mono); }
-
-  /* ---- main grid ---- */
-  .grid-main { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
-  @media (max-width: 900px) { .grid-main { grid-template-columns: 1fr; } }
-  .col { display: flex; flex-direction: column; gap: 18px; }
-
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  .card-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 13px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  .card-head h2 { margin: 0; font-size: 13.5px; font-weight: 600; }
-  .count-chip {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    background: var(--surface-2);
-    padding: 2px 8px;
-    border-radius: 100px;
-  }
-
-  .table-scroll { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th {
-    text-align: left;
-    font-weight: 600;
-    text-transform: uppercase;
-    font-size: 10.5px;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-  }
-  td.token-cell { font-family: var(--font-sans); font-variant-numeric: normal; }
-  tr:last-child td { border-bottom: none; }
-  .num-good { color: var(--good); }
-  .num-bad { color: var(--bad); }
-  .empty-row td { color: var(--text-muted); font-family: var(--font-sans); text-align: center; padding: 26px 14px; }
-
-  .badge {
-    display: inline-block;
-    font-family: var(--font-sans);
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    padding: 2px 7px;
-    border-radius: 4px;
-  }
-  .badge.QUALIFIED, .badge.PLANNING { background: var(--accent-soft); color: var(--accent-strong); }
-  .badge.WAITING { background: var(--warn-soft); color: var(--warn); }
-  .badge.TRADED { background: var(--good-soft); color: var(--good); }
-  .badge.WATCH_ONLY, .badge.WATCHLISTED { background: var(--warn-soft); color: var(--warn); }
-  .badge.REJECTED, .badge.EXPIRED, .badge.MISSED { background: var(--neutral-soft); color: var(--text-muted); }
-  .badge.PAPER { background: var(--neutral-soft); color: var(--text-muted); }
-  .badge.SHADOW { background: var(--accent-soft); color: var(--accent-strong); }
-  .badge.LIVE { background: var(--live-soft); color: var(--live); }
-  .badge.DETECTED, .badge.CLASSIFYING, .badge.RESEARCH_QUEUED, .badge.RESEARCHING { background: var(--accent-soft); color: var(--accent-strong); }
-  .badge.AWAITING_DEX_PROFILE { background: var(--neutral-soft); color: var(--text-muted); }
-  .badge.ALERTED { background: var(--good-soft); color: var(--good); }
-  .badge.FAILED { background: var(--bad-soft); color: var(--bad); }
-
-  /* ---- feed lists (candidates / ledger) ---- */
-  .feed { display: flex; flex-direction: column; }
-  .feed-row {
-    padding: 11px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .feed-row:last-child { border-bottom: none; }
-  .feed-row .line1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-  .feed-row .name { font-size: 13px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .feed-row .meta {
-    font-size: 11.5px;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .feed-row .time { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
-  a.token-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--text-muted); }
-  a.token-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
-  a.addr-link { color: inherit; text-decoration: none; }
-  a.addr-link:hover { color: var(--accent); }
-  .empty-feed { padding: 26px 16px; text-align: center; color: var(--text-muted); font-size: 12.5px; }
-
-  .pager {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    padding: 10px 16px;
-    border-top: 1px solid var(--border);
-  }
-  .pager #activity-page-label {
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: var(--text-muted);
-    min-width: 3.5em;
-    text-align: center;
-  }
-  .pager button:disabled { opacity: 0.35; cursor: not-allowed; }
-  .pager button:disabled:hover { color: var(--text-muted); border-color: var(--border); }
-
-  .ledger-amount { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
-
-  /* ---- footer / wallet chip ---- */
-  footer {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px 18px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border);
-  }
-  .wallet-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 100px;
-    padding: 6px 8px 6px 12px;
-  }
-  .wallet-chip button {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-family: var(--font-sans);
-    font-size: 11px;
-    padding: 3px 8px;
-    border-radius: 100px;
-  }
-  .wallet-chip button:hover { background: var(--surface); color: var(--accent); }
-  footer .note { font-size: 11.5px; color: var(--text-muted); }
-
-  /* ---- manual submit ---- */
-  #manual-submit {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-  }
-  #manual-submit input {
-    flex: 1;
-    min-width: 0;
-    font-family: var(--font-mono);
-    font-size: 13px;
-    padding: 9px 11px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  #manual-submit input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  #manual-submit button:disabled { opacity: 0.6; cursor: not-allowed; }
-  #manual-submit-msg { font-size: 12px; flex-basis: 100%; }
-  #manual-submit-msg.ok { color: var(--good); }
-  #manual-submit-msg.err { color: var(--bad); }
-  @media (max-width: 640px) { #manual-submit { flex-wrap: wrap; } }
-
-  @media (prefers-reduced-motion: no-preference) {
-    .card, .tile { transition: border-color 0.15s ease; }
-  }
-
-  @media (max-width: 640px) {
-    .wrap { padding: 16px 14px 48px; gap: 14px; }
-    header { gap: 10px; }
-    .status-cluster { gap: 8px; }
-    #settings-panel { flex-direction: column; align-items: stretch; }
-    .field input { min-width: 0; width: 100%; }
-    .tiles { grid-template-columns: repeat(2, 1fr); }
-    footer { flex-direction: column; align-items: flex-start; }
-  }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <header>
-    <div class="brand">
-      <svg class="mark" width="30" height="30" viewBox="0 0 30 30" fill="none" aria-hidden="true">
-        <circle cx="15" cy="15" r="12.5" stroke="var(--accent)" stroke-width="1.6"/>
-        <circle cx="15" cy="15" r="7" stroke="var(--accent)" stroke-width="1.6" opacity="0.55"/>
-        <circle cx="15" cy="15" r="2.1" fill="var(--accent)"/>
-        <path d="M15 2.5V7M15 23V27.5M2.5 15H7M23 15H27.5" stroke="var(--accent)" stroke-width="1.4" stroke-linecap="round"/>
-      </svg>
-      <div>
-        <h1>UtilityScout Terminal</h1>
-        <div class="sub">Robinhood Chain &middot; live trading monitor</div>
-      </div>
-    </div>
-    <div class="status-cluster">
-      <span class="pill" id="conn-pill"><span class="dot neutral" id="conn-dot"></span><span id="conn-label">Connecting&hellip;</span></span>
-      <span class="badge-mode" id="mode-badge" style="display:none;"></span>
-      <span class="pill" id="kill-pill" hidden><span class="dot bad"></span>Kill switch engaged</span>
-      <span class="last-updated" id="last-updated"></span>
-      <button class="icon-btn" id="refresh-btn" title="Refresh now" aria-label="Refresh now">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M13.5 8A5.5 5.5 0 1 1 12 4.2M13.5 2v3.5H10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-      <button class="icon-btn" id="settings-btn" title="Connection settings" aria-label="Connection settings">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z" stroke="currentColor" stroke-width="1.3"/><path d="M13 8.6v-1.2l1.3-.8-1-1.8-1.5.4a4.9 4.9 0 0 0-1-.6L10.4 3H8.4l-.4 1.6c-.36.14-.7.34-1 .6l-1.5-.4-1 1.8L5.8 7.4v1.2l-1.3.8 1 1.8 1.5-.4c.3.26.64.46 1 .6l.4 1.6h2l.4-1.6c.36-.14.7-.34 1-.6l1.5.4 1-1.8L13 8.6Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>
-      </button>
-    </div>
-  </header>
-
-  <div id="settings-panel" hidden>
-    <div class="field">
-      <label for="api-base">API base URL</label>
-      <input id="api-base" type="text" spellcheck="false" placeholder="same origin as this page">
-    </div>
-    <div class="field">
-      <label for="api-key">API key (if set)</label>
-      <input id="api-key" type="password" spellcheck="false" placeholder="optional">
-    </div>
-    <button class="btn-primary" id="save-settings-btn">Connect</button>
-    <div class="settings-hint">
-      Defaults to this page's own origin — this dashboard is served directly by the bot, so it talks to its own API with
-      no extra setup. Override only if pointing this page at a different deployment. It can queue a contract address for
-      AI evaluation, but it can't place trades, change strategy, or touch the wallet key.
-    </div>
-  </div>
-
-  <div id="disconnected" hidden>
-    <h2>Not connected</h2>
-    <p id="disconnected-msg">Couldn't reach the bot's API.</p>
-  </div>
-
-  <div id="main-content" hidden>
-    <div id="manual-submit" style="margin-bottom:18px;">
-      <input id="manual-address-input" type="text" spellcheck="false" autocomplete="off" placeholder="Paste a contract address (0x…) to queue it for AI evaluation">
-      <button class="btn-primary" id="manual-submit-btn">Evaluate</button>
-      <span id="manual-submit-msg"></span>
-    </div>
-
-    <div class="cb-banner" id="cb-banner" hidden style="margin-bottom:18px;">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;margin-top:2px;"><path d="M8 1.5 15 14.5H1L8 1.5Z" stroke="var(--bad)" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3.4M8 11.8v.1" stroke="var(--bad)" stroke-width="1.3" stroke-linecap="round"/></svg>
-      <div>
-        <strong>New entries paused</strong> — circuit breaker tripped
-        <ul id="cb-reasons"></ul>
-      </div>
-    </div>
-
-    <div class="tiles" id="tiles" style="margin-bottom:18px;"></div>
-
-    <div class="grid-main">
-      <div class="col">
-        <div class="card">
-          <div class="card-head"><h2>Open Positions</h2><span class="count-chip" id="positions-count">0</span></div>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Token</th><th>Mode</th><th>Entry</th><th>Current</th><th>Unrealized $</th><th>Unrealized %</th><th>Opened</th></tr></thead>
-              <tbody id="positions-body"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>Recent Closed Trades</h2><span class="count-chip" id="closed-count">0</span></div>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th>Token</th><th>Mode</th><th>Realized</th><th>Realized $</th><th>Exit reason</th><th>Closed</th></tr></thead>
-              <tbody id="closed-body"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-head">
-            <h2>Discovery Activity</h2>
-            <span class="count-chip" id="activity-stats">0 seen</span>
-          </div>
-          <div class="feed" id="activity-feed"></div>
-          <div class="pager">
-            <button class="icon-btn" id="activity-prev" title="Previous page" aria-label="Previous page">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3 5 8l5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-            <span id="activity-page-label">Page 1</span>
-            <button class="icon-btn" id="activity-next" title="Next page" aria-label="Next page">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 3 11 8l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div class="col">
-        <div class="card">
-          <div class="card-head"><h2>Candidate Pipeline</h2><span class="count-chip" id="candidates-count">0</span></div>
-          <div class="feed" id="candidates-feed"></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>Ledger</h2><span class="count-chip" id="ledger-count">0</span></div>
-          <div class="feed" id="ledger-feed"></div>
-        </div>
-      </div>
-    </div>
-
-    <footer>
-      <span class="wallet-chip" id="wallet-chip" hidden>
-        <a id="wallet-addr" class="addr-link" href="#" target="_blank" rel="noopener noreferrer" title="Open on the Robinhood Chain explorer">&mdash;</a>
-        <button id="copy-addr-btn">copy</button>
-      </span>
-      <span class="pill" id="gas-pill" hidden></span>
-      <span class="note">The wallet's private key never leaves the server and is never exposed by this API.</span>
-    </footer>
-  </div>
-</div>
-
-<script>
-(function () {
-  var safeStorage = {
-    get: function (k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
-    set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-  };
-
-  var state = {
-    apiBase: safeStorage.get('us_api_base', window.location.origin),
-    apiKey: safeStorage.get('us_api_key', ''),
-    connected: false,
-    lastUpdated: null,
-    activityOffset: 0,
-    activityPageSize: 15,
-    activityHasMore: false
-  };
-
-  var els = {
-    settingsPanel: document.getElementById('settings-panel'),
-    settingsBtn: document.getElementById('settings-btn'),
-    refreshBtn: document.getElementById('refresh-btn'),
-    apiBaseInput: document.getElementById('api-base'),
-    apiKeyInput: document.getElementById('api-key'),
-    saveBtn: document.getElementById('save-settings-btn'),
-    connDot: document.getElementById('conn-dot'),
-    connLabel: document.getElementById('conn-label'),
-    modeBadge: document.getElementById('mode-badge'),
-    killPill: document.getElementById('kill-pill'),
-    lastUpdated: document.getElementById('last-updated'),
-    disconnected: document.getElementById('disconnected'),
-    disconnectedMsg: document.getElementById('disconnected-msg'),
-    mainContent: document.getElementById('main-content'),
-    cbBanner: document.getElementById('cb-banner'),
-    cbReasons: document.getElementById('cb-reasons'),
-    tiles: document.getElementById('tiles'),
-    activityFeed: document.getElementById('activity-feed'),
-    activityStats: document.getElementById('activity-stats'),
-    activityPrev: document.getElementById('activity-prev'),
-    activityNext: document.getElementById('activity-next'),
-    activityPageLabel: document.getElementById('activity-page-label'),
-    positionsBody: document.getElementById('positions-body'),
-    positionsCount: document.getElementById('positions-count'),
-    closedBody: document.getElementById('closed-body'),
-    closedCount: document.getElementById('closed-count'),
-    candidatesFeed: document.getElementById('candidates-feed'),
-    candidatesCount: document.getElementById('candidates-count'),
-    ledgerFeed: document.getElementById('ledger-feed'),
-    ledgerCount: document.getElementById('ledger-count'),
-    walletChip: document.getElementById('wallet-chip'),
-    walletAddr: document.getElementById('wallet-addr'),
-    copyAddrBtn: document.getElementById('copy-addr-btn'),
-    gasPill: document.getElementById('gas-pill'),
-    manualInput: document.getElementById('manual-address-input'),
-    manualBtn: document.getElementById('manual-submit-btn'),
-    manualMsg: document.getElementById('manual-submit-msg')
-  };
-
-  els.apiBaseInput.value = state.apiBase;
-  els.apiKeyInput.value = state.apiKey;
-
-  // ---------- formatting helpers ----------
-  function fmtUsd(n) {
-    if (n === null || n === undefined || isNaN(n)) return '&mdash;';
-    var sign = n < 0 ? '-' : '';
-    return sign + '$' + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
-  function fmtPercentSpan(n) {
-    if (n === null || n === undefined || isNaN(n)) return '&mdash;';
-    var cls = n > 0 ? 'num-good' : n < 0 ? 'num-bad' : '';
-    var sign = n > 0 ? '+' : '';
-    return '<span class="' + cls + '">' + sign + n.toFixed(1) + '%</span>';
-  }
-  function fmtUsdSpan(n) {
-    if (n === null || n === undefined || isNaN(n)) return '&mdash;';
-    var cls = n > 0 ? 'num-good' : n < 0 ? 'num-bad' : '';
-    return '<span class="' + cls + '">' + fmtUsd(n) + '</span>';
-  }
-  function fmtMultiple(n) {
-    if (n === null || n === undefined || isNaN(n)) return '&mdash;';
-    return n.toFixed(2) + '×';
-  }
-  function fmtAddr(a) {
-    if (!a) return '&mdash;';
-    return a.slice(0, 6) + '&hellip;' + a.slice(-4);
-  }
-  function esc(s) {
-    if (s === null || s === undefined) return '';
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
-    });
-  }
-  function fmtAgo(iso) {
-    if (!iso) return '&mdash;';
-    var diffMs = Date.now() - new Date(iso).getTime();
-    var s = Math.max(0, Math.round(diffMs / 1000));
-    if (s < 60) return s + 's ago';
-    var m = Math.round(s / 60);
-    if (m < 60) return m + 'm ago';
-    var h = Math.round(m / 60);
-    if (h < 48) return h + 'h ago';
-    var d = Math.round(h / 24);
-    return d + 'd ago';
-  }
-  function dexScreenerUrl(token) {
-    if (!token || !token.address) return null;
-    return 'https://dexscreener.com/' + encodeURIComponent(token.chain || 'robinhood') + '/' + token.address;
-  }
-  function blockscoutUrl(address) {
-    if (!address) return null;
-    return 'https://robinhoodchain.blockscout.com/address/' + address;
-  }
-  function tokenLabel(token) {
-    if (!token) return 'Unknown token';
-    var label = esc(token.symbol || token.name || (token.address ? fmtAddr(token.address) : 'Unknown'));
-    var url = dexScreenerUrl(token);
-    if (!url) return label;
-    return '<a class="token-link" href="' + url + '" target="_blank" rel="noopener noreferrer" title="Open on DexScreener">' + label + '</a>';
-  }
-
-  // ---------- data fetch ----------
-  function fetchJson(path) {
-    var url = state.apiBase.replace(/\/$/, '') + path;
-    var headers = {};
-    if (state.apiKey) headers['x-api-key'] = state.apiKey;
-    return fetch(url, { headers: headers }).then(function (res) {
-      if (!res.ok) throw new Error(path + ' -> HTTP ' + res.status);
-      return res.json();
-    });
-  }
-
-  function postJson(path, body) {
-    var url = state.apiBase.replace(/\/$/, '') + path;
-    var headers = { 'content-type': 'application/json' };
-    if (state.apiKey) headers['x-api-key'] = state.apiKey;
-    return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body) }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) {
-        if (!res.ok) throw new Error(data.error || (path + ' -> HTTP ' + res.status));
-        return data;
-      });
-    });
-  }
-
-  function refreshAll() {
-    Promise.all([
-      fetchJson('/trading/status'),
-      fetchJson('/positions'),
-      fetchJson('/trades?status=CLOSED&limit=20'),
-      fetchJson('/trade-candidates?limit=15'),
-      fetchJson('/ledger?limit=12'),
-      fetchJson('/tokens?limit=' + state.activityPageSize + '&offset=' + state.activityOffset)
-    ]).then(function (results) {
-      state.connected = true;
-      state.lastUpdated = Date.now();
-      render({
-        status: results[0],
-        positions: results[1],
-        closedTrades: results[2],
-        candidates: results[3],
-        ledger: results[4],
-        tokens: results[5]
-      });
-    }).catch(function (err) {
-      state.connected = false;
-      renderDisconnected(err);
-    });
-  }
-
-  // ---------- rendering ----------
-  function renderDisconnected(err) {
-    els.connDot.className = 'dot bad';
-    els.connLabel.textContent = 'Disconnected';
-    els.modeBadge.style.display = 'none';
-    els.killPill.hidden = true;
-    els.mainContent.hidden = true;
-    els.disconnected.hidden = false;
-    els.disconnectedMsg.innerHTML = 'Couldn’t reach <code>' + esc(state.apiBase) + '</code> (' + esc(err && err.message ? err.message : 'network error') +
-      '). If you changed the API base URL above, check it’s correct, or reload this page to reset to its default.';
-    els.settingsPanel.hidden = false;
-    els.lastUpdated.textContent = state.lastUpdated ? 'last connected ' + fmtAgo(new Date(state.lastUpdated).toISOString()) : '';
-  }
-
-  function render(data) {
-    els.connDot.className = 'dot good';
-    els.connLabel.textContent = 'Connected';
-    els.disconnected.hidden = true;
-    els.mainContent.hidden = false;
-
-    var s = data.status || {};
-    els.modeBadge.style.display = 'inline-block';
-    els.modeBadge.textContent = s.mode || '—';
-    els.modeBadge.className = 'badge-mode ' + (s.mode || '');
-    els.killPill.hidden = !!s.tradingEnabled;
-
-    // circuit breakers
-    var cb = s.circuitBreakers || { paused: false, reasons: [] };
-    if (cb.paused && cb.reasons && cb.reasons.length) {
-      els.cbBanner.hidden = false;
-      els.cbReasons.innerHTML = cb.reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('');
-    } else {
-      els.cbBanner.hidden = true;
-    }
-
-    // portfolio tiles
-    var p = s.portfolio || {};
-    var tiles = [
-      { label: 'Total Equity', value: fmtUsd(p.totalEquityUsd) },
-      { label: 'Cash', value: fmtUsd(p.cashUsd) },
-      { label: 'Deployed', value: fmtUsd(p.deployedUsd) },
-      { label: 'Available to Deploy', value: fmtUsd(p.availableToDeployUsd) },
-      { label: 'Reserve Target', value: fmtUsd(p.reserveTargetUsd) },
-      { label: 'Open Positions', value: (p.openPositionCount !== undefined ? p.openPositionCount : '—') }
-    ];
-    els.tiles.innerHTML = tiles.map(function (t) {
-      return '<div class="tile"><span class="label">' + esc(t.label) + '</span><span class="value">' + t.value + '</span></div>';
-    }).join('');
-
-    // wallet chip
-    var live = s.live || {};
-    if (live.walletConfigured) {
-      els.walletChip.hidden = false;
-      els.walletAddr.textContent = live.walletAddress || '—';
-      els.walletAddr.href = blockscoutUrl(live.walletAddress) || '#';
-      els.walletAddr.title = live.walletAddress || '';
-      els.gasPill.hidden = false;
-      var gasEth = live.walletGasBalanceEth;
-      els.gasPill.innerHTML = '<span class="dot ' + (live.ready ? 'good' : 'neutral') + '"></span>' +
-        (gasEth !== null && gasEth !== undefined ? Number(gasEth).toFixed(5) : '—') + ' ETH gas &middot; ' +
-        (live.ready ? 'live-ready' : 'not live-ready');
-    } else {
-      els.walletChip.hidden = true;
-      els.gasPill.hidden = true;
-    }
-
-    renderActivity(data.tokens || []);
-    renderPositions(data.positions || []);
-    renderClosedTrades(data.closedTrades || []);
-    renderCandidates(data.candidates || []);
-    renderLedger(data.ledger || []);
-
-    els.lastUpdated.textContent = 'updated just now';
-  }
-
-  function renderPositions(rows) {
-    els.positionsCount.textContent = rows.length;
-    if (!rows.length) {
-      els.positionsBody.innerHTML = '<tr class="empty-row"><td colspan="7">No open positions right now.</td></tr>';
-      return;
-    }
-    els.positionsBody.innerHTML = rows.map(function (t) {
-      var snap = (t.snapshots && t.snapshots[0]) || null;
-      var entry = t.entryPriceUsd;
-      var current = snap ? snap.priceUsd : entry;
-      var mult = entry && current ? current / entry : null;
-      var pnlUsd = snap ? snap.unrealizedPnlUsd : null;
-      var pnlPct = snap ? snap.unrealizedPnlPercent : null;
-      return '<tr>' +
-        '<td class="token-cell">' + tokenLabel(t.token) + '</td>' +
-        '<td><span class="badge ' + esc(t.mode) + '">' + esc(t.mode) + '</span></td>' +
-        '<td>' + (entry ? fmtUsd(entry) : '&mdash;') + '</td>' +
-        '<td>' + fmtMultiple(mult) + '</td>' +
-        '<td>' + fmtUsdSpan(pnlUsd) + '</td>' +
-        '<td>' + fmtPercentSpan(pnlPct) + '</td>' +
-        '<td>' + fmtAgo(t.openedAt) + '</td>' +
-        '</tr>';
-    }).join('');
-  }
-
-  function renderClosedTrades(rows) {
-    els.closedCount.textContent = rows.length;
-    if (!rows.length) {
-      els.closedBody.innerHTML = '<tr class="empty-row"><td colspan="6">No closed trades yet — the bot hasn’t exited a position.</td></tr>';
-      return;
-    }
-    els.closedBody.innerHTML = rows.map(function (t) {
-      return '<tr>' +
-        '<td class="token-cell">' + tokenLabel(t.token) + '</td>' +
-        '<td><span class="badge ' + esc(t.mode) + '">' + esc(t.mode) + '</span></td>' +
-        '<td>' + fmtMultiple(t.realizedMultiple) + '</td>' +
-        '<td>' + fmtUsdSpan(t.realizedPnlUsd) + '</td>' +
-        '<td class="token-cell" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;">' + esc(t.exitReason || '—') + '</td>' +
-        '<td>' + fmtAgo(t.closedAt) + '</td>' +
-        '</tr>';
-    }).join('');
-  }
-
-  var IN_PROGRESS_STATUSES = { DETECTED: 1, CLASSIFYING: 1, RESEARCH_QUEUED: 1, RESEARCHING: 1 };
-
-  function renderActivity(rows) {
-    var rejected = rows.filter(function (t) { return t.status === 'REJECTED'; }).length;
-    var awaiting = rows.filter(function (t) { return t.status === 'AWAITING_DEX_PROFILE'; }).length;
-    els.activityStats.textContent = rows.length + ' shown · ' + rejected + ' rejected · ' + awaiting + ' awaiting profile';
-
-    state.activityHasMore = rows.length === state.activityPageSize;
-    var pageNum = Math.floor(state.activityOffset / state.activityPageSize) + 1;
-    els.activityPageLabel.textContent = 'Page ' + pageNum;
-    els.activityPrev.disabled = state.activityOffset === 0;
-    els.activityNext.disabled = !state.activityHasMore;
-
-    if (!rows.length) {
-      els.activityFeed.innerHTML = '<div class="empty-feed">' +
-        (state.activityOffset > 0 ? 'No more results on this page.' : 'No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.') +
-        '</div>';
-      return;
-    }
-    els.activityFeed.innerHTML = rows.map(function (t) {
-      var cls = (t.classifications && t.classifications[0]) || null;
-      var meta;
-      if (cls) {
-        meta = 'utility ' + Math.round(cls.utilityProbability * 100) + '% · meme ' + Math.round(cls.memeProbability * 100) + '%';
-      } else if (t.status === 'AWAITING_DEX_PROFILE') {
-        meta = 'on-chain only, no real DexScreener profile yet — not sent to AI';
-      } else if (IN_PROGRESS_STATUSES[t.status]) {
-        meta = 'queued for AI classification';
-      } else if (t.status === 'REJECTED') {
-        meta = 'filtered before AI review (name/address check)';
-      } else if (t.status === 'FAILED') {
-        meta = 'pipeline error — see logs';
-      } else {
-        meta = '—';
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UtilityScout Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    />
+    <style>
+      :root {
+        --bg: #f6f8f6;
+        --surface: #ffffff;
+        --surface-2: #eef2ef;
+        --border: #dde3de;
+        --text: #141a17;
+        --text-muted: #5c6864;
+        --accent: #0f7a72;
+        --accent-soft: #e3f3f1;
+        --accent-strong: #0b5a54;
+        --good: #1a8f5a;
+        --good-soft: #e4f3ea;
+        --warn: #93650f;
+        --warn-soft: #f7edd8;
+        --bad: #b23434;
+        --bad-soft: #fbe8e6;
+        --live: #ad2a22;
+        --live-soft: #fbe3e1;
+        --neutral-soft: #eef1ef;
+        --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+        --font-mono:
+          "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
       }
-      return '<div class="feed-row">' +
-        '<div class="line1"><span class="name">' + tokenLabel(t) + '</span><span class="badge ' + esc(t.status) + '">' + esc(t.status) + '</span></div>' +
-        '<div class="line1"><span class="meta">' + meta + '</span><span class="time">' + fmtAgo(t.firstSeenAt) + '</span></div>' +
-        '</div>';
-    }).join('');
-  }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #0a0f0e;
+          --surface: #121917;
+          --surface-2: #17211f;
+          --border: #23322f;
+          --text: #e7ede9;
+          --text-muted: #8ba098;
+          --accent: #3fd8c6;
+          --accent-soft: #12302c;
+          --accent-strong: #8ff2e4;
+          --good: #4fdb8e;
+          --good-soft: #10321f;
+          --warn: #f2ba52;
+          --warn-soft: #35270f;
+          --bad: #f2726d;
+          --bad-soft: #341918;
+          --live: #ff7a72;
+          --live-soft: #3c1917;
+          --neutral-soft: #1b2422;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #0a0f0e;
+        --surface: #121917;
+        --surface-2: #17211f;
+        --border: #23322f;
+        --text: #e7ede9;
+        --text-muted: #8ba098;
+        --accent: #3fd8c6;
+        --accent-soft: #12302c;
+        --accent-strong: #8ff2e4;
+        --good: #4fdb8e;
+        --good-soft: #10321f;
+        --warn: #f2ba52;
+        --warn-soft: #35270f;
+        --bad: #f2726d;
+        --bad-soft: #341918;
+        --live: #ff7a72;
+        --live-soft: #3c1917;
+        --neutral-soft: #1b2422;
+      }
+      html {
+        color-scheme: light dark;
+      }
+      :root[data-theme="light"] {
+        color-scheme: light;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+      }
 
-  function renderCandidates(rows) {
-    els.candidatesCount.textContent = rows.length;
-    if (!rows.length) {
-      els.candidatesFeed.innerHTML = '<div class="empty-feed">No candidates qualified yet.</div>';
-      return;
-    }
-    els.candidatesFeed.innerHTML = rows.map(function (c) {
-      var q = c.qualityScore !== null && c.qualityScore !== undefined ? c.qualityScore.toFixed(0) : '—';
-      var conf = c.researchConfidence !== null && c.researchConfidence !== undefined ? c.researchConfidence.toFixed(0) : '—';
-      return '<div class="feed-row">' +
-        '<div class="line1"><span class="name">' + tokenLabel(c.token) + '</span><span class="badge ' + esc(c.status) + '">' + esc(c.status) + '</span></div>' +
-        '<div class="line1"><span class="meta">quality ' + q + ' &middot; confidence ' + conf + '</span><span class="time">' + fmtAgo(c.createdAt) + '</span></div>' +
-        '</div>';
-    }).join('');
-  }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      img {
+        max-width: 100%;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .wrap {
+        max-width: 1320px;
+        margin: 0 auto;
+        padding: 22px 24px 72px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
 
-  function renderLedger(rows) {
-    els.ledgerCount.textContent = rows.length;
-    if (!rows.length) {
-      els.ledgerFeed.innerHTML = '<div class="empty-feed">No ledger entries yet.</div>';
-      return;
-    }
-    els.ledgerFeed.innerHTML = rows.map(function (e) {
-      var amt = e.amountUsd;
-      var cls = amt > 0 ? 'num-good' : amt < 0 ? 'num-bad' : '';
-      var amtText = amt !== null && amt !== undefined ? (amt > 0 ? '+' : '') + fmtUsd(amt) : '—';
-      return '<div class="feed-row">' +
-        '<div class="line1"><span class="name" style="font-size:12.5px;">' + esc(e.type) + '</span>' +
-        '<span class="ledger-amount ' + cls + '">' + amtText + '</span></div>' +
-        '<div class="line1"><span class="meta" style="text-transform:none;letter-spacing:0;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(e.notes || '') + '</span><span class="time">' + fmtAgo(e.occurredAt) + '</span></div>' +
-        '</div>';
-    }).join('');
-  }
+      /* ---- header ---- */
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+      }
+      .brand h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .brand .sub {
+        margin-top: 1px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .mark {
+        flex-shrink: 0;
+      }
 
-  // ---------- interactions ----------
-  els.settingsBtn.addEventListener('click', function () {
-    els.settingsPanel.hidden = !els.settingsPanel.hidden;
-  });
-  els.refreshBtn.addEventListener('click', refreshAll);
-  els.activityPrev.addEventListener('click', function () {
-    if (state.activityOffset === 0) return;
-    state.activityOffset = Math.max(0, state.activityOffset - state.activityPageSize);
-    refreshAll();
-  });
-  els.activityNext.addEventListener('click', function () {
-    if (!state.activityHasMore) return;
-    state.activityOffset += state.activityPageSize;
-    refreshAll();
-  });
-  els.saveBtn.addEventListener('click', function () {
-    var base = els.apiBaseInput.value.trim() || window.location.origin;
-    var key = els.apiKeyInput.value.trim();
-    state.apiBase = base;
-    state.apiKey = key;
-    safeStorage.set('us_api_base', base);
-    safeStorage.set('us_api_key', key);
-    refreshAll();
-  });
-  els.copyAddrBtn.addEventListener('click', function () {
-    var addr = els.walletAddr.textContent;
-    if (!addr || addr === '—') return;
-    try {
-      navigator.clipboard.writeText(addr).then(function () {
-        els.copyAddrBtn.textContent = 'copied';
-        setTimeout(function () { els.copyAddrBtn.textContent = 'copy'; }, 1400);
-      }).catch(function () { fallbackCopy(addr); });
-    } catch (e) { fallbackCopy(addr); }
-  });
-  function submitManualAddress() {
-    var address = els.manualInput.value.trim();
-    if (!address) return;
-    els.manualBtn.disabled = true;
-    els.manualMsg.className = '';
-    els.manualMsg.textContent = 'Queuing…';
-    postJson('/tokens/submit', { address: address }).then(function (token) {
-      els.manualMsg.className = 'ok';
-      var label = token.symbol || token.name || fmtAddr(token.address).replace(/&hellip;/, '…');
-      els.manualMsg.textContent = 'Queued ' + label + ' — status: ' + token.status;
-      els.manualInput.value = '';
-      refreshAll();
-    }).catch(function (err) {
-      els.manualMsg.className = 'err';
-      els.manualMsg.textContent = err && err.message ? err.message : 'Could not queue that address.';
-    }).finally(function () {
-      els.manualBtn.disabled = false;
-    });
-  }
-  els.manualBtn.addEventListener('click', submitManualAddress);
-  els.manualInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') submitManualAddress();
-  });
+      .status-cluster {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 5px 10px;
+        border-radius: 100px;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        white-space: nowrap;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .dot.good {
+        background: var(--good);
+        box-shadow: 0 0 0 3px var(--good-soft);
+      }
+      .dot.bad {
+        background: var(--bad);
+        box-shadow: 0 0 0 3px var(--bad-soft);
+      }
+      .dot.neutral {
+        background: var(--text-muted);
+      }
 
-  function fallbackCopy(text) {
-    var range = document.createRange();
-    range.selectNodeContents(els.walletAddr);
-    var sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }
+      .badge-mode {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        padding: 5px 9px;
+        border-radius: 5px;
+      }
+      .badge-mode.PAPER {
+        background: var(--neutral-soft);
+        color: var(--text-muted);
+      }
+      .badge-mode.SHADOW {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .badge-mode.LIVE {
+        background: var(--live-soft);
+        color: var(--live);
+      }
 
-  // ---------- ticking "last updated" label when data is stale ----------
-  setInterval(function () {
-    if (state.connected && state.lastUpdated) {
-      var secs = Math.round((Date.now() - state.lastUpdated) / 1000);
-      if (secs >= 3) els.lastUpdated.textContent = 'updated ' + secs + 's ago';
-    }
-  }, 1000);
+      button.icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text-muted);
+        cursor: pointer;
+      }
+      button.icon-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      button.icon-btn:focus-visible,
+      a:focus-visible,
+      input:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .last-updated {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
 
-  refreshAll();
-  setInterval(refreshAll, 10000);
-})();
-</script>
-</body>
+      /* ---- settings panel ---- */
+      #settings-panel {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 16px;
+        align-items: flex-end;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .field label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+      }
+      .field input {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        padding: 7px 9px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        min-width: 230px;
+      }
+      .field input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .settings-hint {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        flex-basis: 100%;
+        line-height: 1.5;
+      }
+      .btn-primary {
+        font-family: var(--font-sans);
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 8px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #ffffff;
+        cursor: pointer;
+      }
+      .btn-primary:hover {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+      }
+
+      /* ---- disconnected state ---- */
+      #disconnected {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--warn);
+        border-radius: 10px;
+        padding: 22px 24px;
+      }
+      #disconnected h2 {
+        margin: 0;
+        font-size: 15px;
+      }
+      #disconnected p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--text-muted);
+        line-height: 1.6;
+        max-width: 60ch;
+      }
+      #disconnected code {
+        font-family: var(--font-mono);
+        background: var(--surface-2);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+
+      /* ---- circuit breaker banner ---- */
+      .cb-banner {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        background: var(--bad-soft);
+        border-left: 3px solid var(--bad);
+        border-radius: 8px;
+        padding: 13px 16px;
+      }
+      .cb-banner strong {
+        font-size: 13px;
+      }
+      .cb-banner ul {
+        margin: 6px 0 0;
+        padding-left: 18px;
+        font-size: 12.5px;
+        color: var(--text);
+      }
+      .cb-banner li {
+        margin-bottom: 2px;
+      }
+
+      /* ---- tiles ---- */
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+        gap: 12px;
+      }
+      .tile {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .tile .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+      }
+      .tile .value {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 23px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .tile .sub {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
+
+      /* ---- main grid ---- */
+      .grid-main {
+        display: grid;
+        grid-template-columns: 1.6fr 1fr;
+        gap: 18px;
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .grid-main {
+          grid-template-columns: 1fr;
+        }
+      }
+      .col {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .card-head h2 {
+        margin: 0;
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+      .count-chip {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-muted);
+        background: var(--surface-2);
+        padding: 2px 8px;
+        border-radius: 100px;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      th {
+        text-align: left;
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 10.5px;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+        padding: 9px 14px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      td {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+      td.token-cell {
+        font-family: var(--font-sans);
+        font-variant-numeric: normal;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .num-good {
+        color: var(--good);
+      }
+      .num-bad {
+        color: var(--bad);
+      }
+      .empty-row td {
+        color: var(--text-muted);
+        font-family: var(--font-sans);
+        text-align: center;
+        padding: 26px 14px;
+      }
+
+      .badge {
+        display: inline-block;
+        font-family: var(--font-sans);
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        padding: 2px 7px;
+        border-radius: 4px;
+      }
+      .badge.QUALIFIED,
+      .badge.PLANNING {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .badge.WAITING {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+      .badge.TRADED {
+        background: var(--good-soft);
+        color: var(--good);
+      }
+      .badge.WATCH_ONLY,
+      .badge.WATCHLISTED {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+      .badge.REJECTED,
+      .badge.EXPIRED,
+      .badge.MISSED {
+        background: var(--neutral-soft);
+        color: var(--text-muted);
+      }
+      .badge.PAPER {
+        background: var(--neutral-soft);
+        color: var(--text-muted);
+      }
+      .badge.SHADOW {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .badge.LIVE {
+        background: var(--live-soft);
+        color: var(--live);
+      }
+      .badge.DETECTED,
+      .badge.CLASSIFYING,
+      .badge.RESEARCH_QUEUED,
+      .badge.RESEARCHING {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .badge.AWAITING_DEX_PROFILE {
+        background: var(--neutral-soft);
+        color: var(--text-muted);
+      }
+      .badge.ALERTED {
+        background: var(--good-soft);
+        color: var(--good);
+      }
+      .badge.FAILED {
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
+
+      /* ---- feed lists (candidates / ledger) ---- */
+      .feed {
+        display: flex;
+        flex-direction: column;
+      }
+      .feed-row {
+        padding: 11px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .feed-row:last-child {
+        border-bottom: none;
+      }
+      .feed-row .line1 {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+      }
+      .feed-row .name {
+        font-size: 13px;
+        font-weight: 600;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .feed-row .meta {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .feed-row .time {
+        font-size: 11px;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        flex-shrink: 0;
+      }
+      a.token-link {
+        color: inherit;
+        text-decoration: none;
+        border-bottom: 1px dotted var(--text-muted);
+      }
+      a.token-link:hover {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+      a.addr-link {
+        color: inherit;
+        text-decoration: none;
+      }
+      a.addr-link:hover {
+        color: var(--accent);
+      }
+      .empty-feed {
+        padding: 26px 16px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 12.5px;
+      }
+
+      .pager {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--border);
+      }
+      .pager #activity-page-label {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        color: var(--text-muted);
+        min-width: 3.5em;
+        text-align: center;
+      }
+      .pager button:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      .pager button:disabled:hover {
+        color: var(--text-muted);
+        border-color: var(--border);
+      }
+
+      .ledger-amount {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+
+      /* ---- footer / wallet chip ---- */
+      footer {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 18px;
+        padding-top: 14px;
+        border-top: 1px solid var(--border);
+      }
+      .wallet-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 100px;
+        padding: 6px 8px 6px 12px;
+      }
+      .wallet-chip button {
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-family: var(--font-sans);
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 100px;
+      }
+      .wallet-chip button:hover {
+        background: var(--surface);
+        color: var(--accent);
+      }
+      footer .note {
+        font-size: 11.5px;
+        color: var(--text-muted);
+      }
+
+      /* ---- manual submit ---- */
+      #manual-submit {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+      }
+      #manual-submit input {
+        flex: 1;
+        min-width: 0;
+        font-family: var(--font-mono);
+        font-size: 13px;
+        padding: 9px 11px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      #manual-submit input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      #manual-submit button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      #manual-submit-msg {
+        font-size: 12px;
+        flex-basis: 100%;
+      }
+      #manual-submit-msg.ok {
+        color: var(--good);
+      }
+      #manual-submit-msg.err {
+        color: var(--bad);
+      }
+      @media (max-width: 640px) {
+        #manual-submit {
+          flex-wrap: wrap;
+        }
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .card,
+        .tile {
+          transition: border-color 0.15s ease;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .wrap {
+          padding: 16px 14px 48px;
+          gap: 14px;
+        }
+        header {
+          gap: 10px;
+        }
+        .status-cluster {
+          gap: 8px;
+        }
+        #settings-panel {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        .field input {
+          min-width: 0;
+          width: 100%;
+        }
+        .tiles {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        footer {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="brand">
+          <svg
+            class="mark"
+            width="30"
+            height="30"
+            viewBox="0 0 30 30"
+            fill="none"
+            aria-hidden="true"
+          >
+            <circle
+              cx="15"
+              cy="15"
+              r="12.5"
+              stroke="var(--accent)"
+              stroke-width="1.6"
+            />
+            <circle
+              cx="15"
+              cy="15"
+              r="7"
+              stroke="var(--accent)"
+              stroke-width="1.6"
+              opacity="0.55"
+            />
+            <circle cx="15" cy="15" r="2.1" fill="var(--accent)" />
+            <path
+              d="M15 2.5V7M15 23V27.5M2.5 15H7M23 15H27.5"
+              stroke="var(--accent)"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+          </svg>
+          <div>
+            <h1>UtilityScout Terminal</h1>
+            <div class="sub">Robinhood Chain &middot; live trading monitor</div>
+          </div>
+        </div>
+        <div class="status-cluster">
+          <span class="pill" id="conn-pill"
+            ><span class="dot neutral" id="conn-dot"></span
+            ><span id="conn-label">Connecting&hellip;</span></span
+          >
+          <span class="badge-mode" id="mode-badge" style="display: none"></span>
+          <span class="pill" id="kill-pill" hidden
+            ><span class="dot bad"></span>Kill switch engaged</span
+          >
+          <span class="last-updated" id="last-updated"></span>
+          <button
+            class="icon-btn"
+            id="refresh-btn"
+            title="Refresh now"
+            aria-label="Refresh now"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M13.5 8A5.5 5.5 0 1 1 12 4.2M13.5 2v3.5H10"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button
+            class="icon-btn"
+            id="settings-btn"
+            title="Connection settings"
+            aria-label="Connection settings"
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z"
+                stroke="currentColor"
+                stroke-width="1.3"
+              />
+              <path
+                d="M13 8.6v-1.2l1.3-.8-1-1.8-1.5.4a4.9 4.9 0 0 0-1-.6L10.4 3H8.4l-.4 1.6c-.36.14-.7.34-1 .6l-1.5-.4-1 1.8L5.8 7.4v1.2l-1.3.8 1 1.8 1.5-.4c.3.26.64.46 1 .6l.4 1.6h2l.4-1.6c.36-.14.7-.34 1-.6l1.5.4 1-1.8L13 8.6Z"
+                stroke="currentColor"
+                stroke-width="1.1"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="settings-panel" hidden>
+        <div class="field">
+          <label for="api-base">API base URL</label>
+          <input
+            id="api-base"
+            type="text"
+            spellcheck="false"
+            placeholder="same origin as this page"
+          />
+        </div>
+        <div class="field">
+          <label for="api-key">API key (if set)</label>
+          <input
+            id="api-key"
+            type="password"
+            spellcheck="false"
+            placeholder="optional"
+          />
+        </div>
+        <button class="btn-primary" id="save-settings-btn">Connect</button>
+        <div class="settings-hint">
+          Defaults to this page's own origin — this dashboard is served directly
+          by the bot, so it talks to its own API with no extra setup. Override
+          only if pointing this page at a different deployment. It can queue a
+          contract address for AI evaluation, but it can't place trades, change
+          strategy, or touch the wallet key.
+        </div>
+      </div>
+
+      <div id="disconnected" hidden>
+        <h2>Not connected</h2>
+        <p id="disconnected-msg">Couldn't reach the bot's API.</p>
+      </div>
+
+      <div id="main-content" hidden>
+        <div id="manual-submit" style="margin-bottom: 18px">
+          <div class="field">
+            <label for="api-key">Contract Address</label>
+            <input
+              id="manual-address-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Paste a contract address (0x…) to queue it for AI evaluation"
+            />
+          </div>
+          <button
+            class="btn-primary"
+            id="manual-submit-btn"
+            style="margin-top: 15px"
+          >
+            Evaluate
+          </button>
+          <span id="manual-submit-msg"></span>
+        </div>
+
+        <div
+          class="cb-banner"
+          id="cb-banner"
+          hidden
+          style="margin-bottom: 18px"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            style="flex-shrink: 0; margin-top: 2px"
+          >
+            <path
+              d="M8 1.5 15 14.5H1L8 1.5Z"
+              stroke="var(--bad)"
+              stroke-width="1.3"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M8 6.2v3.4M8 11.8v.1"
+              stroke="var(--bad)"
+              stroke-width="1.3"
+              stroke-linecap="round"
+            />
+          </svg>
+          <div>
+            <strong>New entries paused</strong> — circuit breaker tripped
+            <ul id="cb-reasons"></ul>
+          </div>
+        </div>
+
+        <div class="tiles" id="tiles" style="margin-bottom: 18px"></div>
+
+        <div class="grid-main">
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h2>Open Positions</h2>
+                <span class="count-chip" id="positions-count">0</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Token</th>
+                      <th>Mode</th>
+                      <th>Entry</th>
+                      <th>Current</th>
+                      <th>Unrealized $</th>
+                      <th>Unrealized %</th>
+                      <th>Opened</th>
+                    </tr>
+                  </thead>
+                  <tbody id="positions-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h2>Recent Closed Trades</h2>
+                <span class="count-chip" id="closed-count">0</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Token</th>
+                      <th>Mode</th>
+                      <th>Realized</th>
+                      <th>Realized $</th>
+                      <th>Exit reason</th>
+                      <th>Closed</th>
+                    </tr>
+                  </thead>
+                  <tbody id="closed-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h2>Discovery Activity</h2>
+                <span class="count-chip" id="activity-stats">0 seen</span>
+              </div>
+              <div class="feed" id="activity-feed"></div>
+              <div class="pager">
+                <button
+                  class="icon-btn"
+                  id="activity-prev"
+                  title="Previous page"
+                  aria-label="Previous page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M10 3 5 8l5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+                <span id="activity-page-label">Page 1</span>
+                <button
+                  class="icon-btn"
+                  id="activity-next"
+                  title="Next page"
+                  aria-label="Next page"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M6 3 11 8l-5 5"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h2>Candidate Pipeline</h2>
+                <span class="count-chip" id="candidates-count">0</span>
+              </div>
+              <div class="feed" id="candidates-feed"></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h2>Ledger</h2>
+                <span class="count-chip" id="ledger-count">0</span>
+              </div>
+              <div class="feed" id="ledger-feed"></div>
+            </div>
+          </div>
+        </div>
+
+        <footer>
+          <span class="wallet-chip" id="wallet-chip" hidden>
+            <a
+              id="wallet-addr"
+              class="addr-link"
+              href="#"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open on the Robinhood Chain explorer"
+              >&mdash;</a
+            >
+            <button id="copy-addr-btn">copy</button>
+          </span>
+          <span class="pill" id="gas-pill" hidden></span>
+          <span class="note"
+            >The wallet's private key never leaves the server and is never
+            exposed by this API.</span
+          >
+        </footer>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var safeStorage = {
+          get: function (k, d) {
+            try {
+              var v = localStorage.getItem(k);
+              return v === null ? d : v;
+            } catch (e) {
+              return d;
+            }
+          },
+          set: function (k, v) {
+            try {
+              localStorage.setItem(k, v);
+            } catch (e) {}
+          },
+        };
+
+        var state = {
+          apiBase: safeStorage.get("us_api_base", window.location.origin),
+          apiKey: safeStorage.get("us_api_key", ""),
+          connected: false,
+          lastUpdated: null,
+          activityOffset: 0,
+          activityPageSize: 15,
+          activityHasMore: false,
+        };
+
+        var els = {
+          settingsPanel: document.getElementById("settings-panel"),
+          settingsBtn: document.getElementById("settings-btn"),
+          refreshBtn: document.getElementById("refresh-btn"),
+          apiBaseInput: document.getElementById("api-base"),
+          apiKeyInput: document.getElementById("api-key"),
+          saveBtn: document.getElementById("save-settings-btn"),
+          connDot: document.getElementById("conn-dot"),
+          connLabel: document.getElementById("conn-label"),
+          modeBadge: document.getElementById("mode-badge"),
+          killPill: document.getElementById("kill-pill"),
+          lastUpdated: document.getElementById("last-updated"),
+          disconnected: document.getElementById("disconnected"),
+          disconnectedMsg: document.getElementById("disconnected-msg"),
+          mainContent: document.getElementById("main-content"),
+          cbBanner: document.getElementById("cb-banner"),
+          cbReasons: document.getElementById("cb-reasons"),
+          tiles: document.getElementById("tiles"),
+          activityFeed: document.getElementById("activity-feed"),
+          activityStats: document.getElementById("activity-stats"),
+          activityPrev: document.getElementById("activity-prev"),
+          activityNext: document.getElementById("activity-next"),
+          activityPageLabel: document.getElementById("activity-page-label"),
+          positionsBody: document.getElementById("positions-body"),
+          positionsCount: document.getElementById("positions-count"),
+          closedBody: document.getElementById("closed-body"),
+          closedCount: document.getElementById("closed-count"),
+          candidatesFeed: document.getElementById("candidates-feed"),
+          candidatesCount: document.getElementById("candidates-count"),
+          ledgerFeed: document.getElementById("ledger-feed"),
+          ledgerCount: document.getElementById("ledger-count"),
+          walletChip: document.getElementById("wallet-chip"),
+          walletAddr: document.getElementById("wallet-addr"),
+          copyAddrBtn: document.getElementById("copy-addr-btn"),
+          gasPill: document.getElementById("gas-pill"),
+          manualInput: document.getElementById("manual-address-input"),
+          manualBtn: document.getElementById("manual-submit-btn"),
+          manualMsg: document.getElementById("manual-submit-msg"),
+        };
+
+        els.apiBaseInput.value = state.apiBase;
+        els.apiKeyInput.value = state.apiKey;
+
+        // ---------- formatting helpers ----------
+        function fmtUsd(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          var sign = n < 0 ? "-" : "";
+          return (
+            sign +
+            "$" +
+            Math.abs(n).toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })
+          );
+        }
+        function fmtPercentSpan(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          var cls = n > 0 ? "num-good" : n < 0 ? "num-bad" : "";
+          var sign = n > 0 ? "+" : "";
+          return (
+            '<span class="' + cls + '">' + sign + n.toFixed(1) + "%</span>"
+          );
+        }
+        function fmtUsdSpan(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          var cls = n > 0 ? "num-good" : n < 0 ? "num-bad" : "";
+          return '<span class="' + cls + '">' + fmtUsd(n) + "</span>";
+        }
+        function fmtMultiple(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          return n.toFixed(2) + "×";
+        }
+        function fmtAddr(a) {
+          if (!a) return "&mdash;";
+          return a.slice(0, 6) + "&hellip;" + a.slice(-4);
+        }
+        function esc(s) {
+          if (s === null || s === undefined) return "";
+          return String(s).replace(/[&<>"']/g, function (c) {
+            return {
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            }[c];
+          });
+        }
+        function fmtAgo(iso) {
+          if (!iso) return "&mdash;";
+          var diffMs = Date.now() - new Date(iso).getTime();
+          var s = Math.max(0, Math.round(diffMs / 1000));
+          if (s < 60) return s + "s ago";
+          var m = Math.round(s / 60);
+          if (m < 60) return m + "m ago";
+          var h = Math.round(m / 60);
+          if (h < 48) return h + "h ago";
+          var d = Math.round(h / 24);
+          return d + "d ago";
+        }
+        function dexScreenerUrl(token) {
+          if (!token || !token.address) return null;
+          return (
+            "https://dexscreener.com/" +
+            encodeURIComponent(token.chain || "robinhood") +
+            "/" +
+            token.address
+          );
+        }
+        function blockscoutUrl(address) {
+          if (!address) return null;
+          return "https://robinhoodchain.blockscout.com/address/" + address;
+        }
+        function tokenLabel(token) {
+          if (!token) return "Unknown token";
+          var label = esc(
+            token.symbol ||
+              token.name ||
+              (token.address ? fmtAddr(token.address) : "Unknown")
+          );
+          var url = dexScreenerUrl(token);
+          if (!url) return label;
+          return (
+            '<a class="token-link" href="' +
+            url +
+            '" target="_blank" rel="noopener noreferrer" title="Open on DexScreener">' +
+            label +
+            "</a>"
+          );
+        }
+
+        // ---------- data fetch ----------
+        function fetchJson(path) {
+          var url = state.apiBase.replace(/\/$/, "") + path;
+          var headers = {};
+          if (state.apiKey) headers["x-api-key"] = state.apiKey;
+          return fetch(url, { headers: headers }).then(function (res) {
+            if (!res.ok) throw new Error(path + " -> HTTP " + res.status);
+            return res.json();
+          });
+        }
+
+        function postJson(path, body) {
+          var url = state.apiBase.replace(/\/$/, "") + path;
+          var headers = { "content-type": "application/json" };
+          if (state.apiKey) headers["x-api-key"] = state.apiKey;
+          return fetch(url, {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(body),
+          }).then(function (res) {
+            return res
+              .json()
+              .catch(function () {
+                return {};
+              })
+              .then(function (data) {
+                if (!res.ok)
+                  throw new Error(
+                    data.error || path + " -> HTTP " + res.status
+                  );
+                return data;
+              });
+          });
+        }
+
+        function refreshAll() {
+          Promise.all([
+            fetchJson("/trading/status"),
+            fetchJson("/positions"),
+            fetchJson("/trades?status=CLOSED&limit=20"),
+            fetchJson("/trade-candidates?limit=15"),
+            fetchJson("/ledger?limit=12"),
+            fetchJson(
+              "/tokens?limit=" +
+                state.activityPageSize +
+                "&offset=" +
+                state.activityOffset
+            ),
+          ])
+            .then(function (results) {
+              state.connected = true;
+              state.lastUpdated = Date.now();
+              render({
+                status: results[0],
+                positions: results[1],
+                closedTrades: results[2],
+                candidates: results[3],
+                ledger: results[4],
+                tokens: results[5],
+              });
+            })
+            .catch(function (err) {
+              state.connected = false;
+              renderDisconnected(err);
+            });
+        }
+
+        // ---------- rendering ----------
+        function renderDisconnected(err) {
+          els.connDot.className = "dot bad";
+          els.connLabel.textContent = "Disconnected";
+          els.modeBadge.style.display = "none";
+          els.killPill.hidden = true;
+          els.mainContent.hidden = true;
+          els.disconnected.hidden = false;
+          els.disconnectedMsg.innerHTML =
+            "Couldn’t reach <code>" +
+            esc(state.apiBase) +
+            "</code> (" +
+            esc(err && err.message ? err.message : "network error") +
+            "). If you changed the API base URL above, check it’s correct, or reload this page to reset to its default.";
+          els.settingsPanel.hidden = false;
+          els.lastUpdated.textContent = state.lastUpdated
+            ? "last connected " +
+              fmtAgo(new Date(state.lastUpdated).toISOString())
+            : "";
+        }
+
+        function render(data) {
+          els.connDot.className = "dot good";
+          els.connLabel.textContent = "Connected";
+          els.disconnected.hidden = true;
+          els.mainContent.hidden = false;
+
+          var s = data.status || {};
+          els.modeBadge.style.display = "inline-block";
+          els.modeBadge.textContent = s.mode || "—";
+          els.modeBadge.className = "badge-mode " + (s.mode || "");
+          els.killPill.hidden = !!s.tradingEnabled;
+
+          // circuit breakers
+          var cb = s.circuitBreakers || { paused: false, reasons: [] };
+          if (cb.paused && cb.reasons && cb.reasons.length) {
+            els.cbBanner.hidden = false;
+            els.cbReasons.innerHTML = cb.reasons
+              .map(function (r) {
+                return "<li>" + esc(r) + "</li>";
+              })
+              .join("");
+          } else {
+            els.cbBanner.hidden = true;
+          }
+
+          // portfolio tiles
+          var p = s.portfolio || {};
+          var tiles = [
+            { label: "Total Equity", value: fmtUsd(p.totalEquityUsd) },
+            { label: "Cash", value: fmtUsd(p.cashUsd) },
+            { label: "Deployed", value: fmtUsd(p.deployedUsd) },
+            {
+              label: "Available to Deploy",
+              value: fmtUsd(p.availableToDeployUsd),
+            },
+            { label: "Reserve Target", value: fmtUsd(p.reserveTargetUsd) },
+            {
+              label: "Open Positions",
+              value:
+                p.openPositionCount !== undefined ? p.openPositionCount : "—",
+            },
+          ];
+          els.tiles.innerHTML = tiles
+            .map(function (t) {
+              return (
+                '<div class="tile"><span class="label">' +
+                esc(t.label) +
+                '</span><span class="value">' +
+                t.value +
+                "</span></div>"
+              );
+            })
+            .join("");
+
+          // wallet chip
+          var live = s.live || {};
+          if (live.walletConfigured) {
+            els.walletChip.hidden = false;
+            els.walletAddr.textContent = live.walletAddress || "—";
+            els.walletAddr.href = blockscoutUrl(live.walletAddress) || "#";
+            els.walletAddr.title = live.walletAddress || "";
+            els.gasPill.hidden = false;
+            var gasEth = live.walletGasBalanceEth;
+            els.gasPill.innerHTML =
+              '<span class="dot ' +
+              (live.ready ? "good" : "neutral") +
+              '"></span>' +
+              (gasEth !== null && gasEth !== undefined
+                ? Number(gasEth).toFixed(5)
+                : "—") +
+              " ETH gas &middot; " +
+              (live.ready ? "live-ready" : "not live-ready");
+          } else {
+            els.walletChip.hidden = true;
+            els.gasPill.hidden = true;
+          }
+
+          renderActivity(data.tokens || []);
+          renderPositions(data.positions || []);
+          renderClosedTrades(data.closedTrades || []);
+          renderCandidates(data.candidates || []);
+          renderLedger(data.ledger || []);
+
+          els.lastUpdated.textContent = "updated just now";
+        }
+
+        function renderPositions(rows) {
+          els.positionsCount.textContent = rows.length;
+          if (!rows.length) {
+            els.positionsBody.innerHTML =
+              '<tr class="empty-row"><td colspan="7">No open positions right now.</td></tr>';
+            return;
+          }
+          els.positionsBody.innerHTML = rows
+            .map(function (t) {
+              var snap = (t.snapshots && t.snapshots[0]) || null;
+              var entry = t.entryPriceUsd;
+              var current = snap ? snap.priceUsd : entry;
+              var mult = entry && current ? current / entry : null;
+              var pnlUsd = snap ? snap.unrealizedPnlUsd : null;
+              var pnlPct = snap ? snap.unrealizedPnlPercent : null;
+              return (
+                "<tr>" +
+                '<td class="token-cell">' +
+                tokenLabel(t.token) +
+                "</td>" +
+                '<td><span class="badge ' +
+                esc(t.mode) +
+                '">' +
+                esc(t.mode) +
+                "</span></td>" +
+                "<td>" +
+                (entry ? fmtUsd(entry) : "&mdash;") +
+                "</td>" +
+                "<td>" +
+                fmtMultiple(mult) +
+                "</td>" +
+                "<td>" +
+                fmtUsdSpan(pnlUsd) +
+                "</td>" +
+                "<td>" +
+                fmtPercentSpan(pnlPct) +
+                "</td>" +
+                "<td>" +
+                fmtAgo(t.openedAt) +
+                "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        }
+
+        function renderClosedTrades(rows) {
+          els.closedCount.textContent = rows.length;
+          if (!rows.length) {
+            els.closedBody.innerHTML =
+              '<tr class="empty-row"><td colspan="6">No closed trades yet — the bot hasn’t exited a position.</td></tr>';
+            return;
+          }
+          els.closedBody.innerHTML = rows
+            .map(function (t) {
+              return (
+                "<tr>" +
+                '<td class="token-cell">' +
+                tokenLabel(t.token) +
+                "</td>" +
+                '<td><span class="badge ' +
+                esc(t.mode) +
+                '">' +
+                esc(t.mode) +
+                "</span></td>" +
+                "<td>" +
+                fmtMultiple(t.realizedMultiple) +
+                "</td>" +
+                "<td>" +
+                fmtUsdSpan(t.realizedPnlUsd) +
+                "</td>" +
+                '<td class="token-cell" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;">' +
+                esc(t.exitReason || "—") +
+                "</td>" +
+                "<td>" +
+                fmtAgo(t.closedAt) +
+                "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        }
+
+        var IN_PROGRESS_STATUSES = {
+          DETECTED: 1,
+          CLASSIFYING: 1,
+          RESEARCH_QUEUED: 1,
+          RESEARCHING: 1,
+        };
+
+        function renderActivity(rows) {
+          var rejected = rows.filter(function (t) {
+            return t.status === "REJECTED";
+          }).length;
+          var awaiting = rows.filter(function (t) {
+            return t.status === "AWAITING_DEX_PROFILE";
+          }).length;
+          els.activityStats.textContent =
+            rows.length +
+            " shown · " +
+            rejected +
+            " rejected · " +
+            awaiting +
+            " awaiting profile";
+
+          state.activityHasMore = rows.length === state.activityPageSize;
+          var pageNum =
+            Math.floor(state.activityOffset / state.activityPageSize) + 1;
+          els.activityPageLabel.textContent = "Page " + pageNum;
+          els.activityPrev.disabled = state.activityOffset === 0;
+          els.activityNext.disabled = !state.activityHasMore;
+
+          if (!rows.length) {
+            els.activityFeed.innerHTML =
+              '<div class="empty-feed">' +
+              (state.activityOffset > 0
+                ? "No more results on this page."
+                : "No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.") +
+              "</div>";
+            return;
+          }
+          els.activityFeed.innerHTML = rows
+            .map(function (t) {
+              var cls = (t.classifications && t.classifications[0]) || null;
+              var meta;
+              if (cls) {
+                meta =
+                  "utility " +
+                  Math.round(cls.utilityProbability * 100) +
+                  "% · meme " +
+                  Math.round(cls.memeProbability * 100) +
+                  "%";
+              } else if (t.status === "AWAITING_DEX_PROFILE") {
+                meta =
+                  "on-chain only, no real DexScreener profile yet — not sent to AI";
+              } else if (IN_PROGRESS_STATUSES[t.status]) {
+                meta = "queued for AI classification";
+              } else if (t.status === "REJECTED") {
+                meta = "filtered before AI review (name/address check)";
+              } else if (t.status === "FAILED") {
+                meta = "pipeline error — see logs";
+              } else {
+                meta = "—";
+              }
+              return (
+                '<div class="feed-row">' +
+                '<div class="line1"><span class="name">' +
+                tokenLabel(t) +
+                '</span><span class="badge ' +
+                esc(t.status) +
+                '">' +
+                esc(t.status) +
+                "</span></div>" +
+                '<div class="line1"><span class="meta">' +
+                meta +
+                '</span><span class="time">' +
+                fmtAgo(t.firstSeenAt) +
+                "</span></div>" +
+                "</div>"
+              );
+            })
+            .join("");
+        }
+
+        function renderCandidates(rows) {
+          els.candidatesCount.textContent = rows.length;
+          if (!rows.length) {
+            els.candidatesFeed.innerHTML =
+              '<div class="empty-feed">No candidates qualified yet.</div>';
+            return;
+          }
+          els.candidatesFeed.innerHTML = rows
+            .map(function (c) {
+              var q =
+                c.qualityScore !== null && c.qualityScore !== undefined
+                  ? c.qualityScore.toFixed(0)
+                  : "—";
+              var conf =
+                c.researchConfidence !== null &&
+                c.researchConfidence !== undefined
+                  ? c.researchConfidence.toFixed(0)
+                  : "—";
+              return (
+                '<div class="feed-row">' +
+                '<div class="line1"><span class="name">' +
+                tokenLabel(c.token) +
+                '</span><span class="badge ' +
+                esc(c.status) +
+                '">' +
+                esc(c.status) +
+                "</span></div>" +
+                '<div class="line1"><span class="meta">quality ' +
+                q +
+                " &middot; confidence " +
+                conf +
+                '</span><span class="time">' +
+                fmtAgo(c.createdAt) +
+                "</span></div>" +
+                "</div>"
+              );
+            })
+            .join("");
+        }
+
+        function renderLedger(rows) {
+          els.ledgerCount.textContent = rows.length;
+          if (!rows.length) {
+            els.ledgerFeed.innerHTML =
+              '<div class="empty-feed">No ledger entries yet.</div>';
+            return;
+          }
+          els.ledgerFeed.innerHTML = rows
+            .map(function (e) {
+              var amt = e.amountUsd;
+              var cls = amt > 0 ? "num-good" : amt < 0 ? "num-bad" : "";
+              var amtText =
+                amt !== null && amt !== undefined
+                  ? (amt > 0 ? "+" : "") + fmtUsd(amt)
+                  : "—";
+              return (
+                '<div class="feed-row">' +
+                '<div class="line1"><span class="name" style="font-size:12.5px;">' +
+                esc(e.type) +
+                "</span>" +
+                '<span class="ledger-amount ' +
+                cls +
+                '">' +
+                amtText +
+                "</span></div>" +
+                '<div class="line1"><span class="meta" style="text-transform:none;letter-spacing:0;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                esc(e.notes || "") +
+                '</span><span class="time">' +
+                fmtAgo(e.occurredAt) +
+                "</span></div>" +
+                "</div>"
+              );
+            })
+            .join("");
+        }
+
+        // ---------- interactions ----------
+        els.settingsBtn.addEventListener("click", function () {
+          els.settingsPanel.hidden = !els.settingsPanel.hidden;
+        });
+        els.refreshBtn.addEventListener("click", refreshAll);
+        els.activityPrev.addEventListener("click", function () {
+          if (state.activityOffset === 0) return;
+          state.activityOffset = Math.max(
+            0,
+            state.activityOffset - state.activityPageSize
+          );
+          refreshAll();
+        });
+        els.activityNext.addEventListener("click", function () {
+          if (!state.activityHasMore) return;
+          state.activityOffset += state.activityPageSize;
+          refreshAll();
+        });
+        els.saveBtn.addEventListener("click", function () {
+          var base = els.apiBaseInput.value.trim() || window.location.origin;
+          var key = els.apiKeyInput.value.trim();
+          state.apiBase = base;
+          state.apiKey = key;
+          safeStorage.set("us_api_base", base);
+          safeStorage.set("us_api_key", key);
+          refreshAll();
+        });
+        els.copyAddrBtn.addEventListener("click", function () {
+          var addr = els.walletAddr.textContent;
+          if (!addr || addr === "—") return;
+          try {
+            navigator.clipboard
+              .writeText(addr)
+              .then(function () {
+                els.copyAddrBtn.textContent = "copied";
+                setTimeout(function () {
+                  els.copyAddrBtn.textContent = "copy";
+                }, 1400);
+              })
+              .catch(function () {
+                fallbackCopy(addr);
+              });
+          } catch (e) {
+            fallbackCopy(addr);
+          }
+        });
+        function submitManualAddress() {
+          var address = els.manualInput.value.trim();
+          if (!address) return;
+          els.manualBtn.disabled = true;
+          els.manualMsg.className = "";
+          els.manualMsg.textContent = "Queuing…";
+          postJson("/tokens/submit", { address: address })
+            .then(function (token) {
+              els.manualMsg.className = "ok";
+              var label =
+                token.symbol ||
+                token.name ||
+                fmtAddr(token.address).replace(/&hellip;/, "…");
+              els.manualMsg.textContent =
+                "Queued " + label + " — status: " + token.status;
+              els.manualInput.value = "";
+              refreshAll();
+            })
+            .catch(function (err) {
+              els.manualMsg.className = "err";
+              els.manualMsg.textContent =
+                err && err.message
+                  ? err.message
+                  : "Could not queue that address.";
+            })
+            .finally(function () {
+              els.manualBtn.disabled = false;
+            });
+        }
+        els.manualBtn.addEventListener("click", submitManualAddress);
+        els.manualInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") submitManualAddress();
+        });
+
+        function fallbackCopy(text) {
+          var range = document.createRange();
+          range.selectNodeContents(els.walletAddr);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+
+        // ---------- ticking "last updated" label when data is stale ----------
+        setInterval(function () {
+          if (state.connected && state.lastUpdated) {
+            var secs = Math.round((Date.now() - state.lastUpdated) / 1000);
+            if (secs >= 3)
+              els.lastUpdated.textContent = "updated " + secs + "s ago";
+          }
+        }, 1000);
+
+        refreshAll();
+        setInterval(refreshAll, 10000);
+      })();
+    </script>
+  </body>
 </html>

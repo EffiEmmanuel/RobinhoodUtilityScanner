@@ -71,6 +71,8 @@ export function buildServer() {
       lastDiscoveryError: pollerHealth.lastDiscoveryError ?? null,
       lastOnchainDiscoveryPoll: pollerHealth.lastOnchainDiscoveryPollAt?.toISOString() ?? null,
       lastOnchainDiscoveryError: pollerHealth.lastOnchainDiscoveryError ?? null,
+      lastActivityCheck: pollerHealth.lastActivityCheckAt?.toISOString() ?? null,
+      lastActivityCheckError: pollerHealth.lastActivityCheckError ?? null,
     };
   });
 

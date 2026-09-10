@@ -49,6 +49,13 @@ model Token {
   status       TokenStatus @default(DETECTED)
   utilityClass String?
 
+  // Idempotency guard for the X-search layer (see research/xSearch.ts) — X
+  // API calls cost real money, so a token only ever gets checked once no
+  // matter how many AWAITING_DEX_PROFILE sweeps run before it's promoted or
+  // expires. null means "not checked yet".
+  xCheckedAt DateTime?
+  xFindings  Json?
+
   classifications Classification[]
   researchRuns    ResearchRun[]
   marketSnapshots MarketSnapshot[]

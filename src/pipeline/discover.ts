@@ -7,6 +7,12 @@ import { cheapFilter } from "./cheapFilter";
 import { TokenStatus } from "../generated/prisma";
 import { getPublicClient } from "../trading/live/wallet";
 import { getAdjustedTotalSupply } from "../trading/live/tokenUtils";
+import { searchXForContractAddress } from "../research/xSearch";
+
+// A much lower bar than the full promotion threshold — just "has any real
+// trading happened at all", to decide whether a token is even worth
+// spending a metered X API call on. Most on-chain clones never clear this.
+const MIN_LIQUIDITY_USD_WORTH_AN_X_CHECK = 1000;
 
 /**
  * FR-001/FR-002/FR-003/FR-004: poll DexScreener, keep only the target chain,
@@ -119,4 +125,88 @@ export async function expireStaleAwaitingProfile(): Promise<number> {
     logger.info({ count: result.count, expiryHours: config.awaitingDexProfileExpiryHours }, "expired stale AWAITING_DEX_PROFILE tokens with no real profile");
   }
   return result.count;
+}
+
+/**
+ * The aggressive complement to waiting on a submitted profile: a token that
+ * never gets one but is already trading with real liquidity and a real
+ * transaction count almost certainly has organic interest behind it — that's
+ * public DexScreener market data, free regardless of profile status, so
+ * there's no reason to let it sit until it either gets a profile or expires.
+ * A brief minimum age first (awaitingProfileMinAgeMinutes) avoids mistaking a
+ * deployer's own seed liquidity/self-trades for real activity.
+ */
+export async function promoteActiveAwaitingProfile(): Promise<{ checked: number; promoted: number; xChecked: number }> {
+  const cutoff = new Date(Date.now() - config.awaitingProfileMinAgeMinutes * 60_000);
+  const candidates = await db.token.findMany({
+    where: { status: TokenStatus.AWAITING_DEX_PROFILE, firstSeenAt: { lte: cutoff } },
+    take: 50, // bounds cost per sweep regardless of backlog size
+  });
+
+  let promoted = 0;
+  let xChecked = 0;
+  // Collected instead of X-searched immediately, so the (small, metered)
+  // X budget goes to whichever candidates look most promising this sweep,
+  // not just whichever happened to be claimed first.
+  const xCandidates: { token: (typeof candidates)[number]; liquidityUsd: number }[] = [];
+
+  for (const token of candidates) {
+    let market;
+    try {
+      market = await researchMarket(token.chain, token.address);
+    } catch (err) {
+      logger.warn({ tokenId: token.id, address: token.address, err: String(err) }, "activity check: could not fetch market data");
+      continue;
+    }
+    const pair = market.primaryPair;
+    if (!pair) continue;
+
+    const hourlyTxns = (pair.buys1h ?? 0) + (pair.sells1h ?? 0);
+    const liquidityUsd = pair.liquidityUsd ?? 0;
+    if (liquidityUsd >= config.awaitingProfileMinLiquidityUsd && hourlyTxns >= config.awaitingProfileMinHourlyTxns) {
+      await db.token.update({ where: { id: token.id }, data: { status: TokenStatus.DETECTED } });
+      promoted++;
+      logger.info(
+        { tokenId: token.id, address: token.address, liquidityUsd, hourlyTxns },
+        "promoted AWAITING_DEX_PROFILE token to AI review on real trading activity — no profile ever submitted"
+      );
+    } else if (liquidityUsd >= MIN_LIQUIDITY_USD_WORTH_AN_X_CHECK && !token.xCheckedAt && config.xBearerToken) {
+      xCandidates.push({ token, liquidityUsd });
+    }
+  }
+
+  // Highest liquidity first — that's the limited budget going to whichever
+  // waiting tokens look most likely to actually be worth it.
+  xCandidates.sort((a, b) => b.liquidityUsd - a.liquidityUsd);
+  for (const { token } of xCandidates.slice(0, config.xSearchMaxPerSweep)) {
+    const result = await searchXForContractAddress(token.address);
+    xChecked++;
+    await db.token.update({
+      where: { id: token.id },
+      data: { xCheckedAt: new Date(), xFindings: result as unknown as object },
+    });
+
+    // Deliberately promotes on any real mention, not just ones clearing an
+    // engagement bar: a hardcoded threshold can't tell a genuinely new,
+    // quiet project apart from bought/fake engagement any better than it can
+    // tell a real one from bot noise. That nuanced call belongs to the
+    // research AI, which gets the full account/engagement evidence via
+    // formatXFindingsForPrompt — this gate's only job is deciding whether a
+    // token is worth that AI's attention at all.
+    if (result.found) {
+      await db.token.update({ where: { id: token.id }, data: { status: TokenStatus.DETECTED } });
+      promoted++;
+      logger.info(
+        { tokenId: token.id, address: token.address, tweetCount: result.tweetCount, totalEngagement: result.totalEngagement, accounts: result.accounts.map((a) => a.username) },
+        "promoted AWAITING_DEX_PROFILE token to AI review — real X activity found for this exact contract address"
+      );
+    } else {
+      logger.info({ tokenId: token.id, address: token.address, error: result.error }, "X search found no activity for this exact contract address — not promoted");
+    }
+  }
+
+  if (candidates.length > 0) {
+    logger.info({ checked: candidates.length, promoted, xChecked }, "checked AWAITING_DEX_PROFILE tokens for organic activity");
+  }
+  return { checked: candidates.length, promoted, xChecked };
 }

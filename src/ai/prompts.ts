@@ -56,6 +56,14 @@ The system must never assume:
 - X/GitHub account = legitimate or active.
 - High volume or buy count = healthy/safe project.
 - A utility narrative = actual utility.
+- A tweet mentioning this contract address = a real community. On this chain, most contract-address
+  mentions on X come from automated calling/scanner bots that post about nearly every new token —
+  an account with thousands of tweets and a generic "radar/scanner/alerts" bio proves nothing by
+  itself. Weigh account age, follower count relative to tweet count, bio specificity, and genuine
+  engagement together; a handful of tweets from one specific, on-topic account can be more
+  meaningful than many tweets from obvious bots. Equally, don't penalize a token just for having low
+  X engagement — a genuinely new, not-yet-discovered real project looks identical to a quiet one at
+  this stage, so absence of hype is not itself a red flag.
 
 Answer specifically:
 1. What does the project actually do?
@@ -78,6 +86,7 @@ export interface ResearchSynthesisInputs {
   website: string;
   onchain: string;
   links: string;
+  xResearch: string;
 }
 
 export function buildResearchSynthesisPrompt(inputs: ResearchSynthesisInputs): string {
@@ -98,6 +107,11 @@ ${inputs.website}
 
 ON-CHAIN FINDINGS
 ${inputs.onchain}
+
+X (TWITTER) FINDINGS — searched for this exact contract address, not just the project name, since a
+copycat contract can reuse a real project's name but cannot make genuine tweets about a different
+address exist for itself
+${inputs.xResearch}
 
 Synthesize this into the structured research output now.`;
 }

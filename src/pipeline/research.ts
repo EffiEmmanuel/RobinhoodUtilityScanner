@@ -4,6 +4,7 @@ import { logger } from "../logger";
 import { captureMarketSnapshot, formatMarketForPrompt } from "../research/market";
 import { researchWebsite, formatWebsiteResultForPrompt, type WebsiteResearchResult } from "../research/website";
 import { researchOnchain, formatOnchainResultForPrompt, type OnchainResearchResult } from "../research/onchain";
+import { formatXFindingsForPrompt } from "../research/xSearch";
 import { callStructured } from "../ai/provider";
 import { ResearchSynthesisSchema, RESEARCH_SYNTHESIS_JSON_SCHEMA } from "../ai/schemas";
 import { RESEARCH_SYNTHESIZER_SYSTEM, buildResearchSynthesisPrompt } from "../ai/prompts";
@@ -102,6 +103,7 @@ export async function researchToken(tokenId: string): Promise<void> {
         website: formatWebsiteResultForPrompt(website),
         onchain: formatOnchainResultForPrompt(onchain),
         links: linksText,
+        xResearch: formatXFindingsForPrompt(token.xFindings),
       }),
       schema: ResearchSynthesisSchema,
       jsonSchema: RESEARCH_SYNTHESIS_JSON_SCHEMA,

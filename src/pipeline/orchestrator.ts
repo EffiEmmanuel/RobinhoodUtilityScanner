@@ -4,7 +4,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
 import { retryAsync } from "../util/retry";
-import { runDiscoveryPoll } from "./discover";
+import { runDiscoveryPoll, promoteActiveAwaitingProfile } from "./discover";
 import { runOnchainDiscoveryPoll } from "./onchainDiscovery";
 import { classifyToken } from "./classify";
 import { researchToken } from "./research";
@@ -13,6 +13,12 @@ import type { Token } from "../generated/prisma";
 
 const WORKER_CONCURRENCY = 2;
 const WORKER_IDLE_DELAY_MS = 3000;
+// Deliberately slower than the discovery loops — each run can fetch market
+// data for up to 50 waiting tokens, and DexScreener's public API is shared
+// with the core discovery polls that matter more; no need to hammer it every
+// few seconds for a check that's inherently about tokens still hours from
+// expiring anyway.
+const AWAITING_PROFILE_ACTIVITY_INTERVAL_SECONDS = 300;
 // A 429 from Gemini here is almost always the free-tier's per-day request
 // cap, not a transient blip — hammering it every 3s just burns DB/CPU and
 // floods logs until the quota resets. Back off for a while instead, and
@@ -32,6 +38,8 @@ export const health = {
   lastDiscoveryError: undefined as string | undefined,
   lastOnchainDiscoveryPollAt: undefined as Date | undefined,
   lastOnchainDiscoveryError: undefined as string | undefined,
+  lastActivityCheckAt: undefined as Date | undefined,
+  lastActivityCheckError: undefined as string | undefined,
   running: false,
 };
 
@@ -160,6 +168,23 @@ async function onchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void>
   }
 }
 
+async function awaitingProfileActivityLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const result = await promoteActiveAwaitingProfile();
+      health.lastActivityCheckAt = new Date();
+      health.lastActivityCheckError = undefined;
+      if (result.promoted > 0) {
+        logger.info(result, "promoted on-chain tokens to AI review based on real trading activity");
+      }
+    } catch (err) {
+      health.lastActivityCheckError = String(err);
+      logger.error({ err: String(err) }, "awaiting-profile activity check crashed");
+    }
+    await sleep(AWAITING_PROFILE_ACTIVITY_INTERVAL_SECONDS * 1000);
+  }
+}
+
 export async function startOrchestrator(): Promise<() => void> {
   // The first DB call of the process, most likely to hit a cold Neon compute.
   await retryAsync("recoverStuckTokens", recoverStuckTokens);
@@ -170,6 +195,7 @@ export async function startOrchestrator(): Promise<() => void> {
   const loops = [
     discoveryLoop(signal),
     onchainDiscoveryLoop(signal),
+    awaitingProfileActivityLoop(signal),
     ...Array.from({ length: WORKER_CONCURRENCY }, (_, i) => workerLoop(i, signal)),
   ];
 

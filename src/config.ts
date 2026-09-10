@@ -39,6 +39,30 @@ export const config = {
   // DexScreener's own profile feed confirms it's real; if that never happens
   // within this window it's dropped as noise instead of piling up forever.
   awaitingDexProfileExpiryHours: num("AWAITING_DEX_PROFILE_EXPIRY_HOURS", 24),
+  // A cheaper, aggressive alternative to waiting on a submitted profile: real
+  // trading activity (liquidity, transaction count) is public via DexScreener's
+  // market/pair data regardless of whether a project ever bothers with a
+  // profile — so a token showing genuine organic interest gets promoted to AI
+  // review on that basis alone, without ever needing the profile signal.
+  // Deliberately below MIN_LIQUIDITY_USD (the trade-eligibility gate) — this
+  // only decides "worth an AI look", not "worth trading".
+  awaitingProfileMinAgeMinutes: num("AWAITING_PROFILE_MIN_AGE_MINUTES", 20),
+  awaitingProfileMinLiquidityUsd: num("AWAITING_PROFILE_MIN_LIQUIDITY_USD", 5000),
+  awaitingProfileMinHourlyTxns: num("AWAITING_PROFILE_MIN_HOURLY_TXNS", 20),
+
+  // X (Twitter) API v2, app-only auth — only the bearer token is needed for
+  // read-only search/user-lookup. A real, metered cost (confirmed live: this
+  // account returned 402 "credits depleted" on first test) — every call here
+  // spends real money, so this is used sparingly and only for tokens that
+  // already look promising, never as a blanket check on every discovery.
+  xBearerToken: optStr("X_BEARER_TOKEN"),
+  xSearchMaxPerSweep: num("X_SEARCH_MAX_PER_SWEEP", 3),
+  // A mention existing isn't enough on its own — confirmed live that most
+  // contract-address mentions on this chain come from automated calling/
+  // scanner bots, not organic community. Real engagement (likes/retweets/
+  // replies from *other* accounts) is what a bot's own posting volume can't
+  // fake for free, so that's the actual promotion gate.
+  xMinEngagementToPromote: num("X_MIN_ENGAGEMENT_TO_PROMOTE", 10),
 
   rhRpcUrl: str("RH_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
