@@ -89,18 +89,41 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
 
   // Stale-plan check: a WAIT_FOR_ENTRY target zone and risk score were
   // otherwise frozen at whatever the AI saw once, at plan-creation time.
-  // Confirmed live: a plan stayed unchanged while its token swung between
-  // $100K-$380K mcap for over an hour. Re-run the trade analysis with fresh
-  // market/technical data whenever the plan is old enough OR price has
-  // drifted far enough from where it was created — whichever comes first.
+  // Confirmed live two different ways: (1) a plan stayed unchanged while its
+  // token swung $100K-$380K mcap for over an hour, and (2) replanning purely
+  // on a short fixed timer (an earlier version of this check) caused a
+  // *different* problem on a choppy/range-bound token — a fresh 3-minute
+  // replan recalculates its target relative to whatever price is "now", so
+  // the zone kept resetting its own reference point before the real price
+  // ever got a chance to test it, confirmed live over 16 replans in 45
+  // minutes that never triggered on a token oscillating $10M-$15M mcap the
+  // whole time. So: replan IMMEDIATELY when the setup itself has actually
+  // broken (price crossed the plan's own invalidation floor or do-not-chase
+  // ceiling — meaning the original read is now wrong, not just old), and
+  // otherwise only as an infrequent backstop for genuinely stale data. A
+  // valid, not-yet-broken zone gets time to actually be reached.
   const planAgeMinutes = (Date.now() - plan.createdAt.getTime()) / 60_000;
   const priceDriftPercent =
     mcap !== undefined && plan.currentMarketCap ? (Math.abs(mcap - plan.currentMarketCap) / plan.currentMarketCap) * 100 : 0;
-  if (planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes || priceDriftPercent >= tradingConfig.pendingPlanReplanOnDriftPercent) {
+  const invalidationBreached = plan.invalidationMcap !== null && mcap !== undefined && mcap <= plan.invalidationMcap;
+  const ceilingBreached = plan.doNotChaseAboveMcap !== null && mcap !== undefined && mcap > plan.doNotChaseAboveMcap;
+  if (
+    invalidationBreached ||
+    ceilingBreached ||
+    planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes ||
+    priceDriftPercent >= tradingConfig.pendingPlanReplanOnDriftPercent
+  ) {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.CANCELLED, lastCheckedAt: new Date() } });
+    const reason = invalidationBreached
+      ? "invalidation breached"
+      : ceilingBreached
+        ? "do-not-chase ceiling breached"
+        : planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes
+          ? "plan age backstop"
+          : "price drift";
     logger.info(
-      { pendingEntryId: entry.id, candidateId: candidate.id, planAgeMinutes: Math.round(planAgeMinutes), priceDriftPercent: Math.round(priceDriftPercent) },
-      "trade plan is stale — re-running analysis with fresh market data"
+      { pendingEntryId: entry.id, candidateId: candidate.id, reason, planAgeMinutes: Math.round(planAgeMinutes), priceDriftPercent: Math.round(priceDriftPercent) },
+      "trade plan replanned with fresh market data"
     );
     try {
       await planCandidate(candidate.id);

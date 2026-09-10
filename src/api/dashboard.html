@@ -1447,6 +1447,19 @@
           var d = Math.round(h / 24);
           return d + "d ago";
         }
+        function fmtIn(iso) {
+          if (!iso) return "&mdash;";
+          var diffMs = new Date(iso).getTime() - Date.now();
+          if (diffMs <= 0) return "expired";
+          var s = Math.round(diffMs / 1000);
+          if (s < 60) return "in " + s + "s";
+          var m = Math.round(s / 60);
+          if (m < 60) return "in " + m + "m";
+          var h = Math.round(m / 60);
+          if (h < 48) return "in " + h + "h";
+          var d = Math.round(h / 24);
+          return "in " + d + "d";
+        }
         function dexScreenerUrl(token) {
           if (!token || !token.address) return null;
           return (
@@ -2277,7 +2290,7 @@
                 ]);
                 if (plan.pendingEntry.lastCheckedAt) planRows.push(["Last checked", fmtAgo(plan.pendingEntry.lastCheckedAt)]);
               }
-              if (plan.expiresAt) planRows.push(["Plan expires", fmtAgo(plan.expiresAt)]);
+              if (plan.expiresAt) planRows.push(["Plan expires", fmtIn(plan.expiresAt)]);
               if (plan.riskScore != null) planRows.push(["AI risk score", Math.round(plan.riskScore) + "/100"]);
             }
             if (trade) {

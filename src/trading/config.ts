@@ -91,12 +91,17 @@ export const tradingConfig = {
   // token swung between $100K-$380K mcap for over an hour. Re-run the trade
   // analysis (fresh market/technical data, a new plan+pending entry replacing
   // the stale one) whenever either condition is met, whichever comes first.
-  // Tightened from 15: same AI-rate-limit tradeoff as
-  // positionStrategyReviewIntervalMinutes above — the deterministic "is price
-  // in the target zone" check already runs continuously (no AI cost, bound
-  // only by DexScreener's response time) regardless of this value; this only
-  // controls how often the target zone/risk score itself gets recalculated.
-  pendingPlanReviewIntervalMinutes: num("PENDING_PLAN_REVIEW_INTERVAL_MINUTES", 3),
+  // A backstop only, not the primary replan trigger — entryMonitor.ts
+  // replans IMMEDIATELY when price actually breaches the plan's own
+  // invalidation floor or do-not-chase ceiling (the setup genuinely changed).
+  // Confirmed live: a short fixed timer (3 min) as the *primary* trigger
+  // backfired on a choppy/range-bound token — each replan recalculated the
+  // target relative to whatever price was at that moment, so the zone kept
+  // resetting before the real price ever got a chance to reach it (16
+  // replans in 45 minutes, zero entries, on a token oscillating within a
+  // range the whole time). This value now only catches a plan that's gone
+  // stale without ever technically breaking either boundary.
+  pendingPlanReviewIntervalMinutes: num("PENDING_PLAN_REVIEW_INTERVAL_MINUTES", 20),
   pendingPlanReplanOnDriftPercent: num("PENDING_PLAN_REPLAN_ON_DRIFT_PERCENT", 25),
 
   // The AI's own riskScore (0-100, market-timing risk — extended/parabolic
