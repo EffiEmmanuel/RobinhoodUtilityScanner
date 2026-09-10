@@ -53,6 +53,43 @@ describe("evaluateCandidate", () => {
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("HIGH");
   });
+
+  it("momentum-overrides a low qualityScore into HIGH risk when every other gate clears and hourly txns are strong", () => {
+    const result = evaluateCandidate({
+      qualityScore: 62,
+      researchConfidence: 70,
+      contractScore: 100,
+      liquidityUsd: 20_000,
+      hardReject: false,
+      hourlyTxns: 40,
+    });
+    expect(result.eligible).toBe(true);
+    expect(result.riskBucket).toBe("HIGH");
+  });
+
+  it("does not momentum-override when a non-qualityScore gate also fails", () => {
+    const result = evaluateCandidate({
+      qualityScore: 62,
+      researchConfidence: 70,
+      contractScore: 100,
+      liquidityUsd: 5_000, // below minTradeLiquidityUsd
+      hardReject: false,
+      hourlyTxns: 40,
+    });
+    expect(result.eligible).toBe(false);
+  });
+
+  it("does not momentum-override without enough hourly txns", () => {
+    const result = evaluateCandidate({
+      qualityScore: 62,
+      researchConfidence: 70,
+      contractScore: 100,
+      liquidityUsd: 20_000,
+      hardReject: false,
+      hourlyTxns: 2,
+    });
+    expect(result.eligible).toBe(false);
+  });
 });
 
 describe("calculatePositionSize", () => {

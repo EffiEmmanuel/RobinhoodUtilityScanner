@@ -1,3 +1,4 @@
+import { config } from "../config";
 import { tradingConfig } from "./config";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
@@ -14,6 +15,9 @@ export interface CandidateRiskInput {
   contractScore: number;
   liquidityUsd: number;
   hardReject: boolean;
+  // Real, already-observed trading demand (buys+sells in the last hour) —
+  // used only by the momentum override below, never as a standalone gate.
+  hourlyTxns?: number;
 }
 
 export interface CandidateRiskResult {
@@ -28,7 +32,9 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   if (input.hardReject) {
     return { eligible: false, riskBucket: "REJECT", reasons: ["hardReject == true (never trade — §9)"] };
   }
-  if (input.qualityScore < tradingConfig.minTradeQualityScore) {
+
+  const qualityScoreOk = input.qualityScore >= tradingConfig.minTradeQualityScore;
+  if (!qualityScoreOk) {
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }
   if (input.researchConfidence < tradingConfig.minTradeResearchConfidence) {
@@ -39,6 +45,27 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   }
   if (input.liquidityUsd < tradingConfig.minTradeLiquidityUsd) {
     reasons.push(`liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd}`);
+  }
+
+  // Momentum override, same rationale as classify.ts's and research.ts's:
+  // qualityScore weighs team/social/credibility at 25% combined — signals
+  // that are structurally near-zero for ANY token still in its first hours,
+  // legitimate or not, simply because there hasn't been time to build a
+  // track record. Real, already-observed two-sided trading volume is
+  // evidence a brand-new project can't fake the way it can fake a team page.
+  // Deliberately narrow: only ever waives the qualityScore reason above —
+  // contract safety, research confidence and the liquidity floor stay real,
+  // unwaived gates on capital actually at risk, and validateEntry still
+  // re-checks live buy/sell pressure right before any buy executes.
+  const onlyQualityScoreFailing = !qualityScoreOk && reasons.length === 1;
+  if (onlyQualityScoreFailing && (input.hourlyTxns ?? 0) >= config.momentumOverrideMinHourlyTxns) {
+    return {
+      eligible: true,
+      riskBucket: "HIGH",
+      reasons: [
+        `momentum override: ${input.hourlyTxns} txns/1h despite qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`,
+      ],
+    };
   }
 
   if (reasons.length > 0) {

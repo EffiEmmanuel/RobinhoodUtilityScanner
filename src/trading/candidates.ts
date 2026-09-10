@@ -38,12 +38,16 @@ export async function generateTradeCandidates(): Promise<number> {
     });
     created++;
 
+    const primaryPair = (
+      run.rawResearch as { market?: { primaryPair?: { liquidityUsd?: number; buys1h?: number; sells1h?: number } } } | null
+    )?.market?.primaryPair;
+
     const evaluation = evaluateCandidate({
       qualityScore: run.finalScore,
       researchConfidence: run.confidence,
       contractScore: run.contractScore ?? 0,
-      liquidityUsd: (run.rawResearch as { market?: { primaryPair?: { liquidityUsd?: number } } } | null)?.market
-        ?.primaryPair?.liquidityUsd ?? 0,
+      liquidityUsd: primaryPair?.liquidityUsd ?? 0,
+      hourlyTxns: (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0),
       hardReject: run.hardReject,
     });
 

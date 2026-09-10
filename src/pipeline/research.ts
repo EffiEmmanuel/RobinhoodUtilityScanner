@@ -153,9 +153,27 @@ export async function researchToken(tokenId: string): Promise<void> {
     },
   });
 
+  // Momentum override, same rationale as classify.ts's: the composite score
+  // weighs team/social/credibility at 25% combined — signals that are
+  // structurally near-zero for ANY token still in its first hours, safe or
+  // not, simply because there hasn't been time to build a track record. Real,
+  // already-observed two-sided trading demand is decision-grade evidence a
+  // brand-new project can't fake the way it can fake a team page. Confirmed
+  // live: THRU (contract clean, no hard-reject, $13-19K liquidity, hundreds
+  // of real traders) scored 59 then 62 on two separate research runs — both
+  // rejected on team(10-20)/social(20)/credibility(40-50) alone — then went
+  // on to 2x. Never overrides hardReject; only lowers the watchlist bar.
+  const primaryPair = market.primaryPair;
+  const momentumHourlyTxns = (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0);
+  const momentumLiquidityUsd = primaryPair?.liquidityUsd ?? 0;
+  const momentumOverride =
+    !score.hardReject &&
+    momentumLiquidityUsd >= config.momentumOverrideMinLiquidityUsd &&
+    momentumHourlyTxns >= config.momentumOverrideMinHourlyTxns;
+
   let newStatus: TokenStatus;
   const meetsAlertBar = !score.hardReject && score.finalScore >= config.alertThreshold && score.confidence >= config.minConfidenceToAlert;
-  const meetsWatchlistBar = !score.hardReject && score.finalScore >= config.watchlistThreshold;
+  const meetsWatchlistBar = !score.hardReject && (score.finalScore >= config.watchlistThreshold || momentumOverride);
 
   if (meetsAlertBar) {
     newStatus = TokenStatus.ALERTED;
@@ -163,6 +181,13 @@ export async function researchToken(tokenId: string): Promise<void> {
     newStatus = TokenStatus.WATCHLISTED;
   } else {
     newStatus = TokenStatus.REJECTED;
+  }
+
+  if (momentumOverride && newStatus === TokenStatus.WATCHLISTED && score.finalScore < config.watchlistThreshold) {
+    logger.info(
+      { tokenId, address: token.address, finalScore: score.finalScore, liquidityUsd: momentumLiquidityUsd, hourlyTxns: momentumHourlyTxns },
+      "research score below watchlist bar but promoted via momentum override"
+    );
   }
 
   await db.token.update({

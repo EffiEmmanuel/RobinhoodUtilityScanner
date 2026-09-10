@@ -1,6 +1,15 @@
 [
   {
     "category": "WINNER_UTILITY",
+    "name": "thru",
+    "symbol": "THRU",
+    "contract": "0x19cF8884fC0493B5843938f024aF2810711447cC",
+    "entryMcap": 20700,
+    "liquidityAtEntry": 13000,
+    "notes": "Immutable ERC-4337 paymaster narrative (pay gas in USDG, half of fees burn supply, rest funds free gas for holders) — a specific, plausible infra pitch, not vague buzzword utility. Went 20.7K -> 40.3K mcap (2x+) within roughly an hour of being seen. On-chain clean (no owner, nothing to switch off). SCORING CALIBRATION NOTE: correctly passed visual classification twice (utility 0.80-0.85, meme 0.10) but was still REJECTED downstream — composite research score landed at 59-62, below the watchlist bar, purely because team/social/credibility scored near-zero (10-20/40-50/20) for being only ~2h old. Contract safety (100) and real market demand (liquidity+txns) were both strong. Lesson: team/social/credibility are structurally unscoreable for ANY brand-new token, legitimate or not — don't let their absence alone sink an otherwise-clean, actively-traded token."
+  },
+  {
+    "category": "WINNER_UTILITY",
     "name": "Kerf",
     "symbol": "KERF",
     "contract": "0x384c3f978950a98523529A205163Bf63a69E8Dd5",
