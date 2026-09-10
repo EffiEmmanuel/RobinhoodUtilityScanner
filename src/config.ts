@@ -85,6 +85,18 @@ export const config = {
   maxMemeProbability: num("MAX_MEME_PROBABILITY", 0.45),
   minBrandingScore: num("MIN_BRANDING_SCORE", 0.35),
 
+  // Deterministic bypass of the narrative utility/meme gate above (classify.ts):
+  // real, already-observable trading demand (liquidity + genuine two-sided
+  // transaction volume) is itself evidence worth researching further,
+  // regardless of what the visual classifier's narrative verdict says. Added
+  // after confirmed live misses — e.g. a token rejected as "doesn't align
+  // with legitimate software/fintech" that went on to run 25K -> 137K mcap
+  // with hundreds of real traders. Mirrors the same philosophy already used
+  // for AWAITING_DEX_PROFILE promotion (awaitingProfileMin* below), applied
+  // one stage later at the actual pass/fail decision.
+  momentumOverrideMinLiquidityUsd: num("MOMENTUM_OVERRIDE_MIN_LIQUIDITY_USD", 15000),
+  momentumOverrideMinHourlyTxns: num("MOMENTUM_OVERRIDE_MIN_HOURLY_TXNS", 20),
+
   watchlistThreshold: num("WATCHLIST_THRESHOLD", 70),
   alertThreshold: num("ALERT_THRESHOLD", 85),
   minConfidenceToAlert: num("MIN_CONFIDENCE_TO_ALERT", 55),

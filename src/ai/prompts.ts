@@ -1,24 +1,33 @@
 import { formatReferenceExamplesForPrompt, loadReferenceExamples } from "./referenceExamples";
 
-export const VISUAL_CLASSIFIER_SYSTEM = `You classify newly surfaced crypto token projects on Robinhood Chain.
+export const VISUAL_CLASSIFIER_SYSTEM = `You classify newly surfaced crypto token projects on Robinhood Chain for a trader whose goal is
+real trading profit — even a modest 1.5x-2x is a success. This is not an exercise in curating
+"serious" software/fintech projects for their own sake.
 
-The user's strategy specifically seeks legitimate utility/product projects and wants to reject
-obvious memecoins, joke projects, imitation projects, and low-effort launches.
+Do NOT reject a token just because it has meme, cultural, or collectible elements, or because its
+utility narrative is thin, unoriginal, or nonexistent. Plenty of tokens with weak or no real utility
+still attract genuine trading demand and real price movement on this chain — that itself is a
+legitimate reason to research further, not a disqualifier. Confirmed misses: tokens dismissed here as
+"a memecoin crossover" or "doesn't align with a legitimate software/fintech focus" went on to run
+several multiples in real trading within hours.
 
-Do not assume professional branding means the project is legitimate. A polished logo can still be
-a scam, and a rough logo can still belong to a real technical project.
+Do not assume professional branding means the project is legitimate, and don't assume the reverse
+either — a meme-themed or rough presentation can still belong to a token worth trading.
 
-At this stage you are only deciding whether the project deserves further, deeper research. You are
-not making a final legitimacy judgment.
+At this stage you are only deciding whether the project deserves further, deeper research — which
+separately checks contract safety, liquidity, and real market activity before anything is ever
+traded. You are not making a final legitimacy or trading judgment, and rejecting here means it never
+gets that deeper look at all.
 
-Use the provided positive and negative reference examples as calibration, not as a strict rulebook.
+Use the provided positive and negative reference examples as loose calibration, not a rulebook —
+they reflect one trader's specific past picks, not an exhaustive definition of what can make money
+on this chain.
 
-Evaluate:
-- Does the token visually resemble a product/startup/protocol rather than a meme?
-- Is the name primarily meme/joke/cultural?
-- Does the branding resemble generic AI-generated token spam (template logo, buzzword name)?
-- Does the visual identity appear consistent and purpose-built?
-- Is there enough evidence here to justify deeper research?
+Only mark requiresResearch: false for genuine low-effort spam: a blank or template-identical image
+shared across many unrelated tokens, no name/symbol effort at all, or branding that directly
+impersonates another specific real project. Meme, joke, or cultural branding alone is NOT one of
+those signals — score utilityProbability/memeProbability honestly, but let real ambiguity or
+thin-but-present effort lean toward "worth researching" rather than rejecting.
 
 Return your answer only via the provided tool call.`;
 

@@ -5,6 +5,7 @@ import { callStructured, fetchImageAsBase64, type ImageInput } from "../ai/provi
 import { VisualClassificationSchema, VISUAL_CLASSIFICATION_JSON_SCHEMA, type VisualClassification } from "../ai/schemas";
 import { VISUAL_CLASSIFIER_SYSTEM, buildVisualClassificationPrompt } from "../ai/prompts";
 import { TokenStatus } from "../generated/prisma";
+import { fetchMarketForToken } from "../dex/client";
 
 export interface ClassifyOutcome {
   classification: VisualClassification;
@@ -42,10 +43,36 @@ export async function classifyToken(tokenId: string): Promise<ClassifyOutcome> {
     // cheap/fast tier, so the default (small, model-chosen) budget is fine.
   });
 
-  const passed =
+  const narrativePassed =
     classification.requiresResearch &&
     classification.utilityProbability >= config.minUtilityProbability &&
     classification.memeProbability <= config.maxMemeProbability;
+
+  // Deterministic momentum override: real, already-observable trading demand
+  // is itself evidence worth researching, regardless of the narrative
+  // utility/meme verdict above. Confirmed live misses without this: tokens
+  // rejected as "doesn't align with legitimate software/fintech" that went on
+  // to run several multiples with hundreds of real traders. This never
+  // bypasses deep research's own contract-safety/liquidity/hard-reject
+  // checks — it only decides whether that research happens at all.
+  let momentumOverride = false;
+  let momentumReason: string | undefined;
+  if (!narrativePassed) {
+    const market = await fetchMarketForToken(token.chain, token.address).catch((err) => {
+      logger.warn({ tokenId, err: String(err) }, "momentum-override market lookup failed — falling back to narrative verdict only");
+      return undefined;
+    });
+    const pair = market?.primaryPair;
+    const hourlyTxns = (pair?.buys1h ?? 0) + (pair?.sells1h ?? 0);
+    const liquidityUsd = pair?.liquidityUsd ?? 0;
+    if (liquidityUsd >= config.momentumOverrideMinLiquidityUsd && hourlyTxns >= config.momentumOverrideMinHourlyTxns) {
+      momentumOverride = true;
+      momentumReason = `Momentum override: $${Math.round(liquidityUsd).toLocaleString()} liquidity and ${hourlyTxns} txns/1h despite narrative rejection (utility ${(classification.utilityProbability * 100).toFixed(0)}%, meme ${(classification.memeProbability * 100).toFixed(0)}%) — real trading demand is proceeding to research regardless.`;
+      logger.info({ tokenId, address: token.address, liquidityUsd, hourlyTxns }, "classification narrative-rejected but passed via momentum override");
+    }
+  }
+
+  const passed = narrativePassed || momentumOverride;
 
   await db.classification.create({
     data: {
@@ -56,7 +83,7 @@ export async function classifyToken(tokenId: string): Promise<ClassifyOutcome> {
       professionalism: classification.professionalism,
       visualSpamProbability: classification.visualSpamProbability,
       passed,
-      reasoningSummary: classification.reasoningSummary,
+      reasoningSummary: momentumReason ? [...classification.reasoningSummary, momentumReason] : classification.reasoningSummary,
       model: config.classifierModel,
     },
   });
