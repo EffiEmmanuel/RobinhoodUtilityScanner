@@ -77,7 +77,15 @@ export const tradingConfig = {
   // collapse outright rather than gently mean-revert. An unbounded target
   // risks never triggering at all before the plan expires, which is not a
   // "safe" outcome for a system whose whole point is entering trades.
+  // Now only the FALLBACK cap (planning.ts prefers the token's real observed
+  // support level once there's enough history to trust one — see
+  // clampPullbackTarget) for a brand-new candidate with too little history to
+  // know a real support level yet.
   maxPullbackWaitPercent: num("MAX_PULLBACK_WAIT_PERCENT", 20),
+  // Sanity backstop applied regardless of data source, including when a real
+  // observed support level is used — that data could itself be a brief noise
+  // wick, never trust it past this no matter what.
+  maxPullbackExtremeFloorPercent: num("MAX_PULLBACK_EXTREME_FLOOR_PERCENT", 60),
   // Tightened from 20s — deliberately not literally 1s: DexScreener's public
   // API has no confirmed rate-limit headroom for that at 24/7 scale, and this
   // is still the cheap, free, deterministic layer, not an AI call. Raise or
@@ -103,17 +111,6 @@ export const tradingConfig = {
   // stale without ever technically breaking either boundary.
   pendingPlanReviewIntervalMinutes: num("PENDING_PLAN_REVIEW_INTERVAL_MINUTES", 20),
   pendingPlanReplanOnDriftPercent: num("PENDING_PLAN_REPLAN_ON_DRIFT_PERCENT", 25),
-
-  // The AI's own riskScore (0-100, market-timing risk — extended/parabolic
-  // scores high) was computed and stored but never actually gated a real
-  // entry. Confirmed live: an 85/100-risk plan would have gone on to execute
-  // a real buy the moment price happened to dip into its target zone, with
-  // nothing checking that the AI itself called this risky. This requires the
-  // MOST RECENT plan's risk score (refreshed by the review above) to be at or
-  // below this ceiling before a trigger is allowed to proceed to sizing/
-  // execution — a stale "still risky" plan blocks the trade instead of
-  // silently trusting an old number.
-  maxEntryRiskScore: num("MAX_ENTRY_RISK_SCORE", 50),
 
   // Active position management (§trading/positionStrategy.ts) — the AI
   // reviews an open position's strategy periodically (not on every cheap

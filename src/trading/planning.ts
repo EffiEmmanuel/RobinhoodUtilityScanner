@@ -9,6 +9,7 @@ import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
+import { sendTradePlanEmail } from "./notifications";
 
 /**
  * §14: turns a QUALIFIED candidate into BUY_NOW / WAIT_FOR_ENTRY / WATCH_ONLY
@@ -16,12 +17,17 @@ import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecisio
  * this function re-runs the deterministic eligibility gate against FRESH
  * market data (liquidity can have moved since candidate creation) and can
  * downgrade whatever the AI recommends, but never upgrade a REJECT_TRADE.
+ *
+ * Also called repeatedly by entryMonitor.ts to REPLAN an already-WAITING
+ * candidate (fresh target zone/risk score) — the email below only fires the
+ * first time a candidate enters the watching panel, not on every replan.
  */
 export async function planCandidate(candidateId: string): Promise<void> {
   const candidate = await db.tradeCandidate.findUniqueOrThrow({
     where: { id: candidateId },
     include: { token: true },
   });
+  const isFirstPlan = candidate.status !== TradeCandidateStatus.WAITING;
   const run = candidate.researchRunId
     ? await db.researchRun.findUnique({ where: { id: candidate.researchRunId } })
     : null;
@@ -82,7 +88,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
   const action = analysis.recommendedAction;
   const currentMcap = market.primaryPair?.marketCapUsd;
-  const clampedZone = clampPullbackTarget(currentMcap, analysis.targetEntryMcapMin, analysis.targetEntryMcapMax);
+  const clampedZone = clampPullbackTarget(currentMcap, analysis.targetEntryMcapMin, analysis.targetEntryMcapMax, technical);
 
   const plan = await db.tradePlan.create({
     data: {
@@ -131,6 +137,22 @@ export async function planCandidate(candidateId: string): Promise<void> {
       },
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.WAITING } });
+    if (isFirstPlan) {
+      await sendTradePlanEmail({
+        token: candidate.token,
+        action,
+        currentMcap,
+        targetMin: clampedZone.min,
+        targetMax: clampedZone.max,
+        doNotChaseAboveMcap: analysis.doNotChaseAboveMcap,
+        invalidationMcap: analysis.technicalInvalidationMcap,
+        qualityScore: candidate.qualityScore,
+        researchConfidence: candidate.researchConfidence,
+        riskScore: analysis.riskScore,
+        confidence: analysis.confidence,
+        reasoning: analysis.reasoning,
+      }).catch((err) => logger.error({ candidateId, err: String(err) }, "failed to send trade plan email"));
+    }
   } else if (action === TradePlanAction.WATCH_ONLY) {
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.WATCH_ONLY } });
   } else {
@@ -144,30 +166,51 @@ export async function planCandidate(candidateId: string): Promise<void> {
  * Deterministic backstop on the AI's proposed WAIT_FOR_ENTRY zone — nothing
  * previously bounded how deep a pullback it could demand. Confirmed live: a
  * 42% pullback requirement on a token that had already moved +217% in 5
- * minutes, with no cap. On a chain where fast movers tend to keep running or
- * collapse outright rather than gently mean-revert, an unbounded target risks
- * the plan expiring having never triggered at all — never entering is not a
- * "safe" outcome for a system whose entire point is entering trades.
+ * minutes, with no cap, and the plan expired having never triggered.
  *
- * If the AI's proposed ceiling (targetEntryMcapMax) already asks for less than
- * config.maxPullbackWaitPercent, it's left untouched (a more conservative AI
- * call is respected). Otherwise the whole zone is shifted up so its ceiling
- * sits at exactly that cap, preserving the AI's original zone width.
+ * The fix is NOT a flat percentage below current price — the user correctly
+ * called that out as vague ("just say buy at 10% from analysis"). Instead,
+ * this prefers the token's own REAL observed support level
+ * (technical.swingLowMcap, from our own snapshot history — see
+ * marketAnalysis.ts) once there's enough history to trust it (MEDIUM/HIGH
+ * confidence). A flat percentage is only the fallback for a brand-new
+ * candidate with too little history to know a real support level yet, and a
+ * wide sanity backstop always applies regardless of data source, in case a
+ * brief noise wick got captured as the "low."
  */
 function clampPullbackTarget(
   currentMcap: number | undefined,
   min: number | null | undefined,
-  max: number | null | undefined
-): { min: number | undefined; max: number | undefined; clamped: boolean } {
+  max: number | null | undefined,
+  technical: { swingLowMcap?: number; confidence: string }
+): { min: number | undefined; max: number | undefined; clamped: boolean; reason?: string } {
   if (!currentMcap || min === null || min === undefined || max === null || max === undefined) {
     return { min: min ?? undefined, max: max ?? undefined, clamped: false };
   }
-  const shallowestAllowedMax = currentMcap * (1 - tradingConfig.maxPullbackWaitPercent / 100);
+
+  const hasRealSupport =
+    technical.swingLowMcap !== undefined &&
+    (technical.confidence === "MEDIUM" || technical.confidence === "HIGH") &&
+    technical.swingLowMcap < currentMcap;
+  // A small buffer above the raw observed low — demanding the exact
+  // historical bottom tick is its own kind of unrealistic.
+  const supportBasedMax = hasRealSupport ? technical.swingLowMcap! * 1.03 : undefined;
+  const percentBasedMax = currentMcap * (1 - tradingConfig.maxPullbackWaitPercent / 100);
+  // Sanity backstop regardless of data source — real support data could
+  // itself be a noise wick; never trust it past this, no matter what.
+  const extremeFloorMax = currentMcap * (1 - tradingConfig.maxPullbackExtremeFloorPercent / 100);
+
+  const shallowestAllowedMax = Math.max(supportBasedMax ?? percentBasedMax, extremeFloorMax);
   if (max >= shallowestAllowedMax) {
     return { min, max, clamped: false };
   }
   const zoneWidth = Math.max(0, max - min);
-  return { min: shallowestAllowedMax - zoneWidth, max: shallowestAllowedMax, clamped: true };
+  return {
+    min: shallowestAllowedMax - zoneWidth,
+    max: shallowestAllowedMax,
+    clamped: true,
+    reason: hasRealSupport ? "anchored to observed support" : "percentage cap (insufficient support history)",
+  };
 }
 
 function strategyTtlMs(strategy: { configuration: unknown }): number {

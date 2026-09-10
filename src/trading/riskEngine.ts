@@ -68,6 +68,16 @@ export interface PositionSizingInput {
   confidence: number; // 0-100
   riskBucket: RiskBucket;
   liquidityUsd: number;
+  // The AI trade-plan's own market-timing risk score (0-100, distinct from
+  // riskBucket which is a project-quality margin). Previously a hard
+  // entry-blocking gate — confirmed live that blocked EVERY trigger this
+  // system ever had, including a token that went on to 2x right after. A
+  // pullback that just triggered will almost always still read as
+  // elevated-risk to the AI (that's inherent to "recently volatile," not
+  // evidence it's a bad trade), so it scales size down instead of vetoing
+  // the trade outright — consistent with how quality/confidence/liquidity
+  // already work here.
+  entryRiskScore?: number | null;
 }
 
 export interface PositionSizingResult {
@@ -101,8 +111,12 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   // minimum trade-eligibility floor, scales down toward min near it.
   const liquidityRatio = input.liquidityUsd / tradingConfig.minTradeLiquidityUsd;
   const liquidityMult = lerp(sizingRules.liquidityMultiplierMin, sizingRules.liquidityMultiplierMax, (liquidityRatio - 1) / 2);
+  // Full size at/below 40 risk, linearly down to 50% size at 100 — a soft
+  // preference for lower risk, never a wall that stops the trade entirely.
+  const entryRiskMult =
+    input.entryRiskScore != null ? lerp(1, 0.5, (input.entryRiskScore - 40) / 60) : 1;
 
-  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult;
+  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
   const maxBySinglePositionCap = portfolio.totalEquityUsd * (tradingConfig.maxSinglePositionPercent / 100);
@@ -132,7 +146,7 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   }
 
   reasons.push(
-    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)}`
+    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)}`
   );
   return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons };
 }

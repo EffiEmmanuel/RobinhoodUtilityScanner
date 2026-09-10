@@ -120,17 +120,30 @@ export async function sendTradePlanEmail(input: {
   currentMcap?: number;
   targetMin?: number;
   targetMax?: number;
+  doNotChaseAboveMcap?: number | null;
+  invalidationMcap?: number | null;
+  qualityScore?: number | null;
+  researchConfidence?: number | null;
+  riskScore?: number | null;
+  confidence?: number | null;
   reasoning: string[];
 }): Promise<void> {
   await send(
     `Trade Plan — ${tokenLabel(input.token)} — ${input.action}`,
     [
       `Token: ${tokenLabel(input.token)}`,
+      `Contract: ${input.token?.address ?? "unknown"}`,
       `Action: ${input.action}`,
+      input.qualityScore != null ? `Project quality: ${Math.round(input.qualityScore)}/100` : undefined,
+      input.researchConfidence != null ? `Research confidence: ${Math.round(input.researchConfidence)}/100` : undefined,
+      input.riskScore != null ? `AI market-timing risk: ${Math.round(input.riskScore)}/100` : undefined,
+      input.confidence != null ? `AI confidence in this read: ${Math.round(input.confidence)}/100` : undefined,
       input.currentMcap ? `Current market cap: $${Math.round(input.currentMcap).toLocaleString()}` : undefined,
       input.targetMin && input.targetMax
         ? `Target entry zone: $${Math.round(input.targetMin).toLocaleString()} - $${Math.round(input.targetMax).toLocaleString()}`
         : undefined,
+      input.doNotChaseAboveMcap != null ? `Do not chase above: $${Math.round(input.doNotChaseAboveMcap).toLocaleString()}` : undefined,
+      input.invalidationMcap != null ? `Technical invalidation: $${Math.round(input.invalidationMcap).toLocaleString()}` : undefined,
       "",
       "Reasoning:",
       ...input.reasoning.map((r) => `- ${r}`),

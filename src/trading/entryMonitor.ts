@@ -145,19 +145,11 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
     return;
   }
 
-  // Price is in zone, but only proceed if the AI's own risk assessment is
-  // still acceptably low — not just true back when the plan was created.
-  // The staleness check above guarantees this plan is recent, so this is a
-  // meaningful, current read, not a stale number being trusted blindly.
-  if (plan.riskScore !== null && plan.riskScore !== undefined && plan.riskScore > tradingConfig.maxEntryRiskScore) {
-    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE, lastCheckedAt: new Date() } });
-    logger.info(
-      { pendingEntryId: entry.id, candidateId: candidate.id, riskScore: plan.riskScore, ceiling: tradingConfig.maxEntryRiskScore },
-      "entry deferred — AI risk score exceeds the ceiling required to actually enter"
-    );
-    return;
-  }
-
+  // The AI's risk score no longer hard-blocks entry here — confirmed live it
+  // blocked every single trigger this system ever had (including one that
+  // went on to 2x right after). It now scales position size instead, in
+  // calculatePositionSize below (entryRiskScore), same treatment as quality/
+  // confidence/liquidity.
   await db.pendingEntry.update({ where: { id: entry.id }, data: { triggeredAt: new Date(), lastCheckedAt: new Date() } });
   logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, mcap }, "pending entry triggered — revalidating");
 
@@ -179,6 +171,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
     confidence: plan.confidence ?? 0,
     riskBucket,
     liquidityUsd: pair.liquidityUsd ?? 0,
+    entryRiskScore: plan.riskScore,
   });
 
   if (!sizing.approved) {
