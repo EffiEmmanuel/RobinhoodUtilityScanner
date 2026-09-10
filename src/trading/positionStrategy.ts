@@ -7,7 +7,7 @@ import { tradingConfig } from "./config";
 import { callStructured } from "../ai/provider";
 import { PositionStrategySchema, POSITION_STRATEGY_JSON_SCHEMA, type PositionStrategyDecision } from "../ai/schemas";
 import { POSITION_STRATEGY_SYSTEM, buildPositionStrategyPrompt } from "../ai/prompts";
-import { computeTechnicalFeatures, formatTechnicalFeaturesForPositionStrategy, type TechnicalFeatures } from "./marketAnalysis";
+import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type TechnicalFeatures } from "./marketAnalysis";
 import { getActiveStrategyVersion, type ExitRules } from "./strategy";
 import { validateEntry } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
@@ -117,7 +117,7 @@ export async function runPositionStrategyReview(input: {
         }),
         exitRulesState: formatExitRulesState(exitRules, input.currentMultiple),
         reentryState: formatReentryState(trade),
-        technical: formatTechnicalFeaturesForPositionStrategy(technical),
+        technical: formatTechnicalFeaturesForPrompt(technical),
       }),
       schema: PositionStrategySchema,
       jsonSchema: POSITION_STRATEGY_JSON_SCHEMA,

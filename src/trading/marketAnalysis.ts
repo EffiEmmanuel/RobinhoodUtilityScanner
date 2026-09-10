@@ -164,34 +164,22 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
   return features;
 }
 
-export function formatTechnicalFeaturesForPrompt(f: TechnicalFeatures): string {
-  const lines = [
-    `Data points collected so far: ${f.dataPoints} (confidence: ${f.confidence} — fewer than ~6 snapshots means these numbers are not yet reliable)`,
-    f.currentMcap !== undefined ? `Current market cap: $${Math.round(f.currentMcap).toLocaleString()}` : undefined,
-    f.swingHighMcap !== undefined ? `Observed high (since we started watching): $${Math.round(f.swingHighMcap).toLocaleString()}` : undefined,
-    f.swingLowMcap !== undefined ? `Observed low (since we started watching): $${Math.round(f.swingLowMcap).toLocaleString()}` : undefined,
-    f.drawdownFromHighPercent !== undefined ? `Distance from observed high: ${f.drawdownFromHighPercent.toFixed(1)}%` : undefined,
-    f.distanceFromLowPercent !== undefined ? `Distance from observed low: +${f.distanceFromLowPercent.toFixed(1)}%` : undefined,
-    f.mcapVelocityPercentPerHour !== undefined ? `Market cap velocity: ${f.mcapVelocityPercentPerHour.toFixed(1)}%/hour` : undefined,
-    f.ema9 !== undefined ? `EMA(9) on market cap: $${Math.round(f.ema9).toLocaleString()}` : "EMA(9): insufficient history yet",
-    f.ema20 !== undefined ? `EMA(20) on market cap: $${Math.round(f.ema20).toLocaleString()}` : "EMA(20): insufficient history yet",
-    f.rsi14Like !== undefined ? `RSI(14)-like momentum: ${f.rsi14Like.toFixed(0)}/100` : "RSI: insufficient history yet",
-    f.liquidityToMcapRatio !== undefined ? `Liquidity/mcap ratio: ${f.liquidityToMcapRatio.toFixed(3)}` : undefined,
-    f.buySellRatio1h !== undefined ? `1h buy ratio: ${(f.buySellRatio1h * 100).toFixed(0)}%` : undefined,
-    f.buySellRatio5m !== undefined ? `5m buy ratio: ${(f.buySellRatio5m * 100).toFixed(0)}%` : undefined,
-    f.priceChange5mPercent !== undefined ? `5m price change: ${f.priceChange5mPercent.toFixed(1)}%` : undefined,
-    f.priceChange1hPercent !== undefined ? `1h price change: ${f.priceChange1hPercent.toFixed(1)}%` : undefined,
-  ].filter(Boolean);
-  return lines.join("\n");
-}
-
 /**
- * Richer framing for the position-strategy AI review (trading/positionStrategy.ts)
- * — same underlying numbers as the entry-planning formatter above, but named
- * as what they're actually used for (support/resistance, volume trend) since
- * this is consulted throughout the life of a trade, not just once at entry.
+ * Shared by both the entry-planning AI (trading/planning.ts, deciding
+ * BUY_NOW/WAIT_FOR_ENTRY/WATCH_ONLY) and the position-strategy AI
+ * (trading/positionStrategy.ts, managing an already-open trade) — these used
+ * to be two separate formatters, and the entry-planning one gave the model
+ * only raw EMA/RSI numbers with no interpretation while the position-strategy
+ * one explicitly labeled swing-low/high as support/resistance and called out
+ * the EMA9/EMA20 crossover as bullish/bearish bias. That asymmetry meant the
+ * model deciding whether to buy had strictly weaker signal than the model
+ * managing the same trade five minutes later — confirmed live: a token that
+ * had already pulled back from its high and was actively reclaiming that
+ * support (green candles, +7% on 5m) still got planned as WAIT_FOR_ENTRY for
+ * a deeper pullback, because nothing in its prompt named the pattern it was
+ * looking at. One formatter now, used everywhere.
  */
-export function formatTechnicalFeaturesForPositionStrategy(f: TechnicalFeatures): string {
+export function formatTechnicalFeaturesForPrompt(f: TechnicalFeatures): string {
   const volLines = [
     f.volume5mNow !== undefined ? `5m volume: $${Math.round(f.volume5mNow).toLocaleString()}` : undefined,
     f.volume1hNow !== undefined ? `1h volume: $${Math.round(f.volume1hNow).toLocaleString()}` : undefined,
@@ -217,6 +205,7 @@ export function formatTechnicalFeaturesForPositionStrategy(f: TechnicalFeatures)
       : "EMA(9)/EMA(20): insufficient history yet",
     f.rsi14Like !== undefined ? `RSI(14)-like momentum: ${f.rsi14Like.toFixed(0)}/100 (>70 stretched to the upside, <30 stretched to the downside, as a rough guide only)` : "RSI: insufficient history yet",
     ...volLines,
+    f.liquidityToMcapRatio !== undefined ? `Liquidity/mcap ratio: ${f.liquidityToMcapRatio.toFixed(3)}` : undefined,
     f.buySellRatio1h !== undefined ? `1h buy ratio: ${(f.buySellRatio1h * 100).toFixed(0)}%` : undefined,
     f.buySellRatio5m !== undefined ? `5m buy ratio: ${(f.buySellRatio5m * 100).toFixed(0)}%` : undefined,
     f.priceChange5mPercent !== undefined ? `5m price change: ${f.priceChange5mPercent.toFixed(1)}%` : undefined,
