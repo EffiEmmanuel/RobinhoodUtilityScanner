@@ -1,6 +1,6 @@
 import { keccak256, encodeAbiParameters, getAddress, type PublicClient } from "viem";
 import { logger } from "../../logger";
-import { UNISWAP_V4_ADDRESSES, NATIVE_ETH_CURRENCY, POOL_MANAGER_ABI, STATE_VIEW_ABI } from "./contracts";
+import { UNISWAP_V4_ADDRESSES, NATIVE_ETH_CURRENCY, POOL_MANAGER_ABI, STATE_VIEW_ABI, MAX_REASONABLE_POOL_FEE } from "./contracts";
 
 export interface PoolKey {
   currency0: `0x${string}`;
@@ -124,20 +124,52 @@ async function scanInitializeLogsBackward(client: PublicClient, token: `0x${stri
   return [];
 }
 
+/**
+ * Despite the name this used to only check "is initialized" (sqrtPriceX96 >
+ * 0), returning the first such candidate regardless of how much real
+ * liquidity it actually held — fine when a token has exactly one pool, but a
+ * real risk when several exist (a near-empty or fee-trap pool initialized
+ * incidentally alongside the token's real, deep pool). Now reads real
+ * liquidity via StateView.getLiquidity and picks the deepest one among all
+ * initialized candidates, and refuses any pool whose LP fee is high enough to
+ * itself be predatory (see MAX_REASONABLE_POOL_FEE) even if it's the only
+ * candidate found — an extreme fee is a red flag regardless of liquidity
+ * depth, not something a caller's own price-impact math should have to
+ * rediscover from a cryptic four-digit percentage.
+ */
 async function pickPoolWithLiquidity(client: PublicClient, candidates: DiscoveredPool[]): Promise<DiscoveredPool | undefined> {
+  let best: { candidate: DiscoveredPool; liquidity: bigint } | undefined;
+
   for (const candidate of candidates) {
+    if (candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
+      logger.warn(
+        { poolId: candidate.poolId, feeBps: candidate.poolKey.fee / 100 },
+        "skipping pool with predatory LP fee (>5%) — refusing to trade through it regardless of liquidity"
+      );
+      continue;
+    }
     try {
-      const slot0 = await client.readContract({
-        address: UNISWAP_V4_ADDRESSES.stateView as `0x${string}`,
-        abi: STATE_VIEW_ABI,
-        functionName: "getSlot0",
-        args: [candidate.poolId],
-      });
+      const [slot0, liquidity] = await Promise.all([
+        client.readContract({
+          address: UNISWAP_V4_ADDRESSES.stateView as `0x${string}`,
+          abi: STATE_VIEW_ABI,
+          functionName: "getSlot0",
+          args: [candidate.poolId],
+        }),
+        client.readContract({
+          address: UNISWAP_V4_ADDRESSES.stateView as `0x${string}`,
+          abi: STATE_VIEW_ABI,
+          functionName: "getLiquidity",
+          args: [candidate.poolId],
+        }),
+      ]);
       const sqrtPriceX96 = slot0[0];
-      if (sqrtPriceX96 > 0n) return candidate;
+      if (sqrtPriceX96 > 0n && (!best || liquidity > best.liquidity)) {
+        best = { candidate, liquidity };
+      }
     } catch {
       // not initialized / doesn't exist — try the next candidate
     }
   }
-  return undefined;
+  return best?.candidate;
 }

@@ -67,7 +67,28 @@ export const STATE_VIEW_ABI = [
       { name: "lpFee", type: "uint24" },
     ],
   },
+  {
+    type: "function",
+    name: "getLiquidity",
+    stateMutability: "view",
+    inputs: [{ name: "poolId", type: "bytes32" }],
+    outputs: [{ name: "liquidity", type: "uint128" }],
+  },
 ] as const;
+
+// V4 fee is in hundredths of a bip (1e-6) — 1,000,000 == 100%. A pool this
+// codebase found permissionlessly via raw Initialize events, not through any
+// curated/restricted factory, so nothing stops someone from deploying one
+// with an extreme LP fee. Confirmed live: a token's only pool had fee=900000
+// (90%) with zero hooks — a real, initialized, non-trivial-liquidity pool
+// that would still eat ~90%+ of any trade's value before the swap curve ever
+// sees it. getBuyEstimate's price-impact check catches this too (it shows up
+// as an absurd, correct price-impact number), but a token can also fail here
+// BEFORE ever reaching that estimate (e.g. getLiveQuote called directly by
+// executeLiveBuy/Sell) — this is the earlier, clearly-labeled version of the
+// same protection, so a rejection reads as "pool fee too high" instead of a
+// cryptic four-digit percentage.
+export const MAX_REASONABLE_POOL_FEE = 50_000; // 5%
 
 export const ERC20_ALLOWANCE_ABI = [
   {

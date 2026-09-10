@@ -42,11 +42,13 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
+  const hourlyTxns = (market.primaryPair?.buys1h ?? 0) + (market.primaryPair?.sells1h ?? 0);
   const freshEval = evaluateCandidate({
     qualityScore: candidate.qualityScore ?? 0,
     researchConfidence: candidate.researchConfidence ?? 0,
     contractScore: run.contractScore ?? 0,
     liquidityUsd,
+    hourlyTxns,
     hardReject: run.hardReject,
   });
 
