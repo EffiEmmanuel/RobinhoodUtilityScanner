@@ -222,7 +222,7 @@ function evaluateExits(ctx: {
   // Priority 1: emergency/risk exit (§75).
   const positionRisk = validatePosition({
     liquidityUsd: ctx.liquidityUsd,
-    liquidityAtEntryUsd: ctx.liquidityUsd, // no separate stored entry liquidity yet; conservative (see README limitation)
+    liquidityAtEntryUsd: trade.entryLiquidityUsd ?? ctx.liquidityUsd, // falls back to current (no-op check) only for trades opened before entryLiquidityUsd existed
     unrealizedPnlPercent: ctx.unrealizedPnlPercent,
     maxLossPercent: exitRules.maxLossPercent,
     catastrophicLossPercent: exitRules.catastrophicLossPercent,

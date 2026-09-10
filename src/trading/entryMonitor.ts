@@ -206,6 +206,7 @@ async function openTrade(input: {
       plannedEntryMcap: input.plannedEntryMcap,
       actualEntryMcap: input.actualEntryMcap,
       entryPriceUsd: fill.priceUsd,
+      entryLiquidityUsd: input.pair.liquidityUsd,
       openedAt: new Date(),
     },
   });

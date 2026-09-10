@@ -371,6 +371,7 @@ model Trade {
   plannedEntryMcap Float?
   actualEntryMcap  Float?
   entryPriceUsd    Float?
+  entryLiquidityUsd Float?
 
   openedAt DateTime?
   closedAt DateTime?
