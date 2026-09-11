@@ -1466,6 +1466,8 @@
           profileUpdatesPageSize: 15,
           profileUpdatesHasMore: false,
           profileUpdatesSearch: "",
+          modalTokenId: null,
+          modalRefreshTimer: null,
         };
 
         var els = {
@@ -2821,16 +2823,26 @@
           els.tokenModalBody.innerHTML = sections.join("");
         }
 
-        function openTokenModal(tokenId) {
-          if (!tokenId) return;
-          els.tokenModalTitle.textContent = "Loading…";
-          els.tokenModalSub.textContent = "";
-          els.tokenModalBody.innerHTML =
-            '<div class="modal-loading">Loading&hellip;</div>';
-          els.tokenModalOverlay.hidden = false;
+        // How often an open token modal re-pulls its own data — separate from
+        // refreshAll's 10s cadence for the rest of the dashboard, since a
+        // modal showing a live open position's PnL previously never updated
+        // again after the initial click until closed and reopened.
+        var TOKEN_MODAL_REFRESH_MS = 5000;
+
+        function loadTokenModal(tokenId, isInitialLoad) {
           fetchJson("/tokens/" + encodeURIComponent(tokenId))
-            .then(renderTokenModal)
+            .then(function (token) {
+              // The modal may have been closed or switched to a different
+              // token while this request was in flight — drop a stale reply.
+              if (state.modalTokenId !== tokenId) return;
+              renderTokenModal(token);
+            })
             .catch(function (err) {
+              if (state.modalTokenId !== tokenId) return;
+              // A background refresh failing quietly leaves the last good
+              // render in place instead of blanking a working modal; only the
+              // very first load shows the error state.
+              if (!isInitialLoad) return;
               els.tokenModalTitle.textContent = "Could not load token";
               els.tokenModalBody.innerHTML =
                 '<div class="modal-section"><p class="modal-note">' +
@@ -2838,8 +2850,28 @@
                 "</p></div>";
             });
         }
+
+        function openTokenModal(tokenId) {
+          if (!tokenId) return;
+          state.modalTokenId = tokenId;
+          els.tokenModalTitle.textContent = "Loading…";
+          els.tokenModalSub.textContent = "";
+          els.tokenModalBody.innerHTML =
+            '<div class="modal-loading">Loading&hellip;</div>';
+          els.tokenModalOverlay.hidden = false;
+          loadTokenModal(tokenId, true);
+          if (state.modalRefreshTimer) clearInterval(state.modalRefreshTimer);
+          state.modalRefreshTimer = setInterval(function () {
+            if (state.modalTokenId) loadTokenModal(state.modalTokenId, false);
+          }, TOKEN_MODAL_REFRESH_MS);
+        }
         function closeTokenModal() {
           els.tokenModalOverlay.hidden = true;
+          state.modalTokenId = null;
+          if (state.modalRefreshTimer) {
+            clearInterval(state.modalRefreshTimer);
+            state.modalRefreshTimer = null;
+          }
         }
         els.tokenModalClose.addEventListener("click", closeTokenModal);
         els.tokenModalOverlay.addEventListener("click", function (e) {

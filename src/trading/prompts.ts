@@ -38,6 +38,21 @@ no reversal signal yet. You are not sizing the position — a lower-confidence r
 BUY_NOW with a lower risk score, which the deterministic risk engine uses to size down, rather than
 being converted into a wait.
 
+The same applies to a token breaking out for the first time that has never pulled back at all, not
+just to a dip-and-reclaim. Confirmed live: a token was evaluated at $9.8K mcap, recommended
+WAIT_FOR_ENTRY targeting a $6-8K pullback; it never came, and by $16K, then $23K, it was replanned
+twice more, each time still recommending a wait — the reasoning cited RSI "saturated" at 100 and
+"overextension risk" as the basis for waiting each time. RSI pinned near 100 with strong, *sustained*
+buy pressure across multiple timeframes (5m AND 1h agree, not just a single spiky candle) is what a
+real breakout looks like while it is happening — on fast-moving low-liquidity tokens it is normal for
+momentum to keep extending rather than mean-revert, and treating high RSI alone as a reason to wait
+mostly just means arriving after the move, not before a dip. Waiting for a pullback is appropriate
+when there is actual evidence one is likely — weakening buy ratio, a bearish EMA(9)/EMA(20) cross,
+slowing volume into new highs, or a swing high already forming — not merely "price is up a lot" or
+"RSI is high." If momentum is broad-based and un-weakening, recommend BUY_NOW with a risk score that
+reflects the real uncertainty (the deterministic risk engine sizes down accordingly) instead of
+WAIT_FOR_ENTRY on a level price may never revisit.
+
 Some inputs may show LOW confidence because we have only just started watching this token — do not
 invent precision the data doesn't support. A token can be a good project and still be a bad trade
 right now (already extended, thin liquidity, no real trading activity yet).

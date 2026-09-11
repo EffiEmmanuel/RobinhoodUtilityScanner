@@ -64,7 +64,19 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
 
   const remainingTokens = await getRemainingTokenAmount(trade);
   if (remainingTokens <= 0) {
-    // fully exited via prior partial sells but never explicitly closed — close now
+    // Legitimate case: prior partial sells summed to the full position but
+    // the last one never got flagged as a full exit — close now. But if
+    // there's no SELL execution at all, "0 remaining" means the BUY fill
+    // itself recorded 0 tokens (a bad balance read, not a real 0-token buy —
+    // see executeBuyFill's retry/throw guard) and closing here would credit a
+    // fabricated 100% loss for a sell that never happened while real tokens
+    // sit untouched in the wallet (confirmed live 2026-09-11, trade
+    // cmtw8ki67000r1ymz88bfg13o). Surface it instead of papering over it.
+    const sellCount = await db.tradeExecution.count({ where: { tradeId: trade.id, type: "SELL" } });
+    if (sellCount === 0) {
+      logger.error({ tradeId: trade.id }, "position shows 0 remaining tokens but no sell was ever executed — likely a bad entry fill; needs manual reconciliation, not auto-closing");
+      return;
+    }
     await closeTrade(trade, "fully exited via partial sells");
     return;
   }

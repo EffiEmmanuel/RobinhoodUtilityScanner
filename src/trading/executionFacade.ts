@@ -1,5 +1,6 @@
 import { parseEther, formatUnits } from "viem";
 import { logger } from "../logger";
+import { sleep } from "../util/http";
 import type { MarketPair } from "../dex/types";
 import { tradingConfig } from "./config";
 import { getPaperQuote, getPaperSellQuote, isSellQuoteAvailable as isPaperSellQuoteAvailable, type PaperQuote } from "./execution";
@@ -104,7 +105,28 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
   if (receipt.status !== "success") throw new Error(`live buy transaction reverted on-chain: ${result.txHash}`);
 
-  const balanceAfter = await getTokenBalance(client, token, wallet);
+  // Confirmed live: right after a successful receipt, a balanceOf read can
+  // still come back showing the pre-buy balance (RPC read-after-write lag —
+  // the node answering this eth_call hasn't caught up to the block the
+  // receipt came from yet). Recording that as "bought 0 tokens" is worse than
+  // any transient failure: it silently fabricates a trade with no tokens and,
+  // downstream, the position monitor treats 0-remaining as "already sold" and
+  // closes it as a full loss even though the buy — and the tokens — are real
+  // (confirmed live 2026-09-11: STONKBROKER trade cmtw8ki67000r1ymz88bfg13o).
+  // A revert is already ruled out above, so retry the read a few times before
+  // accepting a delta this suspicious.
+  const BALANCE_READ_BACKOFF_MS = [0, 1500, 3000, 6000];
+  let balanceAfter = await getTokenBalance(client, token, wallet);
+  for (let attempt = 0; balanceAfter <= balanceBefore && attempt < BALANCE_READ_BACKOFF_MS.length; attempt++) {
+    await sleep(BALANCE_READ_BACKOFF_MS[attempt]);
+    balanceAfter = await getTokenBalance(client, token, wallet);
+  }
+  if (balanceAfter <= balanceBefore) {
+    throw new Error(
+      `live buy tx ${result.txHash} confirmed on-chain but balanceOf still shows no tokens received after retries — likely an RPC read-after-write lag, not a real 0-token fill; refusing to record a phantom buy. Verify the wallet's actual token balance and reconcile manually.`
+    );
+  }
+
   const decimals = await getTokenDecimals(client, token);
   const tokenAmount = Number(formatUnits(balanceAfter - balanceBefore, decimals));
   const gasCostEth = Number(formatUnits(receipt.gasUsed * receipt.effectiveGasPrice, 18));

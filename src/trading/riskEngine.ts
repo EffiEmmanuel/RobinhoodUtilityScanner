@@ -156,8 +156,30 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
     reasons.push("capped at remaining deployable capital");
   }
 
-  // Small-account gas check (§23).
+  // Small-account gas check (§23). Below this size, gas alone exceeds
+  // maxGasCostPercentOfPosition no matter what the formula above computed.
   const gasCost = tradingConfig.paperAssumedGasCostUsd;
+  const gasViableFloorUsd = (gasCost * 100) / tradingConfig.maxGasCostPercentOfPosition;
+
+  // Confirmed live 2026-09-11: a HIGH-risk-bucket candidate that had already
+  // cleared every eligibility gate (RWA, momentum-override entry) got sized
+  // down by the quality/risk/entryRisk multipliers to ~$0.22 — well under the
+  // ~$1 floor gas viability requires at the default 5% cap — and was rejected
+  // outright by the check below on a token that went on to run 3x. The
+  // formula's job is choosing how confidently to size *among tradeable
+  // sizes*, not deciding whether to trade at all — a candidate that cleared
+  // every gate deserves the smallest gas-viable position, not zero, as long
+  // as the account can actually afford one within the hard caps already
+  // applied above (never exceeds maxSinglePositionPercent or deployable
+  // capital — this raises the floor, it doesn't bypass either ceiling).
+  if (positionSizeUsd > 0 && positionSizeUsd < gasViableFloorUsd) {
+    const raisedTo = Math.min(gasViableFloorUsd, maxBySinglePositionCap, portfolio.availableToDeployUsd);
+    if (raisedTo >= gasViableFloorUsd - 1e-9) {
+      reasons.push(`raised from $${positionSizeUsd.toFixed(2)} to gas-viable floor $${raisedTo.toFixed(2)} (gates already cleared; capital available)`);
+      positionSizeUsd = raisedTo;
+    }
+  }
+
   if (positionSizeUsd > 0 && (gasCost / positionSizeUsd) * 100 > tradingConfig.maxGasCostPercentOfPosition) {
     return {
       approved: false,
