@@ -1505,15 +1505,25 @@
           candidatesPageLabel: document.getElementById("candidates-page-label"),
           candidatesSearchRow: document.getElementById("candidates-search-row"),
           candidatesSearch: document.getElementById("candidates-search"),
-          candidatesSearchClear: document.getElementById("candidates-search-clear"),
+          candidatesSearchClear: document.getElementById(
+            "candidates-search-clear"
+          ),
           profileUpdatesFeed: document.getElementById("profile-updates-feed"),
           profileUpdatesCount: document.getElementById("profile-updates-count"),
           profileUpdatesPrev: document.getElementById("profile-updates-prev"),
           profileUpdatesNext: document.getElementById("profile-updates-next"),
-          profileUpdatesPageLabel: document.getElementById("profile-updates-page-label"),
-          profileUpdatesSearchRow: document.getElementById("profile-updates-search-row"),
-          profileUpdatesSearch: document.getElementById("profile-updates-search"),
-          profileUpdatesSearchClear: document.getElementById("profile-updates-search-clear"),
+          profileUpdatesPageLabel: document.getElementById(
+            "profile-updates-page-label"
+          ),
+          profileUpdatesSearchRow: document.getElementById(
+            "profile-updates-search-row"
+          ),
+          profileUpdatesSearch: document.getElementById(
+            "profile-updates-search"
+          ),
+          profileUpdatesSearchClear: document.getElementById(
+            "profile-updates-search-clear"
+          ),
           ledgerFeed: document.getElementById("ledger-feed"),
           ledgerCount: document.getElementById("ledger-count"),
           walletChip: document.getElementById("wallet-chip"),
@@ -1549,7 +1559,7 @@
         function fmtEth(n) {
           if (n === null || n === undefined || isNaN(n)) return "&mdash;";
           return (
-            "Ξ" +
+            "ETH" +
             n.toLocaleString(undefined, {
               minimumFractionDigits: 4,
               maximumFractionDigits: 5,
@@ -1563,9 +1573,22 @@
         // brackets — falls back to plain USD if no current rate is available,
         // never fabricates a rate.
         function fmtEthWithUsd(usdValue, ethPriceUsd, ethValue) {
-          if (ethPriceUsd === null || ethPriceUsd === undefined || ethPriceUsd <= 0) return fmtUsd(usdValue);
-          var eth = ethValue !== undefined && ethValue !== null ? ethValue : usdValue / ethPriceUsd;
-          return fmtEth(eth) + ' <span style="color:var(--text-muted);font-size:0.75em;">(~' + fmtUsd(usdValue) + ")</span>";
+          if (
+            ethPriceUsd === null ||
+            ethPriceUsd === undefined ||
+            ethPriceUsd <= 0
+          )
+            return fmtUsd(usdValue);
+          var eth =
+            ethValue !== undefined && ethValue !== null
+              ? ethValue
+              : usdValue / ethPriceUsd;
+          return (
+            fmtEth(eth) +
+            ' <span style="color:var(--text-muted);font-size:0.75em;">(~' +
+            fmtUsd(usdValue) +
+            ")</span>"
+          );
         }
         function fmtPercentSpan(n) {
           if (n === null || n === undefined || isNaN(n)) return "&mdash;";
@@ -1795,14 +1818,26 @@
           // available; falls back to plain USD otherwise.
           var p = s.portfolio || {};
           var tiles = [
-            { label: "Total Equity", value: fmtEthWithUsd(p.totalEquityUsd, p.ethPriceUsd) },
-            { label: "Cash", value: fmtEthWithUsd(p.cashUsd, p.ethPriceUsd, p.cashEth) },
-            { label: "Deployed", value: fmtEthWithUsd(p.deployedUsd, p.ethPriceUsd) },
+            {
+              label: "Total Equity",
+              value: fmtEthWithUsd(p.totalEquityUsd, p.ethPriceUsd),
+            },
+            {
+              label: "Cash",
+              value: fmtEthWithUsd(p.cashUsd, p.ethPriceUsd, p.cashEth),
+            },
+            {
+              label: "Deployed",
+              value: fmtEthWithUsd(p.deployedUsd, p.ethPriceUsd),
+            },
             {
               label: "Available to Deploy",
               value: fmtEthWithUsd(p.availableToDeployUsd, p.ethPriceUsd),
             },
-            { label: "Reserve Target", value: fmtEthWithUsd(p.reserveTargetUsd, p.ethPriceUsd) },
+            {
+              label: "Reserve Target",
+              value: fmtEthWithUsd(p.reserveTargetUsd, p.ethPriceUsd),
+            },
             {
               label: "Open Positions",
               value:
@@ -1847,9 +1882,15 @@
           renderActivity(data.tokens || []);
           renderPositions(data.positions || []);
           renderClosedTrades(data.closedTrades || []);
-          renderCandidates((data.candidates && data.candidates.candidates) || [], (data.candidates && data.candidates.hasMore) || false);
+          renderCandidates(
+            (data.candidates && data.candidates.candidates) || [],
+            (data.candidates && data.candidates.hasMore) || false
+          );
           renderLedger(data.ledger || []);
-          renderProfileUpdates((data.profileUpdates && data.profileUpdates.updates) || [], (data.profileUpdates && data.profileUpdates.hasMore) || false);
+          renderProfileUpdates(
+            (data.profileUpdates && data.profileUpdates.updates) || [],
+            (data.profileUpdates && data.profileUpdates.hasMore) || false
+          );
 
           els.lastUpdated.textContent = "updated just now";
         }
@@ -1973,14 +2014,15 @@
           if (!rows.length) {
             var emptyMsg;
             if (state.activitySearch) {
-              emptyMsg = 'No tokens match “' + esc(state.activitySearch) + '”.';
+              emptyMsg = "No tokens match “" + esc(state.activitySearch) + "”.";
             } else if (state.activityOffset > 0) {
               emptyMsg = "No more results on this page.";
             } else {
               emptyMsg =
                 "No tokens discovered yet — the discovery loops are running but haven’t found anything on Robinhood Chain yet.";
             }
-            els.activityFeed.innerHTML = '<div class="empty-feed">' + emptyMsg + "</div>";
+            els.activityFeed.innerHTML =
+              '<div class="empty-feed">' + emptyMsg + "</div>";
             return;
           }
           els.activityFeed.innerHTML = rows
@@ -1999,8 +2041,14 @@
                   "on-chain only, no real DexScreener profile yet — not sent to AI";
               } else if (IN_PROGRESS_STATUSES[t.status]) {
                 meta = "queued for AI classification";
-              } else if (t.status === "REJECTED" && t.cheapFilterReasons && t.cheapFilterReasons.length) {
-                meta = "filtered before AI review — " + t.cheapFilterReasons.join("; ");
+              } else if (
+                t.status === "REJECTED" &&
+                t.cheapFilterReasons &&
+                t.cheapFilterReasons.length
+              ) {
+                meta =
+                  "filtered before AI review — " +
+                  t.cheapFilterReasons.join("; ");
               } else if (t.status === "REJECTED") {
                 meta = "filtered before AI review (name/address check)";
               } else if (t.status === "FAILED") {
@@ -2043,13 +2091,15 @@
           if (!rows.length) {
             var candEmptyMsg;
             if (state.candidatesSearch) {
-              candEmptyMsg = 'No candidates match “' + esc(state.candidatesSearch) + '”.';
+              candEmptyMsg =
+                "No candidates match “" + esc(state.candidatesSearch) + "”.";
             } else if (state.candidatesOffset > 0) {
               candEmptyMsg = "No more results on this page.";
             } else {
               candEmptyMsg = "No candidates qualified yet.";
             }
-            els.candidatesFeed.innerHTML = '<div class="empty-feed">' + candEmptyMsg + "</div>";
+            els.candidatesFeed.innerHTML =
+              '<div class="empty-feed">' + candEmptyMsg + "</div>";
             return;
           }
           els.candidatesFeed.innerHTML = rows
@@ -2092,7 +2142,9 @@
 
           state.profileUpdatesHasMore = hasMore;
           var puPageNum =
-            Math.floor(state.profileUpdatesOffset / state.profileUpdatesPageSize) + 1;
+            Math.floor(
+              state.profileUpdatesOffset / state.profileUpdatesPageSize
+            ) + 1;
           els.profileUpdatesPageLabel.textContent = "Page " + puPageNum;
           els.profileUpdatesPrev.disabled = state.profileUpdatesOffset === 0;
           els.profileUpdatesNext.disabled = !state.profileUpdatesHasMore;
@@ -2100,13 +2152,18 @@
           if (!rows.length) {
             var puEmptyMsg;
             if (state.profileUpdatesSearch) {
-              puEmptyMsg = 'No profile updates match “' + esc(state.profileUpdatesSearch) + '”.';
+              puEmptyMsg =
+                "No profile updates match “" +
+                esc(state.profileUpdatesSearch) +
+                "”.";
             } else if (state.profileUpdatesOffset > 0) {
               puEmptyMsg = "No more results on this page.";
             } else {
-              puEmptyMsg = "No rejected tokens have gained new profile data yet.";
+              puEmptyMsg =
+                "No rejected tokens have gained new profile data yet.";
             }
-            els.profileUpdatesFeed.innerHTML = '<div class="empty-feed">' + puEmptyMsg + "</div>";
+            els.profileUpdatesFeed.innerHTML =
+              '<div class="empty-feed">' + puEmptyMsg + "</div>";
             return;
           }
           els.profileUpdatesFeed.innerHTML = rows
@@ -2211,7 +2268,10 @@
         });
         els.candidatesPrev.addEventListener("click", function () {
           if (state.candidatesOffset === 0) return;
-          state.candidatesOffset = Math.max(0, state.candidatesOffset - state.candidatesPageSize);
+          state.candidatesOffset = Math.max(
+            0,
+            state.candidatesOffset - state.candidatesPageSize
+          );
           refreshAll();
         });
         els.candidatesNext.addEventListener("click", function () {
@@ -2223,7 +2283,8 @@
         function applyCandidatesSearch(value) {
           state.candidatesSearch = value.trim();
           state.candidatesOffset = 0;
-          els.candidatesSearchRow.className = "search-row" + (state.candidatesSearch ? " has-value" : "");
+          els.candidatesSearchRow.className =
+            "search-row" + (state.candidatesSearch ? " has-value" : "");
           refreshAll();
         }
         els.candidatesSearch.addEventListener("input", function () {
@@ -2241,7 +2302,10 @@
         });
         els.profileUpdatesPrev.addEventListener("click", function () {
           if (state.profileUpdatesOffset === 0) return;
-          state.profileUpdatesOffset = Math.max(0, state.profileUpdatesOffset - state.profileUpdatesPageSize);
+          state.profileUpdatesOffset = Math.max(
+            0,
+            state.profileUpdatesOffset - state.profileUpdatesPageSize
+          );
           refreshAll();
         });
         els.profileUpdatesNext.addEventListener("click", function () {
@@ -2253,7 +2317,8 @@
         function applyProfileUpdatesSearch(value) {
           state.profileUpdatesSearch = value.trim();
           state.profileUpdatesOffset = 0;
-          els.profileUpdatesSearchRow.className = "search-row" + (state.profileUpdatesSearch ? " has-value" : "");
+          els.profileUpdatesSearchRow.className =
+            "search-row" + (state.profileUpdatesSearch ? " has-value" : "");
           refreshAll();
         }
         els.profileUpdatesSearch.addEventListener("input", function () {
@@ -2319,11 +2384,15 @@
               } else if (token.submitAction === "ALREADY_IN_PROGRESS") {
                 els.manualMsg.className = "ok";
                 els.manualMsg.textContent =
-                  label + " is already being evaluated — status: " + token.status;
+                  label +
+                  " is already being evaluated — status: " +
+                  token.status;
               } else {
                 els.manualMsg.className = "ok";
                 els.manualMsg.textContent =
-                  (token.submitAction === "REQUEUED" ? "Re-queued " : "Queued ") +
+                  (token.submitAction === "REQUEUED"
+                    ? "Re-queued "
+                    : "Queued ") +
                   label +
                   " — status: " +
                   token.status;
@@ -2414,7 +2483,9 @@
 
         function renderTokenModal(token) {
           els.tokenModalTitle.textContent =
-            token.symbol || token.name || fmtAddr(token.address).replace(/&hellip;/, "…");
+            token.symbol ||
+            token.name ||
+            fmtAddr(token.address).replace(/&hellip;/, "…");
           els.tokenModalSub.innerHTML =
             esc(token.address) +
             ' <span class="badge ' +
@@ -2425,7 +2496,8 @@
 
           var cls = (token.classifications && token.classifications[0]) || null;
           var run = (token.researchRuns && token.researchRuns[0]) || null;
-          var snap = (token.marketSnapshots && token.marketSnapshots[0]) || null;
+          var snap =
+            (token.marketSnapshots && token.marketSnapshots[0]) || null;
           var sections = [];
 
           if (token.cheapFilterReasons && token.cheapFilterReasons.length) {
@@ -2440,11 +2512,19 @@
               '<div class="modal-section"><h4>Why it was rejected</h4>' +
                 '<p class="modal-note">Rejected at visual classification — never reached full research.</p>' +
                 '<div class="stat-grid">' +
-                statChip("Utility", cls.utilityProbability, { isFraction: true }) +
+                statChip("Utility", cls.utilityProbability, {
+                  isFraction: true,
+                }) +
                 statChip("Meme", cls.memeProbability, { isFraction: true }) +
-                statChip("Branding", cls.brandingQuality, { isFraction: true }) +
-                statChip("Professional", cls.professionalism, { isFraction: true }) +
-                statChip("Visual spam", cls.visualSpamProbability, { isFraction: true }) +
+                statChip("Branding", cls.brandingQuality, {
+                  isFraction: true,
+                }) +
+                statChip("Professional", cls.professionalism, {
+                  isFraction: true,
+                }) +
+                statChip("Visual spam", cls.visualSpamProbability, {
+                  isFraction: true,
+                }) +
                 "</div>" +
                 listBlock("Reasoning", cls.reasoningSummary) +
                 "</div>"
@@ -2452,7 +2532,9 @@
           } else if (run) {
             sections.push(
               '<div class="modal-section"><h4>Research findings</h4>' +
-                (run.summary ? '<p class="modal-summary">' + esc(run.summary) + "</p>" : "") +
+                (run.summary
+                  ? '<p class="modal-summary">' + esc(run.summary) + "</p>"
+                  : "") +
                 (run.hardReject
                   ? '<p class="modal-flag bad">Hard-rejected by deterministic rules</p>'
                   : "") +
@@ -2487,7 +2569,11 @@
             } else {
               note = "No classification or research has run for this token.";
             }
-            sections.push('<div class="modal-section"><p class="modal-note">' + note + "</p></div>");
+            sections.push(
+              '<div class="modal-section"><p class="modal-note">' +
+                note +
+                "</p></div>"
+            );
           }
 
           // Token.status (above) is the research pipeline's own verdict.
@@ -2496,9 +2582,11 @@
           // liked it) while its trade candidate is REJECTED (didn't clear
           // MIN_TRADE_QUALITY_SCORE etc). Shown as its own section so the two
           // never read as a contradiction.
-          var candidate = (token.tradeCandidates && token.tradeCandidates[0]) || null;
+          var candidate =
+            (token.tradeCandidates && token.tradeCandidates[0]) || null;
           if (candidate) {
-            var candDecision = (candidate.decisions && candidate.decisions[0]) || null;
+            var candDecision =
+              (candidate.decisions && candidate.decisions[0]) || null;
             var eligibilityNote;
             if (candidate.status === "REJECTED") {
               eligibilityNote =
@@ -2510,7 +2598,8 @@
               candidate.status === "PLANNING" ||
               candidate.status === "WAITING"
             ) {
-              eligibilityNote = "Cleared the trading gate and is being considered for an actual trade.";
+              eligibilityNote =
+                "Cleared the trading gate and is being considered for an actual trade.";
             } else {
               eligibilityNote = "";
             }
@@ -2521,7 +2610,9 @@
                 '" style="display:inline-block;margin-bottom:8px;">' +
                 esc(candidate.status) +
                 "</span>" +
-                (eligibilityNote ? '<p class="modal-note">' + eligibilityNote + "</p>" : "") +
+                (eligibilityNote
+                  ? '<p class="modal-note">' + eligibilityNote + "</p>"
+                  : "") +
                 '<div class="stat-grid">' +
                 statChip("Quality", candidate.qualityScore) +
                 statChip("Confidence", candidate.researchConfidence) +
@@ -2531,7 +2622,10 @@
                   : "") +
                 "</div>"
             );
-          } else if (token.status === "WATCHLISTED" || token.status === "ALERTED") {
+          } else if (
+            token.status === "WATCHLISTED" ||
+            token.status === "ALERTED"
+          ) {
             sections.push(
               '<div class="modal-section"><h4>Trade eligibility</h4><p class="modal-note">No trade candidate has been generated for this token yet.</p></div>'
             );
@@ -2541,56 +2635,125 @@
           // entry zone before a trade opens, then real entry/PnL once one
           // does — kept as one section so it reads as one continuous story
           // rather than the plan and the position looking unrelated.
-          var plan = (candidate && candidate.plans && candidate.plans[0]) || null;
+          var plan =
+            (candidate && candidate.plans && candidate.plans[0]) || null;
           var trade = (token.trades && token.trades[0]) || null;
           if (plan || trade) {
             var planRows = [];
             if (plan) {
               planRows.push([
                 "Planned action",
-                esc(plan.action) + (plan.entryStyle ? " (" + esc(plan.entryStyle) + ")" : ""),
+                esc(plan.action) +
+                  (plan.entryStyle ? " (" + esc(plan.entryStyle) + ")" : ""),
               ]);
-              if (plan.currentMarketCap != null) planRows.push(["Market cap at plan time", fmtUsd(plan.currentMarketCap)]);
-              if (plan.targetEntryMcapMin != null || plan.targetEntryMcapMax != null) {
-                planRows.push(["Target entry zone", fmtUsd(plan.targetEntryMcapMin) + " &ndash; " + fmtUsd(plan.targetEntryMcapMax)]);
+              if (plan.currentMarketCap != null)
+                planRows.push([
+                  "Market cap at plan time",
+                  fmtUsd(plan.currentMarketCap),
+                ]);
+              if (
+                plan.targetEntryMcapMin != null ||
+                plan.targetEntryMcapMax != null
+              ) {
+                planRows.push([
+                  "Target entry zone",
+                  fmtUsd(plan.targetEntryMcapMin) +
+                    " &ndash; " +
+                    fmtUsd(plan.targetEntryMcapMax),
+                ]);
               }
-              if (plan.doNotChaseAboveMcap != null) planRows.push(["Do not chase above", fmtUsd(plan.doNotChaseAboveMcap)]);
-              if (plan.invalidationMcap != null) planRows.push(["Invalidation level", fmtUsd(plan.invalidationMcap)]);
+              if (plan.doNotChaseAboveMcap != null)
+                planRows.push([
+                  "Do not chase above",
+                  fmtUsd(plan.doNotChaseAboveMcap),
+                ]);
+              if (plan.invalidationMcap != null)
+                planRows.push([
+                  "Invalidation level",
+                  fmtUsd(plan.invalidationMcap),
+                ]);
               if (plan.pendingEntry) {
                 planRows.push([
                   "Entry monitor status",
-                  '<span class="badge ' + esc(plan.pendingEntry.status) + '">' + esc(plan.pendingEntry.status) + "</span>",
+                  '<span class="badge ' +
+                    esc(plan.pendingEntry.status) +
+                    '">' +
+                    esc(plan.pendingEntry.status) +
+                    "</span>",
                 ]);
-                if (plan.pendingEntry.lastCheckedAt) planRows.push(["Last checked", fmtAgo(plan.pendingEntry.lastCheckedAt)]);
+                if (plan.pendingEntry.lastCheckedAt)
+                  planRows.push([
+                    "Last checked",
+                    fmtAgo(plan.pendingEntry.lastCheckedAt),
+                  ]);
               }
-              if (plan.expiresAt) planRows.push(["Plan expires", fmtIn(plan.expiresAt)]);
-              if (plan.riskScore != null) planRows.push(["AI risk score", Math.round(plan.riskScore) + "/100"]);
+              if (plan.expiresAt)
+                planRows.push(["Plan expires", fmtIn(plan.expiresAt)]);
+              if (plan.riskScore != null)
+                planRows.push([
+                  "AI risk score",
+                  Math.round(plan.riskScore) + "/100",
+                ]);
             }
             if (trade) {
               planRows.push([
                 "Position status",
-                '<span class="badge ' + esc(trade.status) + '">' + esc(trade.status) + "</span>",
+                '<span class="badge ' +
+                  esc(trade.status) +
+                  '">' +
+                  esc(trade.status) +
+                  "</span>",
               ]);
               planRows.push(["Mode", esc(trade.mode)]);
-              if (trade.actualEntryMcap != null) planRows.push(["Entry market cap", fmtUsd(trade.actualEntryMcap)]);
+              if (trade.actualEntryMcap != null)
+                planRows.push([
+                  "Entry market cap",
+                  fmtUsd(trade.actualEntryMcap),
+                ]);
               planRows.push(["Position size", fmtUsd(trade.positionSizeUsd)]);
               if (trade.status === "CLOSED") {
                 if (trade.realizedPnlUsd != null) {
-                  var pnlCls = trade.realizedPnlUsd >= 0 ? "num-good" : "num-bad";
+                  var pnlCls =
+                    trade.realizedPnlUsd >= 0 ? "num-good" : "num-bad";
                   planRows.push([
                     "Realized PnL",
-                    '<span class="' + pnlCls + '">' + (trade.realizedPnlUsd >= 0 ? "+" : "") + fmtUsd(trade.realizedPnlUsd) + "</span>",
+                    '<span class="' +
+                      pnlCls +
+                      '">' +
+                      (trade.realizedPnlUsd >= 0 ? "+" : "") +
+                      fmtUsd(trade.realizedPnlUsd) +
+                      "</span>",
                   ]);
                 }
-                if (trade.realizedMultiple != null) planRows.push(["Realized multiple", trade.realizedMultiple.toFixed(2) + "x"]);
-                if (trade.exitReason) planRows.push(["Exit reason", esc(trade.exitReason)]);
-                if (trade.closedAt) planRows.push(["Closed", fmtAgo(trade.closedAt)]);
+                if (trade.realizedMultiple != null)
+                  planRows.push([
+                    "Realized multiple",
+                    trade.realizedMultiple.toFixed(2) + "x",
+                  ]);
+                if (trade.exitReason)
+                  planRows.push(["Exit reason", esc(trade.exitReason)]);
+                if (trade.closedAt)
+                  planRows.push(["Closed", fmtAgo(trade.closedAt)]);
               } else {
-                if (trade.mfePercent != null) planRows.push(["Best so far (MFE)", (trade.mfePercent >= 0 ? "+" : "") + trade.mfePercent.toFixed(1) + "%"]);
-                if (trade.maePercent != null) planRows.push(["Worst so far (MAE)", trade.maePercent.toFixed(1) + "%"]);
-                if (trade.openedAt) planRows.push(["Opened", fmtAgo(trade.openedAt)]);
+                if (trade.mfePercent != null)
+                  planRows.push([
+                    "Best so far (MFE)",
+                    (trade.mfePercent >= 0 ? "+" : "") +
+                      trade.mfePercent.toFixed(1) +
+                      "%",
+                  ]);
+                if (trade.maePercent != null)
+                  planRows.push([
+                    "Worst so far (MAE)",
+                    trade.maePercent.toFixed(1) + "%",
+                  ]);
+                if (trade.openedAt)
+                  planRows.push(["Opened", fmtAgo(trade.openedAt)]);
               }
-            } else if (plan && (plan.action === "WAIT_FOR_ENTRY" || plan.action === "BUY_NOW")) {
+            } else if (
+              plan &&
+              (plan.action === "WAIT_FOR_ENTRY" || plan.action === "BUY_NOW")
+            ) {
               planRows.push(["Position status", "Not entered yet"]);
             }
             sections.push(
@@ -2626,12 +2789,24 @@
 
           var links = [];
           var dexUrl = dexScreenerUrl(token);
-          if (dexUrl) links.push('<a href="' + dexUrl + '" target="_blank" rel="noopener noreferrer">DexScreener</a>');
+          if (dexUrl)
+            links.push(
+              '<a href="' +
+                dexUrl +
+                '" target="_blank" rel="noopener noreferrer">DexScreener</a>'
+            );
           var blockUrl = blockscoutUrl(token.address);
-          if (blockUrl) links.push('<a href="' + blockUrl + '" target="_blank" rel="noopener noreferrer">Blockscout</a>');
+          if (blockUrl)
+            links.push(
+              '<a href="' +
+                blockUrl +
+                '" target="_blank" rel="noopener noreferrer">Blockscout</a>'
+            );
           if (links.length) {
             sections.push(
-              '<div class="modal-section"><h4>Links</h4><div class="modal-links">' + links.join("") + "</div></div>"
+              '<div class="modal-section"><h4>Links</h4><div class="modal-links">' +
+                links.join("") +
+                "</div></div>"
             );
           }
 
@@ -2650,7 +2825,8 @@
           if (!tokenId) return;
           els.tokenModalTitle.textContent = "Loading…";
           els.tokenModalSub.textContent = "";
-          els.tokenModalBody.innerHTML = '<div class="modal-loading">Loading&hellip;</div>';
+          els.tokenModalBody.innerHTML =
+            '<div class="modal-loading">Loading&hellip;</div>';
           els.tokenModalOverlay.hidden = false;
           fetchJson("/tokens/" + encodeURIComponent(tokenId))
             .then(renderTokenModal)
@@ -2670,7 +2846,8 @@
           if (e.target === els.tokenModalOverlay) closeTokenModal();
         });
         document.addEventListener("keydown", function (e) {
-          if (e.key === "Escape" && !els.tokenModalOverlay.hidden) closeTokenModal();
+          if (e.key === "Escape" && !els.tokenModalOverlay.hidden)
+            closeTokenModal();
         });
         function wireTokenClicks(container) {
           container.addEventListener("click", function (e) {
