@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, http, type Hex } from "viem";
+import { createWalletClient, createPublicClient, http, fallback, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../../config";
 import { logger } from "../../logger";
@@ -18,6 +18,12 @@ const robinhoodChain = {
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: [config.rhRpcUrl] } },
 } as const;
+
+// Tries the primary RPC first on every request, only moving to the
+// rate-limited fallback once the primary actually fails (viem's default
+// fallback behavior, not a sticky switch) — see config.ts's rhRpcFallbackUrl
+// for why this exists.
+const rpcTransport = fallback([http(config.rhRpcUrl), http(config.rhRpcFallbackUrl)]);
 
 let account: ReturnType<typeof privateKeyToAccount> | undefined;
 
@@ -39,7 +45,7 @@ export function getWalletAddress(): `0x${string}` {
 }
 
 export function getPublicClient() {
-  return createPublicClient({ chain: robinhoodChain, transport: http(config.rhRpcUrl) });
+  return createPublicClient({ chain: robinhoodChain, transport: rpcTransport });
 }
 
 // §31 nonce safety: this is a single process, but BUY and SELL can be
@@ -85,7 +91,7 @@ export function signAndSendTransaction(tx: { to: `0x${string}`; data: `0x${strin
   assertDestinationAllowed(tx.purpose, tx.to);
   const task = sendQueue.then(async () => {
     const acct = getAccount();
-    const client = createWalletClient({ account: acct, chain: robinhoodChain, transport: http(config.rhRpcUrl) });
+    const client = createWalletClient({ account: acct, chain: robinhoodChain, transport: rpcTransport });
     const chainId = await client.getChainId();
     if (chainId !== robinhoodChain.id) {
       throw new Error(`refusing to sign: connected chainId ${chainId} does not match Robinhood Chain (${robinhoodChain.id})`);
