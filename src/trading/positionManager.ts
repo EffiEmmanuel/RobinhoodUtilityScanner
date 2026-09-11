@@ -392,9 +392,32 @@ async function executeSell(
   await recordLedgerEntry({ type: LedgerEntryType.SELL, tradeId: trade.id, amountUsd: proceedsUsd, notes: `${fill.provider} sell — ${decision.reason}${fill.txHash ? ` (${fill.txHash})` : ""}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
 
+  // Confirmed live 2026-09-11: this was previously only recorded on a full
+  // exit — a trade closed via several partial sells never had ANY of its
+  // realized PnL land in the ledger until (if ever) the final closing sell
+  // happened to be a full exit itself. That meant checkCircuitBreakers'
+  // daily-realized-loss sum (which reads exactly this ledger type) could
+  // silently miss real losses taken via partial exits, and profitLockbox
+  // below had nothing to skim from on a partial. Record it on every sell,
+  // full or partial, using that sell's own realized PnL.
+  await recordLedgerEntry({ type: LedgerEntryType.REALIZED_PNL, tradeId: trade.id, amountUsd: realizedPnlThisSell, notes: decision.reason });
+
+  // Profit lockbox (user directive 2026-09-11): only a gain gets skimmed,
+  // never a loss — this is strictly a "bank some of what we made," not a
+  // loss-recovery mechanism. See CASH_MOVEMENT_TYPES in portfolio.ts for how
+  // this actually removes the skimmed amount from what sizing can redeploy.
+  if (realizedPnlThisSell > 0 && tradingConfig.profitLockboxPercent > 0) {
+    const lockboxAmount = realizedPnlThisSell * (tradingConfig.profitLockboxPercent / 100);
+    await recordLedgerEntry({
+      type: LedgerEntryType.PROFIT_RESERVE,
+      tradeId: trade.id,
+      amountUsd: -lockboxAmount,
+      notes: `locked ${tradingConfig.profitLockboxPercent}% of this sell's $${realizedPnlThisSell.toFixed(2)} realized gain`,
+    });
+  }
+
   const isFullExit = decision.sellPercentOfRemaining >= 100 || sellTokens >= remainingTokens - 1e-9;
   if (isFullExit) {
-    await recordLedgerEntry({ type: LedgerEntryType.REALIZED_PNL, tradeId: trade.id, amountUsd: realizedPnlThisSell, notes: decision.reason });
     await closeTrade(trade, decision.reason);
   } else {
     await db.trade.update({ where: { id: trade.id }, data: { status: TradeStatus.PARTIALLY_EXITED } });

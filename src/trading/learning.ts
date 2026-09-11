@@ -33,6 +33,11 @@ type FeatureName = (typeof FEATURE_NAMES)[number];
 export interface FeatureRow {
   candidateId: string;
   traded: boolean;
+  // How the candidate cleared evaluateCandidate — "NORMAL" or
+  // "MOMENTUM_OVERRIDE" (see TradeCandidate.qualificationPath). Undefined
+  // for anything created before this field existed, or anything that never
+  // actually qualified (a REJECTED candidate can still have an outcome).
+  qualificationPath?: string;
   qualityScore?: number;
   researchConfidence?: number;
   contractScore?: number;
@@ -75,6 +80,7 @@ export async function exportFeatureDataset(): Promise<FeatureRow[]> {
       return {
         candidateId: c.id,
         traded: c.outcome!.traded,
+        qualificationPath: c.qualificationPath ?? undefined,
         qualityScore: c.qualityScore ?? undefined,
         researchConfidence: c.researchConfidence ?? undefined,
         contractScore: run?.contractScore ?? undefined,
@@ -138,6 +144,36 @@ export function computeFeatureCorrelations(rows: FeatureRow[], target: OutcomeLa
     correlations[feature] = pairedX.length >= 5 ? pearsonCorrelation(pairedX, pairedY) : null;
   }
   return correlations;
+}
+
+/**
+ * "Learn which entry pathway actually pays" (user directive 2026-09-11).
+ * qualificationPath is categorical, not numeric, so it doesn't fit
+ * computeFeatureCorrelations' Pearson-correlation approach above — this is
+ * the direct equivalent for a categorical split: hit-rate per path per
+ * outcome target, plus the raw sample size so a caller can judge how much
+ * to trust each row (§66 — a 3-sample path's 100% hit rate means nothing).
+ */
+export interface QualificationPathRate {
+  path: string;
+  sampleSize: number;
+  hitRate: number;
+}
+export function computeOutcomeRateByQualificationPath(rows: FeatureRow[], target: OutcomeLabel): QualificationPathRate[] {
+  const byPath = new Map<string, FeatureRow[]>();
+  for (const row of rows) {
+    const path = row.qualificationPath ?? "UNKNOWN";
+    const group = byPath.get(path);
+    if (group) group.push(row);
+    else byPath.set(path, [row]);
+  }
+  return Array.from(byPath.entries())
+    .map(([path, group]) => ({
+      path,
+      sampleSize: group.length,
+      hitRate: group.filter((r) => r[target]).length / group.length,
+    }))
+    .sort((a, b) => b.sampleSize - a.sampleSize);
 }
 
 // --- Lean logistic regression (gradient descent), no external ML library ---

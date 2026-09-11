@@ -67,6 +67,17 @@ export const tradingConfig = {
   // which exempts a "very good project" from this regardless of entry mcap).
   // Consumed by positionManager.ts's resolveExitRules, not riskEngine.ts.
   fastFlipAboveMarketCapUsd: num("FAST_FLIP_ABOVE_MARKET_CAP_USD", 2_000_000),
+  // The entry-sizing mirror of the exit-side logic above: a REWARD, not a
+  // penalty — a strong candidate found at or below sizeBoostSweetSpotMcapUsd
+  // gets sized up toward maxMcapSizeBoostMultiple, tapering back to 1x
+  // (no boost, never a penalty — that's what fastFlip above already handles
+  // on the exit side) by sizeBoostTaperOffMcapUsd. Deliberately the same
+  // $2M taper-off ceiling as fastFlipAboveMarketCapUsd so the two don't
+  // disagree about where "large" starts. Consumed by riskEngine.ts's
+  // calculatePositionSize.
+  sizeBoostSweetSpotMcapUsd: num("SIZE_BOOST_SWEET_SPOT_MARKET_CAP_USD", 200_000),
+  sizeBoostTaperOffMcapUsd: num("SIZE_BOOST_TAPER_OFF_MARKET_CAP_USD", 2_000_000),
+  maxMcapSizeBoostMultiple: num("MAX_MCAP_SIZE_BOOST_MULTIPLE", 1.5),
 
   // Capital buckets (§22) — all against the PAPER starting balance below.
   minReservePercent: num("MIN_RESERVE_PERCENT", 50),
@@ -84,6 +95,12 @@ export const tradingConfig = {
   // Circuit breakers (§25).
   maxDailyRealizedLossPercent: num("MAX_DAILY_REALIZED_LOSS_PERCENT", 20),
   maxConsecutiveLosses: num("MAX_CONSECUTIVE_LOSSES", 3),
+  // User directive 2026-09-11 — "profit lockbox": skim this fraction of
+  // every POSITIVE realized gain into a reserve the sizing formula can never
+  // redeploy (see portfolio.ts's CASH_MOVEMENT_TYPES and
+  // positionManager.ts's executeSell). Never applied to a loss — only
+  // realized gains get skimmed. 0 disables it entirely.
+  profitLockboxPercent: num("PROFIT_LOCKBOX_PERCENT", 25),
 
   // Entry lifecycle.
   defaultEntryPlanTtlMinutes: num("DEFAULT_ENTRY_PLAN_TTL_MINUTES", 360),

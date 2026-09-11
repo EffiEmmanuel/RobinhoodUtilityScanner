@@ -294,6 +294,14 @@ enum LedgerEntryType {
   APPROVAL_GAS
   REALIZED_PNL
   MANUAL_ADJUSTMENT
+  // A negative-amount cash movement skimmed from a positive REALIZED_PNL
+  // entry (see tradingConfig.profitLockboxPercent) — removes that fraction
+  // of every winning trade's realized gain from what the bot considers
+  // available to deploy, so a losing streak can't erase profit already
+  // banked. A ledger-level lock only: the underlying ETH never leaves the
+  // wallet, so this protects against the bot's own sizing decisions
+  // spending it, not against a bug elsewhere that bypasses the ledger.
+  PROFIT_RESERVE
 }
 
 // A token that already cleared the existing research pipeline (ResearchRun
@@ -312,6 +320,16 @@ model TradeCandidate {
   researchConfidence Float?
   marketRiskScore    Float?
   technicalScore     Float?
+
+  // How this candidate cleared evaluateCandidate (riskEngine.ts): "NORMAL"
+  // (cleared quality/confidence/contract/liquidity on its own) or
+  // "MOMENTUM_OVERRIDE" (quality and/or confidence were waived because real
+  // two-sided trading demand was strong — see the override's own doc
+  // comment). Set at candidate creation (candidates.ts); null for anything
+  // created before this field existed. User directive 2026-09-11: "learn
+  // which entry pathway actually pays" — this is the field that makes that
+  // answerable via learning.ts once there's enough outcome data per path.
+  qualificationPath String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

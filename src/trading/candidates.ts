@@ -69,6 +69,13 @@ export async function generateTradeCandidates(): Promise<number> {
 
     if (!evaluation.eligible) {
       await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED } });
+    } else {
+      // "Learn which entry pathway actually pays" (user directive
+      // 2026-09-11) — tag HOW this candidate cleared the gate so
+      // learning.ts can later break outcome rates down by path instead of
+      // only by raw quality/confidence numbers.
+      const qualificationPath = evaluation.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : "NORMAL";
+      await db.tradeCandidate.update({ where: { id: candidate.id }, data: { qualificationPath } });
     }
 
     logger.info(

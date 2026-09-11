@@ -331,6 +331,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       riskBucket,
       liquidityUsd: pair.liquidityUsd ?? 0,
       entryRiskScore: plan.riskScore,
+      currentMcapUsd: mcap,
     });
 
     if (!sizing.approved) {

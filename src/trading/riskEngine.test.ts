@@ -27,6 +27,7 @@ function portfolio(overrides: Partial<PortfolioState> = {}): PortfolioState {
     cashUsd: 1000,
     openPositionValueUsd: 0,
     totalEquityUsd: 1000,
+    lockedProfitUsd: 0,
     reserveTargetUsd: 500,
     deployableCapUsd: 500,
     deployedUsd: 0,
@@ -184,6 +185,28 @@ describe("calculatePositionSize", () => {
       liquidityUsd: 100_000,
     });
     expect(result.positionSizeUsd).toBeLessThanOrEqual(10);
+  });
+
+  it("sizes a sweet-spot small-mcap entry larger than an identical large-mcap one", () => {
+    // User directive 2026-09-11: PEG ($51K entry -> ~4x) and TFLY ($195K ->
+    // 2x+) both delivered real, fast multiples; RWA/STONKBROKER, both
+    // already $20-30M at entry, did not. Same candidate quality/confidence/
+    // liquidity/risk in both calls below — only currentMcapUsd differs.
+    const base = {
+      portfolio: portfolio({ availableToDeployUsd: 100_000 }),
+      sizingRules,
+      qualityScore: 90,
+      confidence: 90,
+      riskBucket: "MEDIUM" as const,
+      liquidityUsd: 100_000,
+    };
+    const smallMcap = calculatePositionSize({ ...base, currentMcapUsd: 100_000 });
+    const largeMcap = calculatePositionSize({ ...base, currentMcapUsd: 20_000_000 });
+    const noMcapData = calculatePositionSize({ ...base });
+    expect(smallMcap.positionSizeUsd).toBeGreaterThan(largeMcap.positionSizeUsd);
+    // Large-mcap and no-data both get the 1x baseline — a reward for the
+    // sweet spot, never a penalty for being outside it.
+    expect(largeMcap.positionSizeUsd).toBeCloseTo(noMcapData.positionSizeUsd, 5);
   });
 
   it("rejects when gas cost would be too large a fraction of a tiny position", () => {

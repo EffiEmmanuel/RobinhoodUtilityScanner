@@ -123,6 +123,9 @@ export interface PositionSizingInput {
   // the trade outright — consistent with how quality/confidence/liquidity
   // already work here.
   entryRiskScore?: number | null;
+  // Current market cap at entry time — feeds the sweet-spot size boost
+  // below. Undefined gets no boost (1x), never a penalty.
+  currentMcapUsd?: number;
 }
 
 export interface PositionSizingResult {
@@ -160,8 +163,26 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   // preference for lower risk, never a wall that stops the trade entirely.
   const entryRiskMult =
     input.entryRiskScore != null ? lerp(1, 0.5, (input.entryRiskScore - 40) / 60) : 1;
+  // Sweet-spot size boost (user directive 2026-09-11): confirmed live, PEG
+  // ($51K entry -> ~4x) and TFLY ($195K -> 2x+) both delivered real, fast
+  // multiples; RWA and STONKBROKER, both already $20-30M at entry, did not.
+  // A candidate that's already cleared every eligibility/quality gate gets
+  // sized UP toward maxMcapSizeBoostMultiple the closer its entry mcap is to
+  // sizeBoostSweetSpotMcapUsd, tapering back to 1x (never below — this is a
+  // reward, not a penalty; the exit-side fastFlip profile already handles
+  // "large mcap, unproven project" caution) by sizeBoostTaperOffMcapUsd.
+  const mcapBoostRatio =
+    input.currentMcapUsd !== undefined
+      ? lerp(
+          0,
+          1,
+          (tradingConfig.sizeBoostTaperOffMcapUsd - input.currentMcapUsd) /
+            (tradingConfig.sizeBoostTaperOffMcapUsd - tradingConfig.sizeBoostSweetSpotMcapUsd)
+        )
+      : 0;
+  const marketCapMult = 1 + mcapBoostRatio * (tradingConfig.maxMcapSizeBoostMultiple - 1);
 
-  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult;
+  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
   const maxBySinglePositionCap = portfolio.totalEquityUsd * (tradingConfig.maxSinglePositionPercent / 100);

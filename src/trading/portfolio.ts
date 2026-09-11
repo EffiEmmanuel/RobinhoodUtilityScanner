@@ -107,11 +107,30 @@ async function getOpenPositionValueUsd(): Promise<{ valueUsd: number; costBasisU
   return { valueUsd, costBasisUsd, openCount: openTrades.length };
 }
 
+/**
+ * Sum of every PROFIT_RESERVE skim (see positionManager.ts's executeSell) —
+ * always recorded as a negative amountUsd, so the absolute value is the
+ * running total locked away. Reads directly from the ledger regardless of
+ * LIVE/PAPER mode, unlike cash itself (see getCashUsd) — this figure is
+ * subtracted from equity below before ANY deployable/reserve math runs, not
+ * folded into CASH_MOVEMENT_TYPES, because in LIVE mode cash comes from the
+ * real wallet balance and would otherwise never reflect it at all.
+ */
+async function getLockedProfitUsd(): Promise<number> {
+  const entries = await db.ledgerEntry.findMany({ where: { type: LedgerEntryType.PROFIT_RESERVE } });
+  return Math.abs(entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0));
+}
+
 export interface PortfolioState {
   cashUsd: number;
   cashEth?: number;
   openPositionValueUsd: number;
   totalEquityUsd: number;
+  // Cumulative profit skimmed into the lockbox (see getLockedProfitUsd) —
+  // already real money, already part of totalEquityUsd above, but excluded
+  // from reserveTargetUsd/deployableCapUsd/availableToDeployUsd below so it
+  // can never be sized against again.
+  lockedProfitUsd: number;
   reserveTargetUsd: number;
   deployableCapUsd: number;
   deployedUsd: number;
@@ -127,10 +146,23 @@ export interface PortfolioState {
 
 export async function getPortfolioState(): Promise<PortfolioState> {
   const ethPriceUsd = await getEthPriceUsd();
-  const [{ cashUsd, cashEth }, positions] = await Promise.all([getCashUsd(ethPriceUsd), getOpenPositionValueUsd()]);
+  const [{ cashUsd, cashEth }, positions, lockedProfitUsd] = await Promise.all([
+    getCashUsd(ethPriceUsd),
+    getOpenPositionValueUsd(),
+    getLockedProfitUsd(),
+  ]);
   const totalEquityUsd = cashUsd + positions.valueUsd;
-  const reserveTargetUsd = totalEquityUsd * (tradingConfig.minReservePercent / 100);
-  const deployableCapUsd = totalEquityUsd * (tradingConfig.maxTotalDeployedPercent / 100);
+  // Profit lockbox (user directive 2026-09-11): reserve/deployable/available
+  // are computed off equity minus whatever's already been banked, so a
+  // losing streak can't eat back into gains already locked in — this is
+  // what actually enforces the lock (LIVE mode's cash comes straight from
+  // the wallet and would otherwise never reflect it, see getCashUsd).
+  // totalEquityUsd itself stays the honest, unreduced total — this is a
+  // ledger-level lock on what the sizing formula will deploy against, not a
+  // claim that the money has physically left the wallet.
+  const deployableEquityUsd = Math.max(0, totalEquityUsd - lockedProfitUsd);
+  const reserveTargetUsd = deployableEquityUsd * (tradingConfig.minReservePercent / 100);
+  const deployableCapUsd = deployableEquityUsd * (tradingConfig.maxTotalDeployedPercent / 100);
   const availableToDeployUsd = Math.max(0, deployableCapUsd - positions.costBasisUsd);
 
   return {
@@ -138,6 +170,7 @@ export async function getPortfolioState(): Promise<PortfolioState> {
     cashEth,
     openPositionValueUsd: positions.valueUsd,
     totalEquityUsd,
+    lockedProfitUsd,
     reserveTargetUsd,
     deployableCapUsd,
     deployedUsd: positions.costBasisUsd,
