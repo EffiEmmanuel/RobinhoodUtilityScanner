@@ -10,6 +10,7 @@ import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
+import type { MarketPair } from "../dex/types";
 
 /**
  * §14: turns a QUALIFIED candidate into BUY_NOW / WAIT_FOR_ENTRY / WATCH_ONLY
@@ -88,16 +89,48 @@ export async function planCandidate(candidateId: string): Promise<void> {
     return;
   }
 
-  const action = analysis.recommendedAction;
+  let action = analysis.recommendedAction;
+  let entryStyle = analysis.entryStyle;
   const currentMcap = market.primaryPair?.marketCapUsd;
-  const clampedZone = clampPullbackTarget(currentMcap, analysis.targetEntryMcapMin, analysis.targetEntryMcapMax, technical);
+  let clampedZone = clampPullbackTarget(currentMcap, analysis.targetEntryMcapMin, analysis.targetEntryMcapMax, technical);
+
+  // The one deterministic UPGRADE in this codebase — everywhere else,
+  // deterministic code only ever downgrades or rejects what the AI
+  // recommends (§84). Confirmed live 2026-09-11: roost was in a confirmed
+  // PARABOLIC regime (2,397% 1h change, 83-86% buy ratio) and the AI still
+  // recommended WAIT_FOR_ENTRY, reasoning that data confidence was "very
+  // low" — true, but only because the token was ~30s old, not because the
+  // move's direction was actually in question. It ran 5-7x waiting for a
+  // pullback that never came. User directive: when the move is this
+  // unambiguous, don't wait on it. Narrow and gated on real two-sided
+  // volume (not just a price change a single wash trade could produce) so
+  // it only ever fires on exactly this pattern.
+  const extremeMomentumOverride = action === TradePlanAction.WAIT_FOR_ENTRY && isExtremeMomentum(market.primaryPair);
+  if (extremeMomentumOverride) {
+    logger.warn(
+      {
+        candidateId: candidate.id,
+        priceChange1h: market.primaryPair?.priceChange1h,
+        buys1h: market.primaryPair?.buys1h,
+        sells1h: market.primaryPair?.sells1h,
+        aiReasoning: analysis.reasoning,
+      },
+      "deterministic extreme-momentum override: AI recommended WAIT_FOR_ENTRY but the move is unambiguous — forcing BUY_NOW"
+    );
+    action = TradePlanAction.BUY_NOW;
+    entryStyle = "MARKET_ENTRY";
+    // The AI's target zone was computed for a pullback below current price —
+    // meaningless once we're forcing an immediate entry instead. Same ±10%
+    // window BUY_NOW gets everywhere else (see the pendingEntry.create below).
+    clampedZone = { min: (currentMcap ?? 0) * 0.9, max: (currentMcap ?? 0) * 1.1, clamped: false };
+  }
 
   const plan = await db.tradePlan.create({
     data: {
       candidateId: candidate.id,
       strategyVersionId: strategy.id,
       action,
-      entryStyle: analysis.entryStyle,
+      entryStyle,
       currentMarketCap: currentMcap,
       targetEntryMcapMin: clampedZone.min,
       targetEntryMcapMax: clampedZone.max,
@@ -105,7 +138,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, liquidityUsd, pullbackClamped: clampedZone.clamped } as unknown as object,
+      planData: { analysis, freshEval, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });
@@ -162,6 +195,23 @@ export async function planCandidate(candidateId: string): Promise<void> {
   }
 
   logger.info({ candidateId, planId: plan.id, action, regime: analysis.marketRegime }, "trade plan generated");
+}
+
+/**
+ * Gates planCandidate's extreme-momentum override (see above). Requires real,
+ * already-observed two-sided volume — config.momentumOverrideMinHourlyTxns,
+ * the same floor classify.ts/research.ts/riskEngine.ts already use for their
+ * own momentum overrides — so a single wash-traded print can't trigger this
+ * on its own; both the price move AND the buy pressure behind it have to be
+ * extreme and real.
+ */
+function isExtremeMomentum(pair: MarketPair | undefined): boolean {
+  if (!pair) return false;
+  const hourlyTxns = (pair.buys1h ?? 0) + (pair.sells1h ?? 0);
+  if (hourlyTxns < config.momentumOverrideMinHourlyTxns) return false;
+  if ((pair.priceChange1h ?? 0) < tradingConfig.extremeMomentumOverride1hPriceChangePercent) return false;
+  const buyRatio1h = (pair.buys1h ?? 0) / Math.max(hourlyTxns, 1);
+  return buyRatio1h >= tradingConfig.extremeMomentumOverrideMinBuyRatio1h;
 }
 
 /**

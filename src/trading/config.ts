@@ -123,6 +123,23 @@ export const tradingConfig = {
   pendingPlanReviewIntervalMinutes: num("PENDING_PLAN_REVIEW_INTERVAL_MINUTES", 20),
   pendingPlanReplanOnDriftPercent: num("PENDING_PLAN_REPLAN_ON_DRIFT_PERCENT", 25),
 
+  // User directive 2026-09-11: confirmed live, roost was in a confirmed
+  // PARABOLIC regime (2,397% 1h change, 325% 5m, 83-86% buy ratio) and the AI
+  // still recommended WAIT_FOR_ENTRY — its own reasoning cited "very low"
+  // data confidence (only 2 historical snapshots, since the token was ~30s
+  // old) as the reason to wait, even though the *direction* of the move
+  // wasn't ambiguous at all, just its history. The prompt already pushes
+  // toward BUY_NOW here (see prompts.ts) but that's still probabilistic —
+  // roost ran 5-7x waiting for a pullback that never came. This is a hard,
+  // deterministic override of the AI's own WAIT_FOR_ENTRY call specifically
+  // for this narrow, extreme case — the one place in this codebase where
+  // deterministic code upgrades rather than downgrades the AI's
+  // recommendation (see planning.ts's isExtremeMomentum/planCandidate).
+  // Gated on real two-sided volume (config.momentumOverrideMinHourlyTxns),
+  // not just a price change, so a single wash-traded print can't trigger it.
+  extremeMomentumOverride1hPriceChangePercent: num("EXTREME_MOMENTUM_OVERRIDE_1H_PRICE_CHANGE_PERCENT", 500),
+  extremeMomentumOverrideMinBuyRatio1h: num("EXTREME_MOMENTUM_OVERRIDE_MIN_BUY_RATIO_1H", 0.7),
+
   // Active position management (§trading/positionStrategy.ts) — the AI
   // reviews an open position's strategy periodically (not on every cheap
   // monitor tick), proposing partial-profit/exit/re-entry-target decisions
