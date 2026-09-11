@@ -597,15 +597,6 @@
   resolved "https://registry.npmmirror.com/@radix-ui/react-use-layout-effect/-/react-use-layout-effect-1.1.1.tgz#0c4230a9eed49d4589c967e2d9c0d9d60a23971e"
   integrity sha512-RbJRS4UWQFkzHTTwVymMTUv8EqYhOp8dOOviLj2ugtTiXRaRQS7GLGxZTLL1jWhMeoSCf5zmcZkqTl9IiYfXcQ==
 
-"@react-email/render@1.1.2":
-  version "1.1.2"
-  resolved "https://registry.npmmirror.com/@react-email/render/-/render-1.1.2.tgz#49a3d0ec3c650bd280f0614359f25de907c9e0da"
-  integrity sha512-RnRehYN3v9gVlNMehHPHhyp2RQo7+pSkHDtXPvg3s0GbzM9SQMW4Qrf8GRNvtpLC4gsI+Wt0VatNRUFqjvevbw==
-  dependencies:
-    html-to-text "^9.0.5"
-    prettier "^3.5.3"
-    react-promise-suspense "^0.3.4"
-
 "@rollup/rollup-android-arm-eabi@4.63.1":
   version "4.63.1"
   resolved "https://registry.npmmirror.com/@rollup/rollup-android-arm-eabi/-/rollup-android-arm-eabi-4.63.1.tgz#d03ba6ea54f9ec80688d153763cd325a2d2a5af6"
@@ -752,14 +743,6 @@
   dependencies:
     "@noble/hashes" "~1.8.0"
     "@scure/base" "~1.2.5"
-
-"@selderee/plugin-htmlparser2@^0.11.0":
-  version "0.11.0"
-  resolved "https://registry.npmmirror.com/@selderee/plugin-htmlparser2/-/plugin-htmlparser2-0.11.0.tgz#d5b5e29a7ba6d3958a1972c7be16f4b2c188c517"
-  integrity sha512-P33hHGdldxGabLFjPPpaTxVolMrzrcegejx+0GxjrIb9Zv48D8yAIA/QTDR2dFl7Uz7urX8aX6+5bCZslr+gWQ==
-  dependencies:
-    domhandler "^5.0.3"
-    selderee "^0.11.0"
 
 "@standard-schema/spec@^1.0.0":
   version "1.1.0"
@@ -1392,11 +1375,6 @@ deepmerge-ts@7.1.5:
   resolved "https://registry.npmmirror.com/deepmerge-ts/-/deepmerge-ts-7.1.5.tgz#ff818564007f5c150808d2b7b732cac83aa415ab"
   integrity sha512-HOJkrhaYsweh+W+e74Yn7YStZOilkoPb6fycpwNLKzSPtruFs48nYis0zy5yJz1+ktUhHxoRDJ27RQAWLIJVJw==
 
-deepmerge@^4.3.1:
-  version "4.3.1"
-  resolved "https://registry.npmmirror.com/deepmerge/-/deepmerge-4.3.1.tgz#44b5f2147cd3b00d4b56137685966f26fd25dd4a"
-  integrity sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A==
-
 defu@^6.1.6, defu@^6.1.7:
   version "6.1.7"
   resolved "https://registry.npmmirror.com/defu/-/defu-6.1.7.tgz#72543567c8e9f97ff13ce402b6dbe09ac5ae4d23"
@@ -1504,7 +1482,7 @@ end-of-stream@^1.1.0:
   dependencies:
     once "^1.4.0"
 
-entities@^4.2.0, entities@^4.4.0:
+entities@^4.2.0:
   version "4.5.0"
   resolved "https://registry.npmmirror.com/entities/-/entities-4.5.0.tgz#5d268ea5e7113ec74c4d033b79ea5a35a488fb48"
   integrity sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw==
@@ -1643,11 +1621,6 @@ fast-decode-uri-component@^1.0.1:
   version "1.0.1"
   resolved "https://registry.npmmirror.com/fast-decode-uri-component/-/fast-decode-uri-component-1.0.1.tgz#46f8b6c22b30ff7a81357d4f59abfae938202543"
   integrity sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg==
-
-fast-deep-equal@^2.0.1:
-  version "2.0.1"
-  resolved "https://registry.npmmirror.com/fast-deep-equal/-/fast-deep-equal-2.0.1.tgz#7b05218ddf9667bf7f370bf7fdb2cb15fdd0aa49"
-  integrity sha512-bCK/2Z4zLidyB4ReuIsvALH6w31YfAQDmXMqMx6FyfHqvBxtjC0eRumeSu4Bs3XtXwpyIywtSTrVT99BxY1f9w==
 
 fast-deep-equal@^3.1.3:
   version "3.1.3"
@@ -1839,17 +1812,6 @@ help-me@^5.0.0:
   resolved "https://registry.npmmirror.com/help-me/-/help-me-5.0.0.tgz#b1ebe63b967b74060027c2ac61f9be12d354a6f6"
   integrity sha512-7xgomUX6ADmcYzFik0HzAxh/73YlKR9bmFzf51CZwR+b6YtzU2m0u49hQCqV6SvlqIqsaxovfwdvbnsw3b/zpg==
 
-html-to-text@^9.0.5:
-  version "9.0.5"
-  resolved "https://registry.npmmirror.com/html-to-text/-/html-to-text-9.0.5.tgz#6149a0f618ae7a0db8085dca9bbf96d32bb8368d"
-  integrity sha512-qY60FjREgVZL03vJU6IfMV4GDjGBIoOyvuFdpBDIX9yTlDw0TjxVBQp+P8NvpdIXNJvfWBTNul7fsAQJq2FNpg==
-  dependencies:
-    "@selderee/plugin-htmlparser2" "^0.11.0"
-    deepmerge "^4.3.1"
-    dom-serializer "^2.0.0"
-    htmlparser2 "^8.0.2"
-    selderee "^0.11.0"
-
 htmlparser2@^10.1.0:
   version "10.1.0"
   resolved "https://registry.npmmirror.com/htmlparser2/-/htmlparser2-10.1.0.tgz#fe3f2e12c73b6e462d4e10395db9c1119e4d6ae4"
@@ -1859,16 +1821,6 @@ htmlparser2@^10.1.0:
     domhandler "^5.0.3"
     domutils "^3.2.2"
     entities "^7.0.1"
-
-htmlparser2@^8.0.2:
-  version "8.0.2"
-  resolved "https://registry.npmmirror.com/htmlparser2/-/htmlparser2-8.0.2.tgz#f002151705b383e62433b5cf466f5b716edaec21"
-  integrity sha512-GYdjWKDkbRLkZ5geuHs5NY1puJ+PXwP7+fHPRz06Eirsb9ugf6d8kkXav6ADhcODhFFPMIXyxkxSuMf3D6NCFA==
-  dependencies:
-    domelementtype "^2.3.0"
-    domhandler "^5.0.3"
-    domutils "^3.0.1"
-    entities "^4.4.0"
 
 https-proxy-agent@^7.0.1:
   version "7.0.6"
@@ -1968,11 +1920,6 @@ jws@^4.0.0:
     jwa "^2.0.1"
     safe-buffer "^5.0.1"
 
-leac@^0.6.0:
-  version "0.6.0"
-  resolved "https://registry.npmmirror.com/leac/-/leac-0.6.0.tgz#dcf136e382e666bd2475f44a1096061b70dc0912"
-  integrity sha512-y+SqErxb8h7nE/fiEX07jsbuhrpO9lL8eca7/Y1nuWV2moNlXhyd59iDGcRf6moVyDMbmTNzL40SUyrFU/yDpg==
-
 light-my-request@^6.0.0:
   version "6.6.0"
   resolved "https://registry.npmmirror.com/light-my-request/-/light-my-request-6.6.0.tgz#c9448772323f65f33720fb5979c7841f14060add"
@@ -2060,6 +2007,11 @@ node-fetch@^3.3.2:
     fetch-blob "^3.1.4"
     formdata-polyfill "^4.0.10"
 
+nodemailer@^10.0.8:
+  version "10.0.8"
+  resolved "https://registry.npmmirror.com/nodemailer/-/nodemailer-10.0.8.tgz#0cc4f701259fff4b63d3da8d77add02f1d9a6957"
+  integrity sha512-uCZ0AtFDI46sHwJ6mhwNuIoA/KiTC0ZCzX7g01941+H9VMIXEiZjtgjQkzoBRTeQba0cIrKfwk31q99PfcIMRw==
+
 nth-check@^2.0.1:
   version "2.1.1"
   resolved "https://registry.npmmirror.com/nth-check/-/nth-check-2.1.1.tgz#c9eab428effce36cd6b92c924bdb000ef1f1ed1d"
@@ -2128,14 +2080,6 @@ parse5@^7.0.0, parse5@^7.3.0:
   dependencies:
     entities "^6.0.0"
 
-parseley@^0.12.0:
-  version "0.12.1"
-  resolved "https://registry.npmmirror.com/parseley/-/parseley-0.12.1.tgz#4afd561d50215ebe259e3e7a853e62f600683aef"
-  integrity sha512-e6qHKe3a9HWr0oMRVDTRhKce+bRO8VGQR3NyVwcjwrbhMmFCX9KszEV35+rn4AdilFAq9VPxP/Fe1wC9Qjd2lw==
-  dependencies:
-    leac "^0.6.0"
-    peberminta "^0.9.0"
-
 path-key@^3.1.0:
   version "3.1.1"
   resolved "https://registry.npmmirror.com/path-key/-/path-key-3.1.1.tgz#581f6ade658cbba65a0d3380de7753295054f375"
@@ -2155,11 +2099,6 @@ pathval@^2.0.0:
   version "2.0.1"
   resolved "https://registry.npmmirror.com/pathval/-/pathval-2.0.1.tgz#8855c5a2899af072d6ac05d11e46045ad0dc605d"
   integrity sha512-//nshmD55c46FuFw26xV/xFAaB5HF9Xdap7HJBBnrKdAd6/GxDBaNA1870O79+9ueg61cZLSVc+OaFlfmObYVQ==
-
-peberminta@^0.9.0:
-  version "0.9.0"
-  resolved "https://registry.npmmirror.com/peberminta/-/peberminta-0.9.0.tgz#8ec9bc0eb84b7d368126e71ce9033501dca2a352"
-  integrity sha512-XIxfHpEuSJbITd1H3EeQwpcZbTLHc+VVr8ANI9t5sit565tsI4/xK3KWTUFE2e6QiangUkh3B0jihzmGnNrRsQ==
 
 perfect-debounce@^2.1.0:
   version "2.1.0"
@@ -2350,11 +2289,6 @@ postgres@3.4.7:
   resolved "https://registry.npmmirror.com/postgres/-/postgres-3.4.7.tgz#122f460a808fe300cae53f592108b9906e625345"
   integrity sha512-Jtc2612XINuBjIl/QTWsV5UvE8UHuNblcO3vVADSrKsrc6RqGX6lOW1cEo3CM2v0XG4Nat8nI+YM7/f26VxXLw==
 
-prettier@^3.5.3:
-  version "3.9.6"
-  resolved "https://registry.npmmirror.com/prettier/-/prettier-3.9.6.tgz#b3ea5146515d40fc53f18aa63f74dfab1e10dbf6"
-  integrity sha512-OpN0zzVdiaiAhxpuuj5efpIS4sY9j7bY6uR5mnj5yPzGkdkjNKSJeUThPb60Jw29QuAZgA4o+/iB49kFiaBX6g==
-
 prisma@^7.10.0:
   version "7.10.0"
   resolved "https://registry.npmmirror.com/prisma/-/prisma-7.10.0.tgz#f8fd28b6665620926f5124b278ada2e9f3d24bc3"
@@ -2434,13 +2368,6 @@ rc9@^3.0.1:
     defu "^6.1.7"
     destr "^2.0.5"
 
-react-promise-suspense@^0.3.4:
-  version "0.3.4"
-  resolved "https://registry.npmmirror.com/react-promise-suspense/-/react-promise-suspense-0.3.4.tgz#05d19a75703d71374674840056cfef2fcd38809d"
-  integrity sha512-I42jl7L3Ze6kZaq+7zXWSunBa3b1on5yfvUW6Eo/3fFOj6dZ5Bqmcd264nJbTK/gn1HjjILAjSwnZbV4RpSaNQ==
-  dependencies:
-    fast-deep-equal "^2.0.1"
-
 readable-stream@^4.0.0:
   version "4.7.0"
   resolved "https://registry.npmmirror.com/readable-stream/-/readable-stream-4.7.0.tgz#cedbd8a1146c13dfff8dab14068028d58c15ac91"
@@ -2476,13 +2403,6 @@ require-from-string@^2.0.2:
   version "2.0.2"
   resolved "https://registry.npmmirror.com/require-from-string/-/require-from-string-2.0.2.tgz#89a7fdd938261267318eafe14f9c32e598c36909"
   integrity sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==
-
-resend@^4.0.1:
-  version "4.8.0"
-  resolved "https://registry.npmmirror.com/resend/-/resend-4.8.0.tgz#8d5e33c5030155c23f96a66010714afb84c546ca"
-  integrity sha512-R8eBOFQDO6dzRTDmaMEdpqrkmgSjPpVXt4nGfWsZdYOet0kqra0xgbvTES6HmCriZEXbmGk3e0DiGIaLFTFSHA==
-  dependencies:
-    "@react-email/render" "1.1.2"
 
 ret@~0.5.0:
   version "0.5.0"
@@ -2580,13 +2500,6 @@ secure-json-parse@^4.0.0:
   version "4.1.0"
   resolved "https://registry.npmmirror.com/secure-json-parse/-/secure-json-parse-4.1.0.tgz#4f1ab41c67a13497ea1b9131bb4183a22865477c"
   integrity sha512-l4KnYfEyqYJxDwlNVyRfO2E4NTHfMKAWdUuA8J0yve2Dz/E/PdBepY03RvyJpssIpRFwJoCD55wA+mEDs6ByWA==
-
-selderee@^0.11.0:
-  version "0.11.0"
-  resolved "https://registry.npmmirror.com/selderee/-/selderee-0.11.0.tgz#6af0c7983e073ad3e35787ffe20cefd9daf0ec8a"
-  integrity sha512-5TF+l7p4+OsnP8BCCvSyZiSPc4x4//p5uPwK8TCnVPJYRmU2aYKMpOXvw8zM5a5JvuuCGN1jmsMwuU2W02ukfA==
-  dependencies:
-    parseley "^0.12.0"
 
 semver@^7.6.0:
   version "7.8.5"

@@ -95,6 +95,61 @@ export const tradingConfig = {
   // Circuit breakers (§25).
   maxDailyRealizedLossPercent: num("MAX_DAILY_REALIZED_LOSS_PERCENT", 20),
   maxConsecutiveLosses: num("MAX_CONSECUTIVE_LOSSES", 3),
+
+  // Conservative mode (user directive 2026-09-11). When one of the two LOSS
+  // breakers above trips, new entries no longer stop outright: the bot keeps
+  // detecting, planning and sniping, but only buys a candidate that also
+  // clears a strict high-conviction gate at trigger time (see
+  // conservativeMode.ts). Exits are unchanged. The other breakers (kill
+  // switch, gas, max open positions) still pause entries completely.
+  //
+  // Thresholds come from the 2026-09-11 loss review
+  // (docs/trade-reviews/2026-09-11.md): 15 live trades plus 24h outcomes for
+  // 340 candidates. Across those candidates the market-structure part of the
+  // gate (age, liquidity, txns, buy ratio, volume/liquidity, price change)
+  // raised the chance of a 1.5x from 39% to 45% and cut the chance of a -50%
+  // fall within 24h from 54% to 5% — n=20, small, so re-check as data grows.
+  // It would have blocked all 15 of that day's trades.
+  conservativeModeEnabled: bool("CONSERVATIVE_MODE_ENABLED", true),
+  // Conservative mode keeps trading, so past either of these entries pause
+  // completely again, exactly as they did before this mode existed.
+  conservativeHardStopDailyLossPercent: num("CONSERVATIVE_HARD_STOP_DAILY_LOSS_PERCENT", 35),
+  conservativeHardStopConsecutiveLosses: num("CONSERVATIVE_HARD_STOP_CONSECUTIVE_LOSSES", 5),
+  // Candidates under an hour old fell 50%+ within 24h 74-85% of the time, vs
+  // 16% for tokens over a day old. All nine of 2026-09-11's trades that went
+  // to near zero were under 30 minutes old at entry.
+  conservativeMinTokenAgeMinutes: num("CONSERVATIVE_MIN_TOKEN_AGE_MINUTES", 60),
+  conservativeMinLiquidityUsd: num("CONSERVATIVE_MIN_LIQUIDITY_USD", 40_000),
+  conservativeMinHourlyTxns: num("CONSERVATIVE_MIN_HOURLY_TXNS", 30),
+  // Buy ratio mattered most of everything tested: moving the floor from 52%
+  // to 55% took the -50%-fall rate from 12% to 5%. Around 50% is churn, not
+  // accumulation (BLACKHOLE, FFSTR, OPAI); well above 80% is usually bots
+  // ahead of a dump.
+  conservativeMinBuyRatio1h: num("CONSERVATIVE_MIN_BUY_RATIO_1H", 0.55),
+  conservativeMaxBuyRatio1h: num("CONSERVATIVE_MAX_BUY_RATIO_1H", 0.8),
+  // An hour's volume far above the pool's liquidity is wash/churn trading —
+  // PONSFLY traded 27x its liquidity in an hour, OPAI 40x.
+  conservativeMaxVolumeToLiquidity1h: num("CONSERVATIVE_MAX_VOLUME_TO_LIQUIDITY_1H", 5),
+  conservativeMinPriceChange1hPercent: num("CONSERVATIVE_MIN_PRICE_CHANGE_1H_PERCENT", -30),
+  conservativeMaxPriceChange1hPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_1H_PERCENT", 500),
+  conservativeMinPriceChange5mPercent: num("CONSERVATIVE_MIN_PRICE_CHANGE_5M_PERCENT", -15),
+  conservativeMaxPriceChange5mPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_5M_PERCENT", 30),
+  // Measured on OUR OWN MarketSnapshot history, not DexScreener's 5m change,
+  // which lags on this chain: BLACKHOLE's reported 5m change was -9% while our
+  // snapshots showed a +46% run-up in 3 minutes. The four trades that chased a
+  // 37-54% run-up (BLACKHOLE, PONSIBLE, THREE, MARRONA) lost $9.90 between
+  // them; every winner was bought after a 0-8% run-up.
+  conservativeRecentWindowMinutes: num("CONSERVATIVE_RECENT_WINDOW_MINUTES", 10),
+  conservativeMinRecentSnapshots: num("CONSERVATIVE_MIN_RECENT_SNAPSHOTS", 3),
+  conservativeMaxRecentRunUpPercent: num("CONSERVATIVE_MAX_RECENT_RUN_UP_PERCENT", 30),
+  conservativeMaxRecentDrawdownPercent: num("CONSERVATIVE_MAX_RECENT_DRAWDOWN_PERCENT", 20),
+  // The AI plan's own risk score; at or above this the entry is held back.
+  // Candidates whose plan scored 85+ fell 50%+ within 24h 68% of the time.
+  conservativeMaxPlanRiskScore: num("CONSERVATIVE_MAX_PLAN_RISK_SCORE", 85),
+  // How far below DexScreener's price the on-chain quote may come in before
+  // the data is treated as stale — see conservativeMode.ts's
+  // evaluateQuoteAgreement.
+  conservativeMaxQuoteDiscountPercent: num("CONSERVATIVE_MAX_QUOTE_DISCOUNT_PERCENT", 10),
   // User directive 2026-09-11 — "profit lockbox": skim this fraction of
   // every POSITIVE realized gain into a reserve the sizing formula can never
   // redeploy (see portfolio.ts's CASH_MOVEMENT_TYPES and

@@ -1,15 +1,8 @@
-import { Resend } from "resend";
 import { config } from "../config";
 import { logger } from "../logger";
+import { sendMail } from "./mailer";
 import type { ScoringResult } from "../scoring";
 import type { ResearchSynthesis } from "../ai/schemas";
-
-let resend: Resend | undefined;
-function getResend(): Resend {
-  if (!config.resendApiKey) throw new Error("RESEND_API_KEY is not set");
-  if (!resend) resend = new Resend(config.resendApiKey);
-  return resend;
-}
 
 export interface AlertEmailInput {
   tokenName?: string | null;
@@ -112,7 +105,7 @@ export async function sendGeminiKeyRotationAlert(input: {
     `Error seen: ${input.errorMessage}`,
   ].join("\n");
   try {
-    await getResend().emails.send({ from: config.alertEmailFrom, to: config.alertEmailTo, subject, text });
+    await sendMail({ from: config.alertEmailFrom, to: config.alertEmailTo, subject, text });
   } catch (err) {
     logger.error({ err: String(err) }, "failed to send Gemini key rotation alert email");
   }
@@ -123,15 +116,11 @@ export async function sendAlertEmail(input: AlertEmailInput): Promise<string | u
     logger.warn("ALERT_EMAIL_FROM/ALERT_EMAIL_TO not configured; skipping email send");
     return undefined;
   }
-  const result = await getResend().emails.send({
+  return sendMail({
     from: config.alertEmailFrom,
     to: config.alertEmailTo,
     subject: buildAlertSubject(input),
     text: buildAlertPlainText(input),
     html: buildAlertHtml(input),
   });
-  if (result.error) {
-    throw new Error(`Resend send failed: ${result.error.message}`);
-  }
-  return result.data?.id;
 }

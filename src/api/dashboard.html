@@ -338,6 +338,15 @@
         margin-bottom: 2px;
         overflow-wrap: anywhere;
       }
+      /* conservative mode: a loss limit tripped but entries continue through
+         the high-conviction gate — a warning, not a stop */
+      .cb-banner.conservative {
+        background: var(--warn-soft);
+        border-left-color: var(--warn);
+      }
+      .cb-banner.conservative svg path {
+        stroke: var(--warn);
+      }
 
       /* ---- tiles ---- */
       .tiles {
@@ -1149,7 +1158,8 @@
             />
           </svg>
           <div>
-            <strong>New entries paused</strong> — circuit breaker tripped
+            <strong id="cb-title">New entries paused</strong>
+            <span id="cb-subtitle">— circuit breaker tripped</span>
             <ul id="cb-reasons"></ul>
           </div>
         </div>
@@ -1487,6 +1497,8 @@
           mainContent: document.getElementById("main-content"),
           cbBanner: document.getElementById("cb-banner"),
           cbReasons: document.getElementById("cb-reasons"),
+          cbTitle: document.getElementById("cb-title"),
+          cbSubtitle: document.getElementById("cb-subtitle"),
           tiles: document.getElementById("tiles"),
           activityFeed: document.getElementById("activity-feed"),
           activityStats: document.getElementById("activity-stats"),
@@ -1819,9 +1831,17 @@
           els.killPill.hidden = !!s.tradingEnabled;
 
           // circuit breakers
+          // CONSERVATIVE = a loss limit tripped, but entries continue through
+          // the high-conviction gate instead of stopping
           var cb = s.circuitBreakers || { paused: false, reasons: [] };
-          if (cb.paused && cb.reasons && cb.reasons.length) {
+          var conservative = cb.mode === "CONSERVATIVE";
+          if ((cb.paused || conservative) && cb.reasons && cb.reasons.length) {
             els.cbBanner.hidden = false;
+            els.cbBanner.classList.toggle("conservative", conservative);
+            els.cbTitle.textContent = conservative ? "Conservative mode" : "New entries paused";
+            els.cbSubtitle.textContent = conservative
+              ? "— a loss limit tripped, so only high-conviction entries go through"
+              : "— circuit breaker tripped";
             els.cbReasons.innerHTML = cb.reasons
               .map(function (r) {
                 return "<li>" + esc(r) + "</li>";

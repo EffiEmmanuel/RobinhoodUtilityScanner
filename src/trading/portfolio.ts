@@ -6,6 +6,7 @@ import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { fetchMarketForToken } from "../dex/client";
 import { summarizeError } from "../util/errors";
+import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
 const PAPER_WALLET_ADDRESS = "paper";
 
@@ -203,15 +204,19 @@ async function getTotalRealizedPnlUsd(): Promise<number> {
 
 /** §25 account circuit breakers — checked before every new entry. */
 export interface CircuitBreakerResult {
+  // True only when no new entry may open at all. A tripped LOSS breaker
+  // normally gives mode CONSERVATIVE instead, where this stays false and
+  // entries go through the high-conviction gate (see conservativeMode.ts).
   paused: boolean;
+  mode: EntryMode;
   reasons: string[];
 }
 
 export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
-  const reasons: string[] = [];
+  const hardPauseReasons: string[] = [];
 
   if (!isTradingEnabled()) {
-    reasons.push("global kill switch is engaged");
+    hardPauseReasons.push("global kill switch is engaged");
   }
 
   const state = await getPortfolioState();
@@ -220,7 +225,7 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   // below, this only ever limited how many *positions* could be open at once,
   // not how much capital could be at risk.
   if (tradingConfig.maxOpenPositions > 0 && state.openPositionCount >= tradingConfig.maxOpenPositions) {
-    reasons.push(`max open positions reached (${state.openPositionCount}/${tradingConfig.maxOpenPositions})`);
+    hardPauseReasons.push(`max open positions reached (${state.openPositionCount}/${tradingConfig.maxOpenPositions})`);
   }
 
   // §30 — LIVE only. Exits stay possible even with low gas (checked
@@ -229,10 +234,10 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     try {
       const gasBalance = await getWalletGasBalanceEth();
       if (gasBalance < tradingConfig.minGasBalanceEth) {
-        reasons.push(`wallet gas balance ${gasBalance.toFixed(5)} ETH is below ${tradingConfig.minGasBalanceEth} ETH minimum`);
+        hardPauseReasons.push(`wallet gas balance ${gasBalance.toFixed(5)} ETH is below ${tradingConfig.minGasBalanceEth} ETH minimum`);
       }
     } catch (err) {
-      reasons.push(`could not check wallet gas balance: ${summarizeError(err)}`);
+      hardPauseReasons.push(`could not check wallet gas balance: ${summarizeError(err)}`);
     }
   }
 
@@ -242,26 +247,22 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: startOfDay } },
   });
   const todaysRealizedPnl = todaysPnl.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
-  if (todaysRealizedPnl < 0 && state.totalEquityUsd > 0) {
-    const lossPercent = (Math.abs(todaysRealizedPnl) / state.totalEquityUsd) * 100;
-    if (lossPercent >= tradingConfig.maxDailyRealizedLossPercent) {
-      reasons.push(`daily realized loss ${lossPercent.toFixed(1)}% >= ${tradingConfig.maxDailyRealizedLossPercent}% limit`);
-    }
-  }
+  const dailyRealizedLossPercent =
+    todaysRealizedPnl < 0 && state.totalEquityUsd > 0 ? (Math.abs(todaysRealizedPnl) / state.totalEquityUsd) * 100 : 0;
 
+  // Reads past the normal limit so conservative mode's own, higher
+  // consecutive-loss hard stop can see the whole streak.
   const recentClosed = await db.trade.findMany({
     where: { status: TradeStatus.CLOSED },
     orderBy: { closedAt: "desc" },
-    take: tradingConfig.maxConsecutiveLosses,
+    take: Math.max(tradingConfig.maxConsecutiveLosses, tradingConfig.conservativeHardStopConsecutiveLosses),
+    select: { realizedPnlUsd: true },
   });
-  if (
-    recentClosed.length === tradingConfig.maxConsecutiveLosses &&
-    recentClosed.every((t) => (t.realizedPnlUsd ?? 0) < 0)
-  ) {
-    reasons.push(`${tradingConfig.maxConsecutiveLosses} consecutive losses`);
-  }
+  const firstNonLoss = recentClosed.findIndex((t) => (t.realizedPnlUsd ?? 0) >= 0);
+  const consecutiveLosses = firstNonLoss === -1 ? recentClosed.length : firstNonLoss;
 
-  return { paused: reasons.length > 0, reasons };
+  const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
+  return { paused: mode === "PAUSED", mode, reasons };
 }
 
 export async function recordLedgerEntry(input: {

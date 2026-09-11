@@ -221,9 +221,13 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
     isSellable(token.address, pair, undefined),
     getBuyEstimate(token.address, trade.pendingReentryUsd, pair),
   ]);
+  // A re-entry adds to a position without facing the high-conviction gate a
+  // fresh conservative-mode entry has to clear, so it waits until the loss
+  // breakers reset.
+  const conservative = circuitBreakers.mode === "CONSERVATIVE";
   const entryCheck = validateEntry({
-    circuitBreakersPaused: circuitBreakers.paused,
-    circuitBreakerReasons: circuitBreakers.reasons,
+    circuitBreakersPaused: circuitBreakers.paused || conservative,
+    circuitBreakerReasons: conservative ? [...circuitBreakers.reasons, "re-entries are off in conservative mode"] : circuitBreakers.reasons,
     currentLiquidityUsd: pair.liquidityUsd ?? 0,
     liquidityAtPlanUsd: pair.liquidityUsd ?? 0,
     sellQuoteAvailable,

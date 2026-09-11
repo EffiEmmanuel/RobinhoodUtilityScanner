@@ -1,6 +1,7 @@
 import { db } from "../db";
 import { captureMarketSnapshot } from "../research/market";
 import type { MarketPair } from "../dex/types";
+import type { RecentPriceRange } from "./conservativeMode";
 
 /**
  * DexScreener's public API has no OHLCV/candles endpoint — this module builds
@@ -32,6 +33,29 @@ async function getSnapshotSeries(tokenId: string, limit = 200): Promise<Snapshot
   return rows
     .filter((r) => r.marketCapUsd !== null)
     .map((r) => ({ mcap: r.marketCapUsd as number, liquidity: r.liquidityUsd, volume5m: r.volume5m, capturedAt: r.capturedAt }));
+}
+
+/**
+ * Where the current mcap sits within our OWN snapshots from the last few
+ * minutes — conservative mode's chasing / falling-knife check (see
+ * conservativeMode.ts). Deliberately not DexScreener's own 5m change, which
+ * lags on this chain: BLACKHOLE's read -9% while these snapshots showed a +46%
+ * run-up.
+ */
+export async function getRecentMcapRange(
+  tokenId: string,
+  windowMinutes: number,
+  currentMcap: number | undefined
+): Promise<RecentPriceRange | undefined> {
+  if (!currentMcap) return undefined;
+  const rows = await db.marketSnapshot.findMany({
+    where: { tokenId, marketCapUsd: { not: null }, capturedAt: { gte: new Date(Date.now() - windowMinutes * 60_000) } },
+    select: { marketCapUsd: true },
+  });
+  const mcaps = rows.map((r) => r.marketCapUsd as number);
+  const low = Math.min(currentMcap, ...mcaps);
+  const high = Math.max(currentMcap, ...mcaps);
+  return { snapshotCount: mcaps.length, runUpPercent: (currentMcap / low - 1) * 100, drawdownPercent: (1 - currentMcap / high) * 100 };
 }
 
 function ema(values: number[], period: number): number | undefined {

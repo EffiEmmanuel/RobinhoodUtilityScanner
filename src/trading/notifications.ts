@@ -1,18 +1,11 @@
-import { Resend } from "resend";
 import { config } from "../config";
 import { logger } from "../logger";
 import { db } from "../db";
+import { sendMail } from "../notify/mailer";
 import type { Token, Trade } from "../generated/prisma";
 import type { PaperQuote } from "./execution";
 import { tradingConfig } from "./config";
 import type { PortfolioState } from "./portfolio";
-
-let resend: Resend | undefined;
-function getResend(): Resend {
-  if (!config.resendApiKey) throw new Error("RESEND_API_KEY is not set");
-  if (!resend) resend = new Resend(config.resendApiKey);
-  return resend;
-}
 
 // Every subject is tagged with the trading mode so a simulated trade can
 // never be mistaken for a real one in an inbox — there is no LIVE mode in
@@ -26,13 +19,12 @@ async function send(subject: string, text: string): Promise<void> {
     logger.warn("ALERT_EMAIL_FROM/ALERT_EMAIL_TO not configured; skipping trading email");
     return;
   }
-  const result = await getResend().emails.send({
+  await sendMail({
     from: config.alertEmailFrom,
     to: config.alertEmailTo,
     subject: `${modeTag()} ${subject}`,
     text,
   });
-  if (result.error) throw new Error(`Resend send failed: ${result.error.message}`);
 }
 
 function tokenLabel(token: Token | null): string {

@@ -87,7 +87,15 @@ export const config = {
   // free quota — nowhere near enough for a 24/7 agent. Confirmed live.
   researchModel: str("RESEARCH_MODEL", "gemini-flash-lite-latest"),
 
-  resendApiKey: optStr("RESEND_API_KEY"),
+  // SMTP relay for email alerts (replaces Resend, which hit its send cap).
+  // Defaults target Gmail — free at up to 500 sends/24hr on a regular Gmail
+  // account, 2000/24hr on Google Workspace; SMTP_USER/SMTP_PASS must be an
+  // App Password (https://myaccount.google.com/apppasswords), not the login
+  // password. Point at any other SMTP provider by overriding SMTP_HOST/PORT.
+  smtpHost: str("SMTP_HOST", "smtp.gmail.com"),
+  smtpPort: num("SMTP_PORT", 465),
+  smtpUser: optStr("SMTP_USER"),
+  smtpPass: optStr("SMTP_PASS"),
   alertEmailFrom: optStr("ALERT_EMAIL_FROM"),
   alertEmailTo: optStr("ALERT_EMAIL_TO"),
 
@@ -128,7 +136,8 @@ export const config = {
 export function assertRuntimeConfig() {
   const missing: string[] = [];
   if (!config.geminiApiKey) missing.push("GEMINI_API_KEY");
-  if (!config.resendApiKey) missing.push("RESEND_API_KEY");
+  if (!config.smtpUser) missing.push("SMTP_USER");
+  if (!config.smtpPass) missing.push("SMTP_PASS");
   if (!config.alertEmailFrom) missing.push("ALERT_EMAIL_FROM");
   if (!config.alertEmailTo) missing.push("ALERT_EMAIL_TO");
   return missing;

@@ -13,7 +13,7 @@ import {
 } from "../generated/prisma";
 import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
-import { pollCandidateMarket } from "./marketAnalysis";
+import { pollCandidateMarket, getRecentMcapRange } from "./marketAnalysis";
 import { validateEntry, calculatePositionSize, type RiskBucket } from "./riskEngine";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
 import { getBuyEstimate, executeBuyFill, isSellable, type FillResult } from "./executionFacade";
@@ -22,6 +22,7 @@ import { tradingConfig } from "./config";
 import { sendTradeEntryEmail } from "./notifications";
 import { planCandidate } from "./planning";
 import { recordBuyFailure, recordBuySuccess } from "./executionAlerts";
+import { estimateTokenAgeMinutes, evaluateHighConvictionSetup, evaluateQuoteAgreement, type ConvictionResult } from "./conservativeMode";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -321,7 +322,32 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number };
+    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number; analysis?: { marketRegime?: string } };
+
+    // Conservative mode: a loss breaker tripped, so this entry only goes ahead
+    // on a high-conviction setup. A miss defers rather than rejects — token
+    // age, a run-up cooling off and buy ratio can all come good while the plan
+    // is still live, whereas a rejected candidate is never planned again.
+    const conservative = circuitBreakers.mode === "CONSERVATIVE";
+    if (conservative) {
+      const conviction = evaluateHighConvictionSetup({
+        tokenAgeMinutes: estimateTokenAgeMinutes(candidate.token.firstSeenAt, pair.pairCreatedAt),
+        liquidityUsd: pair.liquidityUsd,
+        buys1h: pair.buys1h,
+        sells1h: pair.sells1h,
+        volume1hUsd: pair.volume1h,
+        priceChange5mPercent: pair.priceChange5m,
+        priceChange1hPercent: pair.priceChange1h,
+        recent: await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap),
+        marketRegime: planData.analysis?.marketRegime,
+        planRiskScore: plan.riskScore,
+      });
+      if (!conviction.passed) {
+        await deferForConviction(entry, candidate.id, conviction);
+        return;
+      }
+    }
+
     const riskBucket: RiskBucket = planData.freshEval?.riskBucket ?? "MEDIUM";
     const strategy = await getActiveStrategyVersion();
     const sizing = calculatePositionSize({
@@ -367,6 +393,20 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
+    // Checked last because it needs the real quote above.
+    if (conservative) {
+      const agreement = evaluateQuoteAgreement({
+        spotPriceUsd: pair.priceUsd,
+        positionSizeUsd: sizing.positionSizeUsd,
+        quotedTokenAmount: quote.tokenAmount,
+      });
+      if (!agreement.passed) {
+        await deferForConviction(entry, candidate.id, agreement);
+        return;
+      }
+      lastConvictionFailures.delete(entry.id);
+    }
+
     await openTrade({
       candidateId: candidate.id,
       tradePlanId: plan.id,
@@ -377,7 +417,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       plannedEntryMcap: plan.currentMarketCap ?? undefined,
       actualEntryMcap: mcap,
       pair,
-      reasons: entryResult.reasons,
+      reasons: conservative ? [...entryResult.reasons, "conservative mode: passed the high-conviction gate"] : entryResult.reasons,
     });
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.APPROVED } });
     await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.TRADED } });
@@ -412,6 +452,38 @@ async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: st
     },
   });
   logger.info({ pendingEntryId: entry.id, candidateId, reasons }, "entry rejected at revalidation");
+}
+
+// Which checks last held each deferred entry back. A deferred entry is
+// re-checked every few seconds, so a decision row (what the dashboard shows
+// as "why is this still waiting") is written only when that set changes, not
+// on every tick. Cleared wholesale past a size bound — the only cost of that
+// is one repeated row.
+const lastConvictionFailures = new Map<string, string>();
+
+async function deferForConviction(entry: PendingEntry, candidateId: string, result: ConvictionResult): Promise<void> {
+  await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
+  const key = result.failedChecks.join(",");
+  if (lastConvictionFailures.get(entry.id) === key) return;
+  if (lastConvictionFailures.size >= 1000) lastConvictionFailures.clear();
+  lastConvictionFailures.set(entry.id, key);
+
+  const strategy = await getActiveStrategyVersion();
+  await db.tradeDecisionSnapshot.create({
+    data: {
+      candidateId,
+      decision: TradeDecision.WAIT,
+      stage: "conservative_gate",
+      strategyVersionId: strategy.id,
+      marketState: {},
+      projectState: {},
+      technicalState: {},
+      portfolioState: {},
+      deterministicRules: { failedChecks: result.failedChecks, reasons: result.reasons },
+      finalReasons: result.reasons,
+    },
+  });
+  logger.info({ pendingEntryId: entry.id, candidateId, reasons: result.reasons }, "conservative mode: entry held back — not a high-conviction setup yet");
 }
 
 async function openTrade(input: {

@@ -34,7 +34,10 @@ rules, confidence tracking, structured AI output validated with Zod — is imple
 - **Yarn** (classic, v1.x is fine)
 - **PostgreSQL** — either a local instance (see below) or `docker compose up postgres -d`
 - A **Gemini API key** (for classification + research synthesis) — https://aistudio.google.com/apikey
-- A **Resend API key** + a verified sending domain (for email alerts) — https://resend.com
+- A **Gmail account + App Password** (for email alerts, via SMTP) — free for up to 500 sends/24hr
+  on a regular account (2000/24hr on Google Workspace); create one at
+  https://myaccount.google.com/apppasswords (requires 2FA on the account). Any other SMTP provider
+  works too — see `SMTP_HOST`/`SMTP_PORT` in `.env.example`.
 
 ## Setup
 
@@ -42,7 +45,7 @@ rules, confidence tracking, structured AI output validated with Zod — is imple
 nvm use            # switches to Node 22 if you have nvm
 yarn install
 cp .env.example .env
-# edit .env: at minimum set GEMINI_API_KEY, RESEND_API_KEY, ALERT_EMAIL_FROM, ALERT_EMAIL_TO
+# edit .env: at minimum set GEMINI_API_KEY, SMTP_USER, SMTP_PASS, ALERT_EMAIL_FROM, ALERT_EMAIL_TO
 
 # get Postgres running — pick one:
 docker compose up postgres -d
@@ -59,7 +62,7 @@ The app starts two things in one process:
 - The pipeline orchestrator (discovery poll + worker loop)
 - A small HTTP API on `http://localhost:3000`
 
-Without `GEMINI_API_KEY`/`RESEND_API_KEY` set, discovery and cheap filtering still run fully
+Without `GEMINI_API_KEY`/`SMTP_USER`+`SMTP_PASS` set, discovery and cheap filtering still run fully
 (and against the live DexScreener API), but classification/research/alerting will fail loudly in
 the logs — useful for a first smoke test without spending on AI calls.
 
