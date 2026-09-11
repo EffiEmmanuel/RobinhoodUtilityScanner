@@ -365,8 +365,15 @@ async function executeSell(
     return;
   }
 
-  const proceedsUsd = sellTokens * fill.priceUsd;
-  const costBasisForSoldTokens = trade.positionSizeUsd * (sellTokens / (trade.entryTokenAmount ?? sellTokens));
+  // fill.tokenAmount is what the fill ACTUALLY sold, which can be slightly
+  // less than the sellTokens we asked for — executeSellFill clamps the
+  // request to the wallet's real on-chain balance (see the float-precision
+  // note there). Every number below has to come from the real amount, or
+  // the leftover drift compounds into the next sell's remaining-position
+  // math.
+  const soldTokens = fill.tokenAmount;
+  const proceedsUsd = soldTokens * fill.priceUsd;
+  const costBasisForSoldTokens = trade.positionSizeUsd * (soldTokens / (trade.entryTokenAmount ?? soldTokens));
   const realizedPnlThisSell = proceedsUsd - costBasisForSoldTokens;
 
   await db.tradeExecution.create({
@@ -375,7 +382,7 @@ async function executeSell(
       type: "SELL",
       status: "CONFIRMED",
       txHash: fill.txHash,
-      tokenAmount: sellTokens,
+      tokenAmount: soldTokens,
       usdValue: proceedsUsd,
       actualPrice: fill.priceUsd,
       slippagePercent: fill.estimatedSlippageBps / 100,

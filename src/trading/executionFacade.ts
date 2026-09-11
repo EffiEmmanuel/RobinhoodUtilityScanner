@@ -184,8 +184,42 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const token = tokenAddress as `0x${string}`;
   // ethBalanceBefore doesn't depend on decimals — read both in parallel
   // rather than serially, shaving one RPC round-trip off sell latency.
-  const [decimals, ethBalanceBefore] = await Promise.all([getTokenDecimals(client, token), client.getBalance({ address: wallet })]);
-  const tokenAmountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+  // tokenBalanceRaw joins them because of the clamp directly below.
+  const [decimals, ethBalanceBefore, tokenBalanceRaw] = await Promise.all([
+    getTokenDecimals(client, token),
+    client.getBalance({ address: wallet }),
+    getTokenBalance(client, token, wallet),
+  ]);
+
+  // Confirmed live 2026-09-11: EVERY open position was permanently unable to
+  // sell, each reverting with TRANSFER_FROM_FAILED on the pre-sign
+  // simulation, retrying forever. Cause is a float round-trip, not the pool
+  // or the approvals: executeBuyFill records tokenAmount as a JS Number
+  // (exact wei -> double loses precision past ~17 significant digits),
+  // getRemainingTokenAmount sums those doubles, and converting back here
+  // rounds UP relative to what the wallet actually holds — measured live at
+  // +10,514 wei (STONKBROKER), +121,198 (PERPSHOOD), +2,887,747 (QUORUM),
+  // +11,113,726 (ladybug). Economically nothing; enough for transferFrom to
+  // revert every single time, which is what kept the bot able to buy and
+  // never able to exit. Clamping to the real balance also makes a "sell
+  // 100%" actually mean the true full balance rather than a stale float's
+  // idea of it, so no dust is stranded by rounding the other way.
+  const requestedRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+  const tokenAmountRaw = requestedRaw > tokenBalanceRaw ? tokenBalanceRaw : requestedRaw;
+  if (tokenAmountRaw <= 0n) {
+    throw new Error(`refusing to sell ${tokenAddress}: wallet holds no tokens (requested ${requestedRaw} raw units)`);
+  }
+  if (requestedRaw > tokenBalanceRaw) {
+    logger.warn(
+      { tokenAddress, requestedRaw: requestedRaw.toString(), tokenBalanceRaw: tokenBalanceRaw.toString(), excessRaw: (requestedRaw - tokenBalanceRaw).toString() },
+      "sell amount exceeded the wallet's real token balance (float precision) — clamped to the actual balance"
+    );
+  }
+  // What actually gets sold, back in human units — every downstream number
+  // (proceeds, price, the SELL execution row, the remaining-position math)
+  // must be based on this, not the caller's float, or the drift compounds
+  // into the next sell.
+  const soldTokens = Number(formatUnits(tokenAmountRaw, decimals));
 
   const result = await executeLiveSell(token, tokenAmountRaw, tradingConfig.defaultMaxSellSlippageBps);
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
@@ -199,11 +233,11 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const gasCostUsd = Number(formatUnits(gasCostWei, 18)) * ethPriceUsd;
   const proceedsUsd = ethReceived * ethPriceUsd;
 
-  logger.info({ tokenAddress, txHash: result.txHash, proceedsUsd, gasCostUsd }, "live sell confirmed");
+  logger.info({ tokenAddress, txHash: result.txHash, soldTokens, proceedsUsd, gasCostUsd }, "live sell confirmed");
 
   return {
-    priceUsd: tokenAmount > 0 ? proceedsUsd / tokenAmount : 0,
-    tokenAmount,
+    priceUsd: soldTokens > 0 ? proceedsUsd / soldTokens : 0,
+    tokenAmount: soldTokens,
     estimatedSlippageBps: 0,
     estimatedPriceImpactPercent: 0,
     gasCostUsd,
