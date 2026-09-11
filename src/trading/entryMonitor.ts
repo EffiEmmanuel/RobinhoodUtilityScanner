@@ -22,7 +22,12 @@ import { sendTradeEntryEmail } from "./notifications";
 import { planCandidate } from "./planning";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
-  const result = await db.pendingEntry.updateMany({ where: { id, status: from }, data: { status: to } });
+  // Also stamps lastCheckedAt at claim time (not just on completion) so a
+  // row that never makes it back out of REVALIDATING still carries a
+  // reliable "since when" timestamp — see recoverStalledRevalidatingEntries,
+  // which has no other way to tell a healthy in-flight claim from a
+  // genuinely stuck one (PendingEntry has no updatedAt column).
+  const result = await db.pendingEntry.updateMany({ where: { id, status: from }, data: { status: to, lastCheckedAt: new Date() } });
   return result.count === 1;
 }
 
@@ -34,6 +39,49 @@ export async function recoverStuckPendingEntries(): Promise<void> {
   });
   if (result.count > 0) logger.info({ count: result.count }, "recovered pending entries stuck from a previous run");
 }
+
+// Confirmed live 2026-09-11 (reported by a peer session working the same
+// deployment): SCHIFFY and QUOTIENT both got claimed into REVALIDATING and
+// stayed there 15-18+ minutes — well past PENDING_ENTRY_EVALUATION_TIMEOUT_MS
+// below — invisible to every ACTIVE-status query in this file, i.e.
+// permanently stranded until the next process restart's
+// recoverStuckPendingEntries() above. The timeout wrapper only protects the
+// *evaluation*; if the recovery write in its own catch block (or the
+// original hang) outlives a restart-free window, nothing else ever retries
+// releasing that specific row. This is the same recovery, just run
+// periodically during normal operation instead of only at boot, and gated on
+// age (via the claim-time lastCheckedAt stamp above) so it can never yank a
+// row that's merely mid-flight within a normal evaluation.
+const STUCK_REVALIDATING_THRESHOLD_MS = 5 * 60_000;
+
+export async function recoverStalledRevalidatingEntries(): Promise<void> {
+  const cutoff = new Date(Date.now() - STUCK_REVALIDATING_THRESHOLD_MS);
+  const result = await db.pendingEntry.updateMany({
+    where: { status: PendingEntryStatus.REVALIDATING, lastCheckedAt: { lt: cutoff } },
+    data: { status: PendingEntryStatus.ACTIVE },
+  });
+  if (result.count > 0) {
+    logger.warn({ count: result.count }, "recovered pending entries stalled in REVALIDATING past the evaluation timeout — its own recovery must have also failed");
+  }
+}
+
+// Confirmed live 2026-09-11: with 17-37 ACTIVE pending entries queued at
+// once (candidate generation running continuously while planning/entry
+// checks were still one-row-per-tick), a token created at the back of the
+// queue wasn't reaching its first-ever check for 15-20+ minutes — long
+// enough for a fast mover to blow straight through its target zone (and
+// even its do-not-chase ceiling) without ever being looked at. SEXFLY (a
+// BUY_NOW plan, meaning it was already priced in-zone the instant it was
+// created) sat unchecked long enough to go on to 2x with zero evaluation
+// ever having run. The zone-check itself is cheap and has no cross-token
+// dependency (independent DexScreener polls, independent AI replan calls
+// when stale) — evaluating a batch of the oldest N ACTIVE rows concurrently
+// instead of one-at-a-time directly fixes the throughput/queue-size
+// mismatch that caused this, without changing what any single evaluation
+// does. Only the final capital-committing step (openTrade) is serialized
+// below via a mutex — see attemptEntryExecution — so concurrent triggers
+// can't jointly race past maxOpenPositions/available capital.
+const PENDING_ENTRY_BATCH_SIZE = 8;
 
 export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 
@@ -69,22 +117,30 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Processes one ACTIVE pending entry. "replanned" is called out separately
- * from "checked" so the caller (orchestrator.ts's entryMonitorLoop) can pace
- * itself — confirmed live: a fast-breakout token got replanned 6 times in
- * under 30 seconds because the loop treated a replan as ordinary "did work"
- * and immediately re-grabbed the freshly-replanned entry with zero delay,
- * before the market had moved at all relative to the brand-new ceiling. Each
- * replan is an AI call; hammering it back-to-back on a token whose price is
- * simply outrunning our planning latency doesn't fix that, it just burns
- * calls that were stale before they landed.
+ * Claims and evaluates up to PENDING_ENTRY_BATCH_SIZE of the oldest ACTIVE
+ * pending entries concurrently — see the comment on that constant. A
+ * freshly-replanned entry is a brand-new row (createdAt = now), so it sorts
+ * to the back of the queue and won't be re-picked until everything older
+ * than it has had its turn — the old single-item "replanned -> cooldown"
+ * throttle is no longer needed for that reason, FIFO ordering does it
+ * naturally as long as there's a real backlog (the whole point of this
+ * change). One item's timeout/error is isolated via allSettled and can't
+ * block the rest of the batch.
  */
 export async function processPendingEntries(): Promise<PendingEntryTickResult> {
-  const candidate = await db.pendingEntry.findFirst({
+  const candidates = await db.pendingEntry.findMany({
     where: { status: PendingEntryStatus.ACTIVE },
     orderBy: { createdAt: "asc" },
+    take: PENDING_ENTRY_BATCH_SIZE,
   });
-  if (!candidate) return "idle";
+  if (candidates.length === 0) return "idle";
+
+  const results = await Promise.allSettled(candidates.map((candidate) => processOnePendingEntry(candidate)));
+  const anyReplanned = results.some((r) => r.status === "fulfilled" && r.value === "replanned");
+  return anyReplanned ? "replanned" : "checked";
+}
+
+async function processOnePendingEntry(candidate: PendingEntry): Promise<"replanned" | "checked"> {
   if (!(await claim(candidate.id, PendingEntryStatus.ACTIVE, PendingEntryStatus.REVALIDATING))) return "checked"; // lost the race, still counts as "did work" this tick
 
   try {
@@ -95,6 +151,25 @@ export async function processPendingEntries(): Promise<PendingEntryTickResult> {
     await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
     return "checked";
   }
+}
+
+// Zone-checking above is fully concurrent (independent market polls per
+// token), but two entries that both reach their zone within the same batch
+// must not both read a pre-buy portfolio/circuit-breaker snapshot and jointly
+// commit past maxOpenPositions or available capital — see
+// attemptEntryExecution. A simple FIFO promise chain is enough here (single
+// process, same pattern wallet.ts's sendQueue uses for nonce safety): only
+// ever one entry's trigger-through-openTrade sequence runs at a time,
+// regardless of how many are evaluated concurrently above it.
+let buyDecisionQueue: Promise<void> = Promise.resolve();
+
+function serializeBuyDecision<T>(fn: () => Promise<T>): Promise<T> {
+  const run = buyDecisionQueue.then(fn, fn);
+  buyDecisionQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
 }
 
 /** Returns true if this tick replanned (cancelled + regenerated) the candidate's plan. */
@@ -190,81 +265,87 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     return false;
   }
 
-  // The AI's risk score no longer hard-blocks entry here — confirmed live it
-  // blocked every single trigger this system ever had (including one that
-  // went on to 2x right after). It now scales position size instead, in
-  // calculatePositionSize below (entryRiskScore), same treatment as quality/
-  // confidence/liquidity.
-  await db.pendingEntry.update({ where: { id: entry.id }, data: { triggeredAt: new Date(), lastCheckedAt: new Date() } });
-  logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, mcap }, "pending entry triggered — revalidating");
+  // Everything from here on touches shared capital/position-count state, so
+  // it's serialized process-wide (see serializeBuyDecision) — the cheap zone
+  // check above stays fully concurrent across a batch, only the actual
+  // commit decision is mutually exclusive.
+  await serializeBuyDecision(async () => {
+    // The AI's risk score no longer hard-blocks entry here — confirmed live it
+    // blocked every single trigger this system ever had (including one that
+    // went on to 2x right after). It now scales position size instead, in
+    // calculatePositionSize below (entryRiskScore), same treatment as quality/
+    // confidence/liquidity.
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { triggeredAt: new Date(), lastCheckedAt: new Date() } });
+    logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, mcap }, "pending entry triggered — revalidating");
 
-  const circuitBreakers = await checkCircuitBreakers();
-  const portfolio = await getPortfolioState();
+    const circuitBreakers = await checkCircuitBreakers();
+    const portfolio = await getPortfolioState();
 
-  if (!pair) {
-    await rejectEntry(entry, candidate.id, ["pool disappeared — no market data available at trigger time"]);
-    return false;
-  }
+    if (!pair) {
+      await rejectEntry(entry, candidate.id, ["pool disappeared — no market data available at trigger time"]);
+      return;
+    }
 
-  const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number };
-  const riskBucket: RiskBucket = planData.freshEval?.riskBucket ?? "MEDIUM";
-  const strategy = await getActiveStrategyVersion();
-  const sizing = calculatePositionSize({
-    portfolio,
-    sizingRules: strategy.sizingRules as unknown as SizingRules,
-    qualityScore: candidate.qualityScore ?? 0,
-    confidence: plan.confidence ?? 0,
-    riskBucket,
-    liquidityUsd: pair.liquidityUsd ?? 0,
-    entryRiskScore: plan.riskScore,
+    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number };
+    const riskBucket: RiskBucket = planData.freshEval?.riskBucket ?? "MEDIUM";
+    const strategy = await getActiveStrategyVersion();
+    const sizing = calculatePositionSize({
+      portfolio,
+      sizingRules: strategy.sizingRules as unknown as SizingRules,
+      qualityScore: candidate.qualityScore ?? 0,
+      confidence: plan.confidence ?? 0,
+      riskBucket,
+      liquidityUsd: pair.liquidityUsd ?? 0,
+      entryRiskScore: plan.riskScore,
+    });
+
+    if (!sizing.approved) {
+      await rejectEntry(entry, candidate.id, sizing.reasons);
+      return;
+    }
+
+    const quote = await getBuyEstimate(candidate.token.address, sizing.positionSizeUsd, pair);
+    const entryResult = validateEntry({
+      circuitBreakersPaused: circuitBreakers.paused,
+      circuitBreakerReasons: circuitBreakers.reasons,
+      currentLiquidityUsd: pair.liquidityUsd ?? 0,
+      liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,
+      sellQuoteAvailable: await isSellable(candidate.token.address, pair, quote.tokenAmount),
+      buySellRatio1h: pair.buys1h !== undefined || pair.sells1h !== undefined
+        ? (pair.buys1h ?? 0) / Math.max((pair.buys1h ?? 0) + (pair.sells1h ?? 0), 1)
+        : undefined,
+      priceChange5mPercent: pair.priceChange5m,
+      estimatedSlippageBps: quote.estimatedSlippageBps,
+      estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
+      positionSizeUsd: sizing.positionSizeUsd,
+      availableToDeployUsd: portfolio.availableToDeployUsd,
+    });
+
+    if (entryResult.decision === "DEFER") {
+      await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
+      logger.info({ pendingEntryId: entry.id, reasons: entryResult.reasons }, "entry deferred (will retry)");
+      return;
+    }
+    if (entryResult.decision === "REJECTED") {
+      await rejectEntry(entry, candidate.id, entryResult.reasons);
+      return;
+    }
+
+    await openTrade({
+      candidateId: candidate.id,
+      tradePlanId: plan.id,
+      strategyVersionId: plan.strategyVersionId,
+      tokenId: candidate.tokenId,
+      tokenAddress: candidate.token.address,
+      positionSizeUsd: sizing.positionSizeUsd,
+      plannedEntryMcap: plan.currentMarketCap ?? undefined,
+      actualEntryMcap: mcap,
+      pair,
+      reasons: entryResult.reasons,
+    });
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.APPROVED } });
+    await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.TRADED } });
   });
-
-  if (!sizing.approved) {
-    await rejectEntry(entry, candidate.id, sizing.reasons);
-    return false;
-  }
-
-  const quote = await getBuyEstimate(candidate.token.address, sizing.positionSizeUsd, pair);
-  const entryResult = validateEntry({
-    circuitBreakersPaused: circuitBreakers.paused,
-    circuitBreakerReasons: circuitBreakers.reasons,
-    currentLiquidityUsd: pair.liquidityUsd ?? 0,
-    liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,
-    sellQuoteAvailable: await isSellable(candidate.token.address, pair, quote.tokenAmount),
-    buySellRatio1h: pair.buys1h !== undefined || pair.sells1h !== undefined
-      ? (pair.buys1h ?? 0) / Math.max((pair.buys1h ?? 0) + (pair.sells1h ?? 0), 1)
-      : undefined,
-    priceChange5mPercent: pair.priceChange5m,
-    estimatedSlippageBps: quote.estimatedSlippageBps,
-    estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
-    positionSizeUsd: sizing.positionSizeUsd,
-    availableToDeployUsd: portfolio.availableToDeployUsd,
-  });
-
-  if (entryResult.decision === "DEFER") {
-    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
-    logger.info({ pendingEntryId: entry.id, reasons: entryResult.reasons }, "entry deferred (will retry)");
-    return false;
-  }
-  if (entryResult.decision === "REJECTED") {
-    await rejectEntry(entry, candidate.id, entryResult.reasons);
-    return false;
-  }
-
-  await openTrade({
-    candidateId: candidate.id,
-    tradePlanId: plan.id,
-    strategyVersionId: plan.strategyVersionId,
-    tokenId: candidate.tokenId,
-    tokenAddress: candidate.token.address,
-    positionSizeUsd: sizing.positionSizeUsd,
-    plannedEntryMcap: plan.currentMarketCap ?? undefined,
-    actualEntryMcap: mcap,
-    pair,
-    reasons: entryResult.reasons,
-  });
-  await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.APPROVED } });
-  await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.TRADED } });
   return false;
 }
 

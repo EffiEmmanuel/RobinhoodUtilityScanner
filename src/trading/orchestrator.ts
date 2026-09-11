@@ -6,7 +6,7 @@ import { TradeCandidateStatus } from "../generated/prisma";
 import { tradingConfig } from "./config";
 import { generateTradeCandidates } from "./candidates";
 import { planCandidate } from "./planning";
-import { processPendingEntries, recoverStuckPendingEntries } from "./entryMonitor";
+import { processPendingEntries, recoverStuckPendingEntries, recoverStalledRevalidatingEntries } from "./entryMonitor";
 import { runPositionMonitorTick } from "./positionManager";
 import { pollCandidateOutcomes } from "./outcomes";
 import { ensurePaperWalletSeeded, recordPortfolioSnapshot } from "./portfolio";
@@ -65,18 +65,15 @@ async function planningLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
-// Floor between a replan and the next time that same candidate can be
-// re-evaluated — confirmed live: without this, a fast-breakout token got
-// replanned 6 times in under 30 seconds (each one immediately invalidated,
-// planAgeMinutes: 0) because this loop treated "replanned" the same as any
-// other "did work" tick and re-grabbed the brand-new pending entry with zero
-// delay, before the market could possibly have moved relative to the ceiling
-// that replan had just set. Short enough to stay responsive; long enough that
-// a replan actually gets a few ticks of real price movement before being
-// judged stale again.
-const REPLAN_COOLDOWN_SECONDS = 10;
+// How often the stalled-REVALIDATING sweep runs — a periodic backstop, not
+// the hot path, so a coarse interval checked once per loop iteration (via a
+// plain timestamp, not a second setInterval/loop) is enough. See
+// recoverStalledRevalidatingEntries in entryMonitor.ts for why this exists.
+const STALLED_REVALIDATING_SWEEP_INTERVAL_SECONDS = 60;
 
 async function entryMonitorLoop(signal: { stopped: boolean }): Promise<void> {
+  let lastStalledSweepAt = 0;
+
   while (!signal.stopped) {
     // Confirmed live 2026-09-11: processPendingEntries()'s own try/catch only
     // ever covered evaluateOnePendingEntry — the pendingEntry.findFirst/claim
@@ -95,9 +92,17 @@ async function entryMonitorLoop(signal: { stopped: boolean }): Promise<void> {
     // DIVIDEND), not decision latency. positionMonitorLoop already has this
     // exact protection below; entryMonitorLoop never did.
     try {
+      if (Date.now() - lastStalledSweepAt >= STALLED_REVALIDATING_SWEEP_INTERVAL_SECONDS * 1000) {
+        lastStalledSweepAt = Date.now();
+        await recoverStalledRevalidatingEntries();
+      }
       const result = await processPendingEntries();
+      // "replanned" no longer gets a separate cooldown — processPendingEntries
+      // now evaluates a whole batch of the oldest ACTIVE rows per tick (see
+      // entryMonitor.ts), and a freshly-replanned entry is a brand-new row
+      // that sorts to the back of that same queue, so it naturally can't be
+      // re-grabbed until everything older than it has had a turn.
       if (result === "idle") await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
-      else if (result === "replanned") await sleep(REPLAN_COOLDOWN_SECONDS * 1000);
     } catch (err) {
       logger.error({ err: String(err) }, "entry monitor tick failed — will retry next tick");
       await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
