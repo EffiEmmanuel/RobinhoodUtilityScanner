@@ -39,7 +39,19 @@ async function recoverStuckCandidates(): Promise<void> {
 
 async function planningLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
-    const candidateId = await claimNextQualifiedCandidate();
+    // Same class of bug fixed in entryMonitorLoop below: claimNextQualifiedCandidate
+    // itself was unprotected — a transient failure there (not inside
+    // planCandidate) would throw uncaught and silently kill this entire loop
+    // for the rest of the process's life, meaning no QUALIFIED candidate
+    // would ever become a TradePlan again.
+    let candidateId: string | undefined;
+    try {
+      candidateId = await claimNextQualifiedCandidate();
+    } catch (err) {
+      logger.error({ err: String(err) }, "claiming next qualified candidate failed — will retry next tick");
+      await sleep(CLAIM_IDLE_DELAY_MS);
+      continue;
+    }
     if (!candidateId) {
       await sleep(CLAIM_IDLE_DELAY_MS);
       continue;
@@ -66,9 +78,30 @@ const REPLAN_COOLDOWN_SECONDS = 10;
 
 async function entryMonitorLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
-    const result = await processPendingEntries();
-    if (result === "idle") await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
-    else if (result === "replanned") await sleep(REPLAN_COOLDOWN_SECONDS * 1000);
+    // Confirmed live 2026-09-11: processPendingEntries()'s own try/catch only
+    // ever covered evaluateOnePendingEntry — the pendingEntry.findFirst/claim
+    // calls before it (and this call itself) had no protection at all. A
+    // single transient failure there (a Neon cold-start connection reset is
+    // a documented, recurring issue in this exact codebase — see db.ts) threw
+    // uncaught, this while loop's async function rejected and exited, and
+    // since it's fired once via Promise.allSettled in
+    // startTradingOrchestrator with nothing supervising or restarting it,
+    // entry processing died silently for the rest of the process's life —
+    // zero log line, zero recovery. Confirmed against four separate live
+    // BUY_NOW/WAIT_FOR_ENTRY pending entries (WOOD, LOCK, DIVIDEND, SCHIFFY)
+    // that sat with lastCheckedAt: null minutes after being created, even
+    // immediately following a fresh restart — this is almost certainly the
+    // dominant cause of every missed entry tonight (RWA, PEG, TFLY,
+    // DIVIDEND), not decision latency. positionMonitorLoop already has this
+    // exact protection below; entryMonitorLoop never did.
+    try {
+      const result = await processPendingEntries();
+      if (result === "idle") await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
+      else if (result === "replanned") await sleep(REPLAN_COOLDOWN_SECONDS * 1000);
+    } catch (err) {
+      logger.error({ err: String(err) }, "entry monitor tick failed — will retry next tick");
+      await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
+    }
   }
 }
 
