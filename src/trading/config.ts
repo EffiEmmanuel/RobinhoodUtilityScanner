@@ -56,6 +56,17 @@ export const tradingConfig = {
   minTradeResearchConfidence: num("MIN_TRADE_RESEARCH_CONFIDENCE", 65),
   minTradeContractScore: num("MIN_TRADE_CONTRACT_SCORE", 75),
   minTradeLiquidityUsd: num("MIN_TRADE_LIQUIDITY_USD", 15000),
+  // User directive 2026-09-11: PEG ($51K detection mcap -> ~4x) and TFLY
+  // ($195K -> 2x+) both delivered real, fast multiples tonight; RWA and
+  // STONKBROKER, both already $20-30M at entry, did not — "tens of thousands
+  // and a few hundred thousand is way better chance of making good profit."
+  // NOT an entry gate, though — a large-mcap token with real momentum is
+  // still tradeable, just with a modest fast-flip target instead of holding
+  // for the big multiple a low-mcap token has room for (unless the project
+  // itself is genuinely strong — see ExitRules.fastFlip.veryGoodQualityScoreThreshold,
+  // which exempts a "very good project" from this regardless of entry mcap).
+  // Consumed by positionManager.ts's resolveExitRules, not riskEngine.ts.
+  fastFlipAboveMarketCapUsd: num("FAST_FLIP_ABOVE_MARKET_CAP_USD", 2_000_000),
 
   // Capital buckets (§22) — all against the PAPER starting balance below.
   minReservePercent: num("MIN_RESERVE_PERCENT", 50),

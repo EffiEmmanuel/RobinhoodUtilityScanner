@@ -30,6 +30,38 @@ export interface ExitRules {
   maxLossPercent: number;
   catastrophicLossPercent: number;
   maxHoldMinutes: number;
+  // Two independent reasons a trade gets the tighter profile below instead
+  // of the normal one above — either is sufficient on its own:
+  //
+  // 1. The candidate only cleared eligibility on real trading demand (the
+  //    momentum override — qualityScore and/or researchConfidence below
+  //    qualityScoreThreshold, see riskEngine.ts), not on its own merits —
+  //    it's a speculative ride on momentum someone else started, and every
+  //    minute spent holding it past the point real buying pressure fades is
+  //    a minute spent being exit liquidity for whoever bought before us.
+  //
+  // 2. Entry market cap was already above largeMcapUsd — a token that large
+  //    has far less room left to run than one caught at tens/hundreds of
+  //    thousands (confirmed live 2026-09-11: PEG $51K entry -> ~4x, TFLY
+  //    $195K -> 2x+, vs RWA/STONKBROKER both already $20-30M entry and
+  //    neither delivered a comparable multiple) — UNLESS qualityScore also
+  //    clears the higher veryGoodQualityScoreThreshold, meaning this is a
+  //    genuinely strong project worth holding long-term regardless of the
+  //    market cap already paid to get in.
+  //
+  // positionManager.ts's resolveExitRules applies this. undefined (the
+  // default until a strategy version sets it) disables the distinction
+  // entirely and every trade uses the profile above, unchanged from before
+  // this field existed.
+  fastFlip?: {
+    qualityScoreThreshold: number;
+    largeMcapUsd: number;
+    veryGoodQualityScoreThreshold: number;
+    profitSteps: ProfitStep[];
+    trailingActivationMultiple: number;
+    trailingPercent: number;
+    maxHoldMinutes: number;
+  };
 }
 
 export interface EntryRules {

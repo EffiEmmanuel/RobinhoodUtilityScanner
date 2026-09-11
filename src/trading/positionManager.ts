@@ -45,7 +45,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const token = await db.token.findUniqueOrThrow({ where: { id: trade.tokenId } });
   const plan = trade.tradePlanId ? await db.tradePlan.findUnique({ where: { id: trade.tradePlanId } }) : null;
   const strategy = await getActiveStrategyVersion();
-  const exitRules = strategy.exitRules as unknown as ExitRules;
+  const exitRules = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
 
   const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
   const pair = market.primaryPair;
@@ -205,6 +205,42 @@ async function applyAiStrategyDecision(
 
   await executeSell(trade, tokenAddress, remainingTokens, exitDecision, pair);
   return true;
+}
+
+/**
+ * Substitutes the strategy's fastFlip profile (earlier profit-taking, a
+ * closer trailing stop, a short max hold) whenever either condition on
+ * ExitRules.fastFlip's doc comment applies — a speculative, momentum-only
+ * entry, or a large entry market cap on a project that isn't (yet) proven
+ * strong enough to justify holding for the bigger move. Falls through to the
+ * base profile unchanged whenever fastFlip isn't configured on the active
+ * strategy, or the candidate/its qualityScore can't be found (never blocks
+ * monitoring over a missing optional signal).
+ */
+async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<ExitRules> {
+  const { fastFlip } = baseExitRules;
+  if (!fastFlip) return baseExitRules;
+
+  const candidate = trade.candidateId
+    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true } })
+    : null;
+  const qualityScore = candidate?.qualityScore ?? undefined;
+
+  const isSpeculative = qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold;
+  const isLargeEntryNotYetProven =
+    trade.actualEntryMcap != null &&
+    trade.actualEntryMcap > fastFlip.largeMcapUsd &&
+    (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
+
+  if (!isSpeculative && !isLargeEntryNotYetProven) return baseExitRules;
+
+  return {
+    ...baseExitRules,
+    profitSteps: fastFlip.profitSteps,
+    trailingActivationMultiple: fastFlip.trailingActivationMultiple,
+    trailingPercent: fastFlip.trailingPercent,
+    maxHoldMinutes: fastFlip.maxHoldMinutes,
+  };
 }
 
 /**
