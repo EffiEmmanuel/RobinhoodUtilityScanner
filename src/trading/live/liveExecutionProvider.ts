@@ -50,6 +50,8 @@ const SWAP_DEADLINE_SECONDS = 300; // 5 minutes — matches the plan/entry reval
 
 export interface LiveQuote {
   poolKey: PoolKey;
+  poolId: `0x${string}`;
+  poolLiquidity: bigint;
   amountOut: bigint;
   gasEstimateUnits: bigint;
 }
@@ -69,7 +71,7 @@ export async function getLiveQuote(tokenAddress: `0x${string}`, isBuy: boolean, 
       functionName: "quoteExactInputSingle",
       args: [{ poolKey: pool.poolKey, zeroForOne: isBuy, exactAmount: amountIn, hookData: "0x" }],
     });
-    return { poolKey: pool.poolKey, amountOut: result[0], gasEstimateUnits: result[1] };
+    return { poolKey: pool.poolKey, poolId: pool.poolId, poolLiquidity: pool.liquidity, amountOut: result[0], gasEstimateUnits: result[1] };
   } catch (err) {
     logger.warn({ tokenAddress, err: String(err) }, "live quote failed");
     return undefined;

@@ -53,10 +53,22 @@ async function planningLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
+// Floor between a replan and the next time that same candidate can be
+// re-evaluated — confirmed live: without this, a fast-breakout token got
+// replanned 6 times in under 30 seconds (each one immediately invalidated,
+// planAgeMinutes: 0) because this loop treated "replanned" the same as any
+// other "did work" tick and re-grabbed the brand-new pending entry with zero
+// delay, before the market could possibly have moved relative to the ceiling
+// that replan had just set. Short enough to stay responsive; long enough that
+// a replan actually gets a few ticks of real price movement before being
+// judged stale again.
+const REPLAN_COOLDOWN_SECONDS = 10;
+
 async function entryMonitorLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
-    const didWork = await processPendingEntries();
-    if (!didWork) await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
+    const result = await processPendingEntries();
+    if (result === "idle") await sleep(tradingConfig.pendingEntryMonitorIntervalSeconds * 1000);
+    else if (result === "replanned") await sleep(REPLAN_COOLDOWN_SECONDS * 1000);
   }
 }
 

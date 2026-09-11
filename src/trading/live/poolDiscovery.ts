@@ -13,7 +13,15 @@ export interface PoolKey {
 export interface DiscoveredPool {
   poolKey: PoolKey;
   poolId: `0x${string}`;
+  // In-range liquidity (StateView.getLiquidity) at selection time — carried
+  // through to the quote layer purely for diagnostics: when a quote's price
+  // impact is nonsensical, this is what tells us whether we landed on a real
+  // pool with too little depth for the trade size, versus something else
+  // entirely (see executionFacade.ts's price-impact logging).
+  liquidity: bigint;
 }
+
+type PoolCandidate = Omit<DiscoveredPool, "liquidity">;
 
 // Standard Uniswap fee-tier/tickSpacing pairs, used only as a fallback cross-
 // check if event-log discovery finds nothing (e.g. an RPC log-range limit) —
@@ -73,7 +81,7 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
       // If multiple pools exist for the same pair (different fee tiers), the
       // most recently initialized one is the most likely to be the active one
       // for a freshly-launched token — but check liquidity below regardless.
-      const candidates = logs.map((log) => ({
+      const candidates: PoolCandidate[] = logs.map((log) => ({
         poolKey: {
           currency0: NATIVE_ETH_CURRENCY,
           currency1: token,
@@ -91,7 +99,7 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
   }
 
   // Fallback: probe standard fee tiers with no hooks.
-  const fallbackCandidates: DiscoveredPool[] = STANDARD_FEE_TIERS.map(({ fee, tickSpacing }) => {
+  const fallbackCandidates: PoolCandidate[] = STANDARD_FEE_TIERS.map(({ fee, tickSpacing }) => {
     const poolKey: PoolKey = {
       currency0: NATIVE_ETH_CURRENCY,
       currency1: token,
@@ -137,8 +145,8 @@ async function scanInitializeLogsBackward(client: PublicClient, token: `0x${stri
  * depth, not something a caller's own price-impact math should have to
  * rediscover from a cryptic four-digit percentage.
  */
-async function pickPoolWithLiquidity(client: PublicClient, candidates: DiscoveredPool[]): Promise<DiscoveredPool | undefined> {
-  let best: { candidate: DiscoveredPool; liquidity: bigint } | undefined;
+async function pickPoolWithLiquidity(client: PublicClient, candidates: PoolCandidate[]): Promise<DiscoveredPool | undefined> {
+  let best: { candidate: PoolCandidate; liquidity: bigint } | undefined;
 
   for (const candidate of candidates) {
     if (candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
@@ -171,5 +179,5 @@ async function pickPoolWithLiquidity(client: PublicClient, candidates: Discovere
       // not initialized / doesn't exist — try the next candidate
     }
   }
-  return best?.candidate;
+  return best ? { ...best.candidate, liquidity: best.liquidity } : undefined;
 }

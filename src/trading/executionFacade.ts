@@ -4,6 +4,7 @@ import type { MarketPair } from "../dex/types";
 import { tradingConfig } from "./config";
 import { getPaperQuote, getPaperSellQuote, isSellQuoteAvailable as isPaperSellQuoteAvailable, type PaperQuote } from "./execution";
 import { isLiveModeReady, executeLiveBuy, executeLiveSell, getLiveQuote } from "./live/liveExecutionProvider";
+import type { PoolKey } from "./live/poolDiscovery";
 import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
 
@@ -22,6 +23,41 @@ export interface FillResult extends PaperQuote {
 function deriveEthPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative">): number | undefined {
   if (!pair.priceUsd || !pair.priceNative || pair.priceNative === 0) return undefined;
   return pair.priceUsd / pair.priceNative;
+}
+
+// Anything past this is almost certainly not "this token is just thin" —
+// legitimate liquidity doesn't produce impact in the hundreds of percent for
+// a normal position size. Confirmed live: a quote came back at 432% impact
+// with zero visibility into which pool caused it. Threshold is deliberately
+// well above the real 3%/300bps trading caps (defaultMaxBuySlippageBps /
+// maxBuyPriceImpactPercent) so this only fires for the genuinely broken
+// cases, not routine rejections.
+const SUSPICIOUS_PRICE_IMPACT_PERCENT = 25;
+
+function logSuspiciousQuote(
+  direction: "buy" | "sell",
+  tokenAddress: string,
+  quote: { poolKey: PoolKey; poolId: string; poolLiquidity: bigint },
+  priceImpactPercent: number,
+  spotPriceUsd: number,
+  effectivePriceUsd: number
+): void {
+  if (priceImpactPercent < SUSPICIOUS_PRICE_IMPACT_PERCENT) return;
+  logger.warn(
+    {
+      direction,
+      tokenAddress,
+      priceImpactPercent,
+      spotPriceUsd,
+      effectivePriceUsd,
+      poolId: quote.poolId,
+      fee: quote.poolKey.fee,
+      tickSpacing: quote.poolKey.tickSpacing,
+      hooks: quote.poolKey.hooks,
+      poolLiquidity: quote.poolLiquidity.toString(),
+    },
+    "quote has suspiciously high price impact — likely quoted against the wrong pool or one with too little real depth"
+  );
 }
 
 /**
@@ -45,6 +81,7 @@ export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: numb
   const effectivePriceUsd = tokenOut > 0 ? positionSizeUsd / tokenOut : Infinity;
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((effectivePriceUsd - spotPriceUsd) / spotPriceUsd) * 100) : 0;
+  logSuspiciousQuote("buy", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
 }
 
@@ -104,6 +141,7 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   const effectivePriceUsd = tokenAmount > 0 ? proceedsUsd / tokenAmount : 0;
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((spotPriceUsd - effectivePriceUsd) / spotPriceUsd) * 100) : 0;
+  logSuspiciousQuote("sell", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent };
 }
 

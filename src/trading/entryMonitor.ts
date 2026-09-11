@@ -35,25 +35,39 @@ export async function recoverStuckPendingEntries(): Promise<void> {
   if (result.count > 0) logger.info({ count: result.count }, "recovered pending entries stuck from a previous run");
 }
 
-/** Processes one ACTIVE pending entry. Returns true if it did any work. */
-export async function processPendingEntries(): Promise<boolean> {
+export type PendingEntryTickResult = "idle" | "replanned" | "checked";
+
+/**
+ * Processes one ACTIVE pending entry. "replanned" is called out separately
+ * from "checked" so the caller (orchestrator.ts's entryMonitorLoop) can pace
+ * itself — confirmed live: a fast-breakout token got replanned 6 times in
+ * under 30 seconds because the loop treated a replan as ordinary "did work"
+ * and immediately re-grabbed the freshly-replanned entry with zero delay,
+ * before the market had moved at all relative to the brand-new ceiling. Each
+ * replan is an AI call; hammering it back-to-back on a token whose price is
+ * simply outrunning our planning latency doesn't fix that, it just burns
+ * calls that were stale before they landed.
+ */
+export async function processPendingEntries(): Promise<PendingEntryTickResult> {
   const candidate = await db.pendingEntry.findFirst({
     where: { status: PendingEntryStatus.ACTIVE },
     orderBy: { createdAt: "asc" },
   });
-  if (!candidate) return false;
-  if (!(await claim(candidate.id, PendingEntryStatus.ACTIVE, PendingEntryStatus.REVALIDATING))) return true; // lost the race, still counts as "did work" this tick
+  if (!candidate) return "idle";
+  if (!(await claim(candidate.id, PendingEntryStatus.ACTIVE, PendingEntryStatus.REVALIDATING))) return "checked"; // lost the race, still counts as "did work" this tick
 
   try {
-    await evaluateOnePendingEntry(candidate);
+    const replanned = await evaluateOnePendingEntry(candidate);
+    return replanned ? "replanned" : "checked";
   } catch (err) {
     logger.error({ pendingEntryId: candidate.id, err: String(err) }, "pending entry evaluation failed");
     await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
+    return "checked";
   }
-  return true;
 }
 
-async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
+/** Returns true if this tick replanned (cancelled + regenerated) the candidate's plan. */
+async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
   const plan = await db.tradePlan.findUniqueOrThrow({
     where: { id: entry.tradePlanId },
     include: { candidate: { include: { token: true } } },
@@ -72,7 +86,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
       data: { status: missed ? TradeCandidateStatus.MISSED : TradeCandidateStatus.EXPIRED },
     });
     logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, missed }, "pending entry expired");
-    return;
+    return false;
   }
 
   const market = await pollCandidateMarket(candidate.tokenId, candidate.token.chain, candidate.token.address);
@@ -130,7 +144,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
     } catch (err) {
       logger.error({ candidateId: candidate.id, err: String(err) }, "re-plan failed — candidate has no active pending entry until the next planning pass picks it up");
     }
-    return;
+    return true;
   }
 
   const inZone =
@@ -142,7 +156,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
 
   if (!inZone) {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE, lastCheckedAt: new Date() } });
-    return;
+    return false;
   }
 
   // The AI's risk score no longer hard-blocks entry here — confirmed live it
@@ -158,7 +172,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
 
   if (!pair) {
     await rejectEntry(entry, candidate.id, ["pool disappeared — no market data available at trigger time"]);
-    return;
+    return false;
   }
 
   const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number };
@@ -176,7 +190,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
 
   if (!sizing.approved) {
     await rejectEntry(entry, candidate.id, sizing.reasons);
-    return;
+    return false;
   }
 
   const quote = await getBuyEstimate(candidate.token.address, sizing.positionSizeUsd, pair);
@@ -199,11 +213,11 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
   if (entryResult.decision === "DEFER") {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
     logger.info({ pendingEntryId: entry.id, reasons: entryResult.reasons }, "entry deferred (will retry)");
-    return;
+    return false;
   }
   if (entryResult.decision === "REJECTED") {
     await rejectEntry(entry, candidate.id, entryResult.reasons);
-    return;
+    return false;
   }
 
   await openTrade({
@@ -220,6 +234,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<void> {
   });
   await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.APPROVED } });
   await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.TRADED } });
+  return false;
 }
 
 async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: string[]): Promise<void> {
