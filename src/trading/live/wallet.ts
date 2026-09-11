@@ -44,8 +44,17 @@ export function getWalletAddress(): `0x${string}` {
   return getAccount().address;
 }
 
+// Robinhood Chain produces a block roughly every 100ms (confirmed in
+// poolDiscovery.ts), but viem's default pollingInterval (built for ~12s L1
+// block times) waits up to 4s between each waitForTransactionReceipt check —
+// on a buy/sell that's the dominant chunk of perceived execution latency,
+// completely unrelated to how fast the chain itself confirms. Tightened to
+// match the chain's real cadence so a receipt is picked up within one or two
+// polls of it actually landing, not up to 4s later.
+const FAST_CHAIN_POLLING_INTERVAL_MS = 250;
+
 export function getPublicClient() {
-  return createPublicClient({ chain: robinhoodChain, transport: rpcTransport });
+  return createPublicClient({ chain: robinhoodChain, transport: rpcTransport, pollingInterval: FAST_CHAIN_POLLING_INTERVAL_MS });
 }
 
 // §31 nonce safety: this is a single process, but BUY and SELL can be
@@ -91,7 +100,7 @@ export function signAndSendTransaction(tx: { to: `0x${string}`; data: `0x${strin
   assertDestinationAllowed(tx.purpose, tx.to);
   const task = sendQueue.then(async () => {
     const acct = getAccount();
-    const client = createWalletClient({ account: acct, chain: robinhoodChain, transport: rpcTransport });
+    const client = createWalletClient({ account: acct, chain: robinhoodChain, transport: rpcTransport, pollingInterval: FAST_CHAIN_POLLING_INTERVAL_MS });
     const chainId = await client.getChainId();
     if (chainId !== robinhoodChain.id) {
       throw new Error(`refusing to sign: connected chainId ${chainId} does not match Robinhood Chain (${robinhoodChain.id})`);

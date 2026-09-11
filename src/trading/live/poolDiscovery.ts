@@ -74,6 +74,7 @@ const LOG_SCAN_MAX_CHUNKS = 30; // ~12M blocks, ~14 days at 100ms/block
  */
 export async function discoverPool(client: PublicClient, tokenAddress: `0x${string}`): Promise<DiscoveredPool | undefined> {
   const token = getAddress(tokenAddress);
+  let logScanFailed = false;
 
   try {
     const logs = await scanInitializeLogsBackward(client, token);
@@ -95,6 +96,7 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
       if (withLiquidity) return withLiquidity;
     }
   } catch (err) {
+    logScanFailed = true;
     logger.warn({ token, err: String(err) }, "pool discovery via event logs failed, falling back to standard fee-tier probe");
   }
 
@@ -109,7 +111,33 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
     };
     return { poolKey, poolId: computePoolId(poolKey) };
   });
-  return pickPoolWithLiquidity(client, fallbackCandidates);
+  const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates);
+  if (fallbackResult) return fallbackResult;
+
+  // Confirmed live 2026-09-11: the event-log scan above is the ONLY mechanism
+  // that can ever find a pool behind a custom hook or nonstandard fee tier
+  // (e.g. a bonding-curve launcher) — the fallback above can only ever
+  // confirm the 4 vanilla fee tiers, never rule out a custom one. When the
+  // log scan fails for an infrastructure reason (RPC lacks eth_getLogs/
+  // archive access, a provider outage, a Cloudflare challenge on the
+  // fallback RPC — all three observed live against this exact deployment)
+  // and the vanilla probe also comes up empty, that is NOT proof the token
+  // has no tradeable pool — it's proof we couldn't check the one place that
+  // would show it. Every trade-entry trigger sampled live during this outage
+  // was silently swallowed into "no pool found" -> isSellable() false ->
+  // validateEntry's hard "no sell path available — possible honeypot"
+  // REJECTED, permanently killing the candidate on an RPC hiccup that had
+  // nothing to do with the token. Throwing here instead lets it propagate to
+  // entryMonitor.ts's/positionManager.ts's existing per-item retry handling
+  // (the row goes back to ACTIVE / gets retried next tick), the same
+  // recovery path every other transient infra failure in this codebase
+  // already gets — never a silent, permanent false rejection.
+  if (logScanFailed) {
+    throw new Error(
+      `pool discovery inconclusive for ${token}: event-log scan failed (RPC/infra error) and no standard fee-tier pool was found — this does not confirm the token has no tradeable pool, only that it couldn't be checked`
+    );
+  }
+  return undefined;
 }
 
 async function scanInitializeLogsBackward(client: PublicClient, token: `0x${string}`) {
@@ -144,9 +172,21 @@ async function scanInitializeLogsBackward(client: PublicClient, token: `0x${stri
  * candidate found — an extreme fee is a red flag regardless of liquidity
  * depth, not something a caller's own price-impact math should have to
  * rediscover from a cryptic four-digit percentage.
+ *
+ * An uninitialized pool answers cleanly (sqrtPriceX96 == 0, confirmed live —
+ * StateView doesn't revert for an unknown poolId), so anything that actually
+ * throws here is a real RPC/network failure, never "this candidate doesn't
+ * exist." Confirmed live 2026-09-11: the old catch-and-continue treated both
+ * identically, so when the RPC couldn't serve these reads at all, every
+ * candidate silently came back "not this one" and the caller read a clean
+ * "no pool" instead of the truth ("couldn't check"). Track real errors
+ * separately and throw if nothing was confirmed AND at least one candidate
+ * genuinely errored — never let an infra failure masquerade as a clean
+ * on-chain negative.
  */
 async function pickPoolWithLiquidity(client: PublicClient, candidates: PoolCandidate[]): Promise<DiscoveredPool | undefined> {
   let best: { candidate: PoolCandidate; liquidity: bigint } | undefined;
+  const errors: unknown[] = [];
 
   for (const candidate of candidates) {
     if (candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
@@ -175,9 +215,15 @@ async function pickPoolWithLiquidity(client: PublicClient, candidates: PoolCandi
       if (sqrtPriceX96 > 0n && (!best || liquidity > best.liquidity)) {
         best = { candidate, liquidity };
       }
-    } catch {
-      // not initialized / doesn't exist — try the next candidate
+    } catch (err) {
+      errors.push(err);
     }
   }
-  return best ? { ...best.candidate, liquidity: best.liquidity } : undefined;
+  if (best) return { ...best.candidate, liquidity: best.liquidity };
+  if (errors.length > 0) {
+    throw new Error(
+      `pool-liquidity check failed for ${errors.length}/${candidates.length} candidate(s), none of the rest confirmed a pool — cannot conclude no pool exists: ${String(errors[0])}`
+    );
+  }
+  return undefined;
 }

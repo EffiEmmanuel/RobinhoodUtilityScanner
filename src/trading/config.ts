@@ -102,7 +102,15 @@ export const tradingConfig = {
   // is still the cheap, free, deterministic layer, not an AI call. Raise or
   // lower once real behavior against the live API is observed.
   positionMonitorIntervalSeconds: num("POSITION_MONITOR_INTERVAL_SECONDS", 5),
-  pendingEntryMonitorIntervalSeconds: num("PENDING_ENTRY_MONITOR_INTERVAL_SECONDS", 20),
+  // Only ever slept on when entryMonitorLoop found zero ACTIVE pending
+  // entries system-wide (processPendingEntries returns "idle") — any actual
+  // queued entry is re-checked with no artificial delay regardless of this
+  // value. That's a lighter load than positionMonitorIntervalSeconds's
+  // steady per-open-trade 5s cadence above, which the same DexScreener-safety
+  // reasoning already vetted — no reason for a freshly-armed BUY_NOW/
+  // WAIT_FOR_ENTRY plan to sit for up to 20s before its first check when the
+  // system is otherwise idle.
+  pendingEntryMonitorIntervalSeconds: num("PENDING_ENTRY_MONITOR_INTERVAL_SECONDS", 5),
 
   // A WAIT_FOR_ENTRY plan's target zone/risk score was previously frozen at
   // whatever the AI saw once, at plan-creation time — confirmed live: a plan

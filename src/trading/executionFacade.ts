@@ -99,9 +99,13 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   const client = getPublicClient();
   const wallet = getWalletAddress();
   const token = tokenAddress as `0x${string}`;
-  const balanceBefore = await getTokenBalance(client, token, wallet);
-
-  const result = await executeLiveBuy(token, amountInWei, tradingConfig.defaultMaxBuySlippageBps);
+  // Independent of executeLiveBuy's own quote/simulate/send chain — read in
+  // parallel with it starting rather than serially in front of it, shaving
+  // one RPC round-trip off buy latency.
+  const [balanceBefore, result] = await Promise.all([
+    getTokenBalance(client, token, wallet),
+    executeLiveBuy(token, amountInWei, tradingConfig.defaultMaxBuySlippageBps),
+  ]);
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
   if (receipt.status !== "success") throw new Error(`live buy transaction reverted on-chain: ${result.txHash}`);
 
@@ -178,10 +182,11 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const client = getPublicClient();
   const wallet = getWalletAddress();
   const token = tokenAddress as `0x${string}`;
-  const decimals = await getTokenDecimals(client, token);
+  // ethBalanceBefore doesn't depend on decimals — read both in parallel
+  // rather than serially, shaving one RPC round-trip off sell latency.
+  const [decimals, ethBalanceBefore] = await Promise.all([getTokenDecimals(client, token), client.getBalance({ address: wallet })]);
   const tokenAmountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
 
-  const ethBalanceBefore = await client.getBalance({ address: wallet });
   const result = await executeLiveSell(token, tokenAmountRaw, tradingConfig.defaultMaxSellSlippageBps);
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
   if (receipt.status !== "success") throw new Error(`live sell transaction reverted on-chain: ${result.txHash}`);
