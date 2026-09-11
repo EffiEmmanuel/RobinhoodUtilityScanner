@@ -34,37 +34,55 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   }
 
   const qualityScoreOk = input.qualityScore >= tradingConfig.minTradeQualityScore;
+  const confidenceOk = input.researchConfidence >= tradingConfig.minTradeResearchConfidence;
+  const contractScoreOk = input.contractScore >= tradingConfig.minTradeContractScore;
+  const liquidityOk = input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
   if (!qualityScoreOk) {
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }
-  if (input.researchConfidence < tradingConfig.minTradeResearchConfidence) {
+  if (!confidenceOk) {
     reasons.push(`researchConfidence ${input.researchConfidence} < ${tradingConfig.minTradeResearchConfidence}`);
   }
-  if (input.contractScore < tradingConfig.minTradeContractScore) {
+  if (!contractScoreOk) {
     reasons.push(`contractScore ${input.contractScore} < ${tradingConfig.minTradeContractScore}`);
   }
-  if (input.liquidityUsd < tradingConfig.minTradeLiquidityUsd) {
+  if (!liquidityOk) {
     reasons.push(`liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd}`);
   }
 
   // Momentum override, same rationale as classify.ts's and research.ts's:
-  // qualityScore weighs team/social/credibility at 25% combined — signals
-  // that are structurally near-zero for ANY token still in its first hours,
-  // legitimate or not, simply because there hasn't been time to build a
-  // track record. Real, already-observed two-sided trading volume is
-  // evidence a brand-new project can't fake the way it can fake a team page.
-  // Deliberately narrow: only ever waives the qualityScore reason above —
-  // contract safety, research confidence and the liquidity floor stay real,
-  // unwaived gates on capital actually at risk, and validateEntry still
-  // re-checks live buy/sell pressure right before any buy executes.
-  const onlyQualityScoreFailing = !qualityScoreOk && reasons.length === 1;
-  if (onlyQualityScoreFailing && (input.hourlyTxns ?? 0) >= config.momentumOverrideMinHourlyTxns) {
+  // qualityScore AND researchConfidence both weigh signals that are
+  // structurally near-zero for ANY token still in its first minutes,
+  // legitimate or not — team/social/credibility, and confidence in general,
+  // simply because there hasn't been time to build a track record. Real,
+  // already-observed two-sided trading volume on real liquidity is evidence a
+  // brand-new project can't fake the way it can fake a team page.
+  //
+  // Confirmed live 2026-09-11: PEG (qualityScore 53.6 AND researchConfidence
+  // 59, both softly under the bar — a token ~2 minutes old, no site/socials
+  // yet to even score) had 459 txns/hour on $20.8K liquidity with a clean
+  // contract (contractScore 100) and was hard-REJECTED outright, because this
+  // override previously only ever waived qualityScore alone — reasons.length
+  // === 1 required confidence to already be passing. It went on to run 4x+
+  // from its detection mcap. Widened to waive qualityScore and/or
+  // researchConfidence together (never both at once with contract safety or
+  // the liquidity floor, which stay real, unwaived gates on capital actually
+  // at risk — validateEntry still re-checks live buy/sell pressure right
+  // before any buy executes).
+  const onlySoftScoresFailing = (!qualityScoreOk || !confidenceOk) && contractScoreOk && liquidityOk;
+  if (
+    onlySoftScoresFailing &&
+    (input.hourlyTxns ?? 0) >= config.momentumOverrideMinHourlyTxns &&
+    input.liquidityUsd >= config.momentumOverrideMinLiquidityUsd
+  ) {
+    const waived = [
+      !qualityScoreOk ? `qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}` : null,
+      !confidenceOk ? `researchConfidence ${input.researchConfidence} < ${tradingConfig.minTradeResearchConfidence}` : null,
+    ].filter((r): r is string => r !== null);
     return {
       eligible: true,
       riskBucket: "HIGH",
-      reasons: [
-        `momentum override: ${input.hourlyTxns} txns/1h despite qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`,
-      ],
+      reasons: [`momentum override: ${input.hourlyTxns} txns/1h, $${Math.round(input.liquidityUsd).toLocaleString()} liquidity despite ${waived.join(" and ")}`],
     };
   }
 

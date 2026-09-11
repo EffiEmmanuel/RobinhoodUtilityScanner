@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { evaluateCandidate, calculatePositionSize, validateEntry, validatePosition, validateExit } from "./riskEngine";
+import {
+  evaluateCandidate,
+  calculatePositionSize,
+  validateEntry,
+  validatePosition,
+  validateExit,
+} from "./riskEngine";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
 
@@ -32,24 +38,48 @@ function portfolio(overrides: Partial<PortfolioState> = {}): PortfolioState {
 
 describe("evaluateCandidate", () => {
   it("hard-rejects regardless of scores when hardReject is true", () => {
-    const result = evaluateCandidate({ qualityScore: 99, researchConfidence: 99, contractScore: 99, liquidityUsd: 1_000_000, hardReject: true });
+    const result = evaluateCandidate({
+      qualityScore: 99,
+      researchConfidence: 99,
+      contractScore: 99,
+      liquidityUsd: 1_000_000,
+      hardReject: true,
+    });
     expect(result.eligible).toBe(false);
     expect(result.riskBucket).toBe("REJECT");
   });
 
   it("rejects when any gate is not cleared", () => {
-    const result = evaluateCandidate({ qualityScore: 50, researchConfidence: 90, contractScore: 90, liquidityUsd: 100_000, hardReject: false });
+    const result = evaluateCandidate({
+      qualityScore: 50,
+      researchConfidence: 90,
+      contractScore: 90,
+      liquidityUsd: 100_000,
+      hardReject: false,
+    });
     expect(result.eligible).toBe(false);
   });
 
   it("accepts and buckets LOW risk when comfortably above every gate", () => {
-    const result = evaluateCandidate({ qualityScore: 95, researchConfidence: 90, contractScore: 90, liquidityUsd: 100_000, hardReject: false });
+    const result = evaluateCandidate({
+      qualityScore: 95,
+      researchConfidence: 90,
+      contractScore: 90,
+      liquidityUsd: 100_000,
+      hardReject: false,
+    });
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("LOW");
   });
 
   it("accepts and buckets HIGH risk when barely clearing the gates", () => {
-    const result = evaluateCandidate({ qualityScore: 81, researchConfidence: 66, contractScore: 76, liquidityUsd: 15_000, hardReject: false });
+    const result = evaluateCandidate({
+      qualityScore: 81,
+      researchConfidence: 66,
+      contractScore: 76,
+      liquidityUsd: 15_000,
+      hardReject: false,
+    });
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("HIGH");
   });
@@ -62,6 +92,25 @@ describe("evaluateCandidate", () => {
       liquidityUsd: 20_000,
       hardReject: false,
       hourlyTxns: 40,
+    });
+    expect(result.eligible).toBe(true);
+    expect(result.riskBucket).toBe("HIGH");
+  });
+
+  it("momentum-overrides both qualityScore and researchConfidence together when contract/liquidity are clean and demand is strong", () => {
+    // Confirmed live 2026-09-11: PEG (qualityScore 53.6, researchConfidence
+    // 59 — both softly under the bar on a ~2-minute-old token with no
+    // site/socials yet to score) had 459 txns/hour on $20.8K liquidity and a
+    // clean contract (contractScore 100), and was hard-REJECTED outright
+    // because the override previously only ever waived qualityScore alone.
+    // It went on to run 100x+ from its detection mcap.
+    const result = evaluateCandidate({
+      qualityScore: 53.6,
+      researchConfidence: 59,
+      contractScore: 100,
+      liquidityUsd: 20_783,
+      hardReject: false,
+      hourlyTxns: 459,
     });
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("HIGH");
@@ -94,27 +143,58 @@ describe("evaluateCandidate", () => {
 
 describe("calculatePositionSize", () => {
   it("rejects a REJECT risk bucket outright", () => {
-    const result = calculatePositionSize({ portfolio: portfolio(), sizingRules, qualityScore: 90, confidence: 90, riskBucket: "REJECT", liquidityUsd: 100_000 });
+    const result = calculatePositionSize({
+      portfolio: portfolio(),
+      sizingRules,
+      qualityScore: 90,
+      confidence: 90,
+      riskBucket: "REJECT",
+      liquidityUsd: 100_000,
+    });
     expect(result.approved).toBe(false);
     expect(result.positionSizeUsd).toBe(0);
   });
 
   it("caps position size at maxSinglePositionPercent of equity", () => {
     // deliberately extreme multipliers so the raw formula would exceed the cap
-    const richSizing: SizingRules = { ...sizingRules, baseAllocationPercent: 90 };
-    const result = calculatePositionSize({ portfolio: portfolio({ availableToDeployUsd: 1000 }), sizingRules: richSizing, qualityScore: 100, confidence: 100, riskBucket: "LOW", liquidityUsd: 1_000_000 });
+    const richSizing: SizingRules = {
+      ...sizingRules,
+      baseAllocationPercent: 90,
+    };
+    const result = calculatePositionSize({
+      portfolio: portfolio({ availableToDeployUsd: 1000 }),
+      sizingRules: richSizing,
+      qualityScore: 100,
+      confidence: 100,
+      riskBucket: "LOW",
+      liquidityUsd: 1_000_000,
+    });
     expect(result.approved).toBe(true);
     // default maxSinglePositionPercent is 25% of the $1000 test portfolio equity
     expect(result.positionSizeUsd).toBeLessThanOrEqual(250);
   });
 
   it("caps position size at remaining deployable capital", () => {
-    const result = calculatePositionSize({ portfolio: portfolio({ availableToDeployUsd: 10 }), sizingRules, qualityScore: 90, confidence: 90, riskBucket: "MEDIUM", liquidityUsd: 100_000 });
+    const result = calculatePositionSize({
+      portfolio: portfolio({ availableToDeployUsd: 10 }),
+      sizingRules,
+      qualityScore: 90,
+      confidence: 90,
+      riskBucket: "MEDIUM",
+      liquidityUsd: 100_000,
+    });
     expect(result.positionSizeUsd).toBeLessThanOrEqual(10);
   });
 
   it("rejects when gas cost would be too large a fraction of a tiny position", () => {
-    const result = calculatePositionSize({ portfolio: portfolio({ totalEquityUsd: 1, availableToDeployUsd: 0.5 }), sizingRules, qualityScore: 90, confidence: 90, riskBucket: "MEDIUM", liquidityUsd: 100_000 });
+    const result = calculatePositionSize({
+      portfolio: portfolio({ totalEquityUsd: 1, availableToDeployUsd: 0.5 }),
+      sizingRules,
+      qualityScore: 90,
+      confidence: 90,
+      riskBucket: "MEDIUM",
+      liquidityUsd: 100_000,
+    });
     expect(result.approved).toBe(false);
   });
 });
@@ -135,20 +215,35 @@ describe("validateEntry", () => {
   };
 
   it("defers when circuit breakers are paused", () => {
-    expect(validateEntry({ ...base, circuitBreakersPaused: true, circuitBreakerReasons: ["max open positions"] }).decision).toBe("DEFER");
+    expect(
+      validateEntry({
+        ...base,
+        circuitBreakersPaused: true,
+        circuitBreakerReasons: ["max open positions"],
+      }).decision
+    ).toBe("DEFER");
   });
 
   it("rejects when there is no sell path", () => {
-    expect(validateEntry({ ...base, sellQuoteAvailable: false }).decision).toBe("REJECTED");
+    expect(validateEntry({ ...base, sellQuoteAvailable: false }).decision).toBe(
+      "REJECTED"
+    );
   });
 
   it("rejects on the catastrophic-drop combination (liquidity collapse + sharp price drop)", () => {
-    const result = validateEntry({ ...base, currentLiquidityUsd: 5_000, liquidityAtPlanUsd: 20_000, priceChange5mPercent: -30 });
+    const result = validateEntry({
+      ...base,
+      currentLiquidityUsd: 5_000,
+      liquidityAtPlanUsd: 20_000,
+      priceChange5mPercent: -30,
+    });
     expect(result.decision).toBe("REJECTED");
   });
 
   it("rejects when sell volume massively exceeds buy volume", () => {
-    expect(validateEntry({ ...base, buySellRatio1h: 0.1 }).decision).toBe("REJECTED");
+    expect(validateEntry({ ...base, buySellRatio1h: 0.1 }).decision).toBe(
+      "REJECTED"
+    );
   });
 
   it("approves when everything is clean", () => {
@@ -186,10 +281,15 @@ describe("validatePosition", () => {
 
 describe("validateExit", () => {
   it("rejects a non-emergency exit above the normal slippage ceiling", () => {
-    expect(validateExit({ isEmergency: false, estimatedSlippageBps: 10_000 }).approved).toBe(false);
+    expect(
+      validateExit({ isEmergency: false, estimatedSlippageBps: 10_000 })
+        .approved
+    ).toBe(false);
   });
 
   it("still proceeds on an emergency exit even above the emergency ceiling (avoids an orphaned position)", () => {
-    expect(validateExit({ isEmergency: true, estimatedSlippageBps: 50_000 }).approved).toBe(true);
+    expect(
+      validateExit({ isEmergency: true, estimatedSlippageBps: 50_000 }).approved
+    ).toBe(true);
   });
 });
