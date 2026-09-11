@@ -37,6 +37,37 @@ export async function recoverStuckPendingEntries(): Promise<void> {
 
 export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 
+// Confirmed live 2026-09-11: a pending entry (SCHIFFY) got claimed
+// (ACTIVE -> REVALIDATING) and evaluateOnePendingEntry never returned and
+// never threw — no timeout anywhere in its call chain (market fetch, AI
+// replan call, RPC quote) actually unbounded despite each individually
+// looking bounded. Since this whole function is single-threaded per tick
+// (processPendingEntries always claims exactly one row), that one hang
+// blocked EVERY pending entry behind it — including live BUY_NOW plans —
+// for 15+ minutes straight with the row stuck in REVALIDATING, invisible to
+// the ACTIVE query the rest of this file uses to find work. This doesn't
+// cancel the underlying hang (nothing here threads an AbortController into
+// whatever's actually stuck), but it guarantees the loop — and the row —
+// aren't held hostage by it indefinitely: the row gets released back to
+// ACTIVE and processing moves on, same recovery path as any other error.
+const PENDING_ENTRY_EVALUATION_TIMEOUT_MS = 90_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 /**
  * Processes one ACTIVE pending entry. "replanned" is called out separately
  * from "checked" so the caller (orchestrator.ts's entryMonitorLoop) can pace
@@ -57,7 +88,7 @@ export async function processPendingEntries(): Promise<PendingEntryTickResult> {
   if (!(await claim(candidate.id, PendingEntryStatus.ACTIVE, PendingEntryStatus.REVALIDATING))) return "checked"; // lost the race, still counts as "did work" this tick
 
   try {
-    const replanned = await evaluateOnePendingEntry(candidate);
+    const replanned = await withTimeout(evaluateOnePendingEntry(candidate), PENDING_ENTRY_EVALUATION_TIMEOUT_MS, "pending entry evaluation");
     return replanned ? "replanned" : "checked";
   } catch (err) {
     logger.error({ pendingEntryId: candidate.id, err: String(err) }, "pending entry evaluation failed");
