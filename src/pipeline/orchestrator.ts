@@ -4,6 +4,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
 import { retryAsync } from "../util/retry";
+import { summarizeError } from "../util/errors";
 import { runDiscoveryPoll, promoteActiveAwaitingProfile } from "./discover";
 import { runOnchainDiscoveryPoll } from "./onchainDiscovery";
 import { classifyToken } from "./classify";
@@ -96,7 +97,7 @@ async function processOneToken(): Promise<boolean> {
           logger.warn({ tokenId: toClassify.id, cooldownMs: QUOTA_COOLDOWN_MS }, "classification hit an AI quota/rate limit — requeued, pausing classification briefly");
           await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.DETECTED } });
         } else {
-          logger.error({ tokenId: toClassify.id, err: String(err) }, "classification failed");
+          logger.error({ tokenId: toClassify.id, err: summarizeError(err) }, "classification failed");
           await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.FAILED } });
         }
       }
@@ -115,7 +116,7 @@ async function processOneToken(): Promise<boolean> {
           logger.warn({ tokenId: toResearch.id, cooldownMs: QUOTA_COOLDOWN_MS }, "research hit an AI quota/rate limit — requeued, pausing research briefly");
           await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.RESEARCH_QUEUED } });
         } else {
-          logger.error({ tokenId: toResearch.id, err: String(err) }, "research failed");
+          logger.error({ tokenId: toResearch.id, err: summarizeError(err) }, "research failed");
           await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.FAILED } });
         }
       }
@@ -132,7 +133,7 @@ async function workerLoop(workerId: number, signal: { stopped: boolean }): Promi
     try {
       didWork = await processOneToken();
     } catch (err) {
-      logger.error({ workerId, err: String(err) }, "worker loop iteration failed");
+      logger.error({ workerId, err: summarizeError(err) }, "worker loop iteration failed");
     }
     if (!didWork) await sleep(WORKER_IDLE_DELAY_MS);
   }
@@ -148,12 +149,31 @@ async function discoveryLoop(signal: { stopped: boolean }): Promise<void> {
         logger.info(result, "discovery poll complete");
       }
     } catch (err) {
-      health.lastDiscoveryError = String(err);
-      logger.error({ err: String(err) }, "discovery poll crashed");
+      health.lastDiscoveryError = summarizeError(err);
+      logger.error({ err: summarizeError(err) }, "discovery poll crashed");
     }
     await sleep(config.discoveryIntervalSeconds * 1000);
   }
 }
+
+// Confirmed live 2026-09-11: Robinhood Chain's RPC (and its own fallback)
+// were Cloudflare-blocked for an extended stretch, so runOnchainDiscoveryPoll
+// crashed on every single tick — at the default 3s interval that's a crash
+// roughly every 3-4 seconds, sustained for many minutes straight, each one
+// previously logging a multi-KB raw HTML error body (see summarizeError's
+// own history in portfolio.ts). That volume of synchronous stdout writes
+// coincided with the position/entry monitor loops elsewhere in this same
+// process going from their normal sub-minute cadence to multi-minute gaps
+// between ticks during the exact same window — confirmed against a live
+// pending BUY_NOW entry (TFLY) that should have been evaluated within
+// seconds of being queued and instead sat unchecked for 5+ minutes, long
+// enough for the token to run past its entry ceiling before ever being
+// looked at. Backing off on sustained failure — same rationale as this
+// file's own QUOTA_COOLDOWN_MS above — fixes the log volume regardless of
+// the exact mechanism, and stops hammering a provider that's already
+// telling us no for minutes at a stretch.
+const ONCHAIN_DISCOVERY_MAX_BACKOFF_SECONDS = 120;
+let onchainDiscoveryConsecutiveFailures = 0;
 
 async function onchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
@@ -161,14 +181,20 @@ async function onchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void>
       const result = await runOnchainDiscoveryPoll();
       health.lastOnchainDiscoveryPollAt = new Date();
       health.lastOnchainDiscoveryError = undefined;
+      onchainDiscoveryConsecutiveFailures = 0;
       if (result.created > 0) {
         logger.info(result, "on-chain discovery poll complete");
       }
     } catch (err) {
-      health.lastOnchainDiscoveryError = String(err);
-      logger.error({ err: String(err) }, "on-chain discovery poll crashed");
+      health.lastOnchainDiscoveryError = summarizeError(err);
+      onchainDiscoveryConsecutiveFailures++;
+      logger.error({ err: summarizeError(err), consecutiveFailures: onchainDiscoveryConsecutiveFailures }, "on-chain discovery poll crashed");
     }
-    await sleep(config.onchainDiscoveryIntervalSeconds * 1000);
+    const backoffSeconds =
+      onchainDiscoveryConsecutiveFailures > 0
+        ? Math.min(config.onchainDiscoveryIntervalSeconds * 2 ** (onchainDiscoveryConsecutiveFailures - 1), ONCHAIN_DISCOVERY_MAX_BACKOFF_SECONDS)
+        : config.onchainDiscoveryIntervalSeconds;
+    await sleep(backoffSeconds * 1000);
   }
 }
 
@@ -182,8 +208,8 @@ async function awaitingProfileActivityLoop(signal: { stopped: boolean }): Promis
         logger.info(result, "promoted on-chain tokens to AI review based on real trading activity");
       }
     } catch (err) {
-      health.lastActivityCheckError = String(err);
-      logger.error({ err: String(err) }, "awaiting-profile activity check crashed");
+      health.lastActivityCheckError = summarizeError(err);
+      logger.error({ err: summarizeError(err) }, "awaiting-profile activity check crashed");
     }
     await sleep(AWAITING_PROFILE_ACTIVITY_INTERVAL_SECONDS * 1000);
   }

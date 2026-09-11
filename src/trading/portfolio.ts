@@ -5,23 +5,9 @@ import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { fetchMarketForToken } from "../dex/client";
+import { summarizeError } from "../util/errors";
 
 const PAPER_WALLET_ADDRESS = "paper";
-
-/**
- * Circuit-breaker reasons are rendered straight into the dashboard. Confirmed
- * live: an RPC provider's Cloudflare bot-challenge page (a full HTML document,
- * including a long unbroken base64-encoded SVG) came back as the error body
- * for a failed eth_getBalance call — viem folds that whole body into
- * err.message, and pushing it verbatim broke the circuit-breaker banner's
- * layout even though the text itself was properly escaped. One line, capped
- * length, never the raw upstream response body.
- */
-function summarizeError(err: unknown, maxLen = 160): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  const oneLine = raw.replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen ? oneLine.slice(0, maxLen) + "…" : oneLine;
-}
 
 /**
  * Cash is derived purely from DEPOSIT/WITHDRAWAL/BUY/SELL/GAS ledger entries.
