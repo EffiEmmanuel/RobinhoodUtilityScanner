@@ -13,6 +13,7 @@ import { generatePostmortem } from "./postmortem";
 import { checkPortfolioMilestones } from "./milestones";
 import { tradingConfig } from "./config";
 import { shouldRunStrategyReview, runPositionStrategyReview, applyReentryTarget, checkAndExecutePendingReentry } from "./positionStrategy";
+import { recordSellFailure, recordSellSuccess } from "./executionAlerts";
 import type { PositionStrategyDecision } from "../ai/schemas";
 
 // When an exit first started being refused by the slippage guard, per trade —
@@ -384,6 +385,13 @@ async function executeSell(
       { tradeId: trade.id, reasons: exitCheck.reasons, blockedForMinutes: Math.round(stuckForMinutes) },
       "exit rejected by slippage guard — will retry next tick"
     );
+    recordSellFailure({
+      tokenAddress,
+      tokenLabel: pair.baseTokenSymbol ?? pair.baseTokenName ?? tokenAddress.slice(0, 10),
+      error: exitCheck.reasons.join("; "),
+      positionValueUsd: remainingTokens * (pair.priceUsd ?? 0),
+      unrealizedPnlPercent: trade.entryPriceUsd ? ((pair.priceUsd ?? 0) / trade.entryPriceUsd - 1) * 100 : undefined,
+    });
     return;
   }
   if (escalate && !decision.isEmergency) {
@@ -399,8 +407,16 @@ async function executeSell(
     fill = await executeSellFill(tokenAddress, sellTokens, pair);
   } catch (err) {
     logger.error({ tradeId: trade.id, err: String(err) }, "sell execution failed — will retry next tick");
+    recordSellFailure({
+      tokenAddress,
+      tokenLabel: pair.baseTokenSymbol ?? pair.baseTokenName ?? tokenAddress.slice(0, 10),
+      error: String(err),
+      positionValueUsd: remainingTokens * (pair.priceUsd ?? 0),
+      unrealizedPnlPercent: trade.entryPriceUsd ? ((pair.priceUsd ?? 0) / trade.entryPriceUsd - 1) * 100 : undefined,
+    });
     return;
   }
+  recordSellSuccess(tokenAddress);
 
   // fill.tokenAmount is what the fill ACTUALLY sold, which can be slightly
   // less than the sellTokens we asked for — executeSellFill clamps the

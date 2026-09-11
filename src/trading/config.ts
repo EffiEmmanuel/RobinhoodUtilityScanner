@@ -228,6 +228,26 @@ export const tradingConfig = {
   // that a bad fill beats an unsellable bag. 0 disables escalation.
   stuckExitEscalateAfterMinutes: num("STUCK_EXIT_ESCALATE_AFTER_MINUTES", 5),
 
+  // Execution-failure alerting (see executionAlerts.ts). Both bugs that
+  // trapped every open position on 2026-09-11 retried silently in the logs
+  // for hours and were only caught by a human noticing the bags weren't
+  // moving — these exist so the next one announces itself instead.
+  // A failing SELL is tracked per token by DURATION, because it retries the
+  // same position every couple of seconds and the danger is how long the
+  // position stays un-exitable. Set to 15 rather than something twitchy:
+  // stuckExitEscalateAfterMinutes (5) gets its chance to rescue the exit
+  // first, so an alert here means even escalation didn't work.
+  sellFailureAlertAfterMinutes: num("SELL_FAILURE_ALERT_AFTER_MINUTES", 15),
+  // A failing BUY doesn't retry the same candidate, so duration is
+  // meaningless — what matters is the rate across all tokens. Several
+  // failures in a short window means something systemic (RPC, gas, routing)
+  // rather than one bad token.
+  buyFailureAlertCount: num("BUY_FAILURE_ALERT_COUNT", 4),
+  buyFailureAlertWindowMinutes: num("BUY_FAILURE_ALERT_WINDOW_MINUTES", 15),
+  // Per-token (sells) / global (buys) quiet period after an alert, so one
+  // ongoing problem is one email rather than a repeating one.
+  executionAlertCooldownMinutes: num("EXECUTION_ALERT_COOLDOWN_MINUTES", 360),
+
   // Small-account gas-ratio check (§23) — Robinhood Chain is a cheap L2, so
   // this is a small flat simulated cost, not a real gas oracle call.
   maxGasCostPercentOfPosition: num("MAX_GAS_COST_PERCENT_OF_POSITION", 5),

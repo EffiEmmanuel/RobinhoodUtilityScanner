@@ -21,6 +21,7 @@ import { getActiveStrategyVersion, type SizingRules } from "./strategy";
 import { tradingConfig } from "./config";
 import { sendTradeEntryEmail } from "./notifications";
 import { planCandidate } from "./planning";
+import { recordBuyFailure, recordBuySuccess } from "./executionAlerts";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -435,9 +436,15 @@ async function openTrade(input: {
     fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair);
   } catch (err) {
     logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — candidate reverted to REJECTED, no trade created");
+    recordBuyFailure({
+      tokenAddress: input.tokenAddress,
+      tokenLabel: input.pair.baseTokenSymbol ?? input.pair.baseTokenName ?? input.tokenAddress.slice(0, 10),
+      error: String(err),
+    });
     await db.tradeCandidate.update({ where: { id: input.candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
     throw err;
   }
+  recordBuySuccess();
 
   const trade = await db.trade.create({
     data: {

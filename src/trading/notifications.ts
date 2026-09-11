@@ -114,6 +114,49 @@ export async function sendTradeClosedEmail(input: { token: Token | null; trade: 
   );
 }
 
+/**
+ * Fired by executionAlerts.ts when buys or sells have been failing long
+ * enough that it's a real problem rather than a transient blip. A stuck SELL
+ * is the dangerous one: the position can't be exited, so it keeps riding
+ * whatever the market does while the bot retries every couple of seconds —
+ * exactly the shape of the two bugs that silently trapped every open
+ * position on 2026-09-11 (a float-precision TRANSFER_FROM_FAILED, then a
+ * fee/slippage guard that could never be satisfied). Neither announced
+ * itself; both were found by a human noticing the bags weren't moving.
+ */
+export async function sendExecutionFailureEmail(input: {
+  direction: "BUY" | "SELL";
+  tokenLabel: string;
+  tokenAddress?: string;
+  failureCount: number;
+  failingForMinutes: number;
+  lastError: string;
+  positionValueUsd?: number;
+  unrealizedPnlPercent?: number;
+}): Promise<void> {
+  const isSell = input.direction === "SELL";
+  await send(
+    `ACTION NEEDED: ${input.direction}s failing — ${input.tokenLabel}`,
+    [
+      `${input.direction} execution has failed ${input.failureCount} time(s) over the last ${Math.round(input.failingForMinutes)} minute(s).`,
+      "",
+      `Token: ${input.tokenLabel}`,
+      input.tokenAddress ? `Address: ${input.tokenAddress}` : undefined,
+      input.positionValueUsd !== undefined ? `Position value: ~$${input.positionValueUsd.toFixed(2)}` : undefined,
+      input.unrealizedPnlPercent !== undefined ? `Unrealized: ${input.unrealizedPnlPercent.toFixed(1)}%` : undefined,
+      "",
+      `Last error:`,
+      input.lastError.slice(0, 600),
+      "",
+      isSell
+        ? "While this persists the position CANNOT be exited — it stays exposed to the market and the bot will keep retrying. Worth checking whether the token's pool, liquidity or approvals changed, or whether a guard is rejecting the exit."
+        : "While this persists no new positions can be opened for this candidate. If it's happening across many tokens it's likely an RPC, gas, or routing problem rather than anything token-specific.",
+    ]
+      .filter((line) => line !== undefined)
+      .join("\n")
+  );
+}
+
 export async function sendTradePlanEmail(input: {
   token: Token | null;
   action: string;
