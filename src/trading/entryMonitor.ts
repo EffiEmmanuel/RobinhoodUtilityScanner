@@ -254,7 +254,12 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
   const planAgeMinutes = (Date.now() - plan.createdAt.getTime()) / 60_000;
   const priceDriftPercent =
     mcap !== undefined && plan.currentMarketCap ? (Math.abs(mcap - plan.currentMarketCap) / plan.currentMarketCap) * 100 : 0;
-  const invalidationBreached = plan.invalidationMcap !== null && mcap !== undefined && mcap <= plan.invalidationMcap;
+  // Tolerance-adjusted, not the AI's stated level directly — see
+  // tradingConfig.invalidationTolerancePercent for why (a normal post-launch
+  // wick isn't the same thing as the setup actually breaking).
+  const invalidationFloor =
+    plan.invalidationMcap !== null ? plan.invalidationMcap * (1 - tradingConfig.invalidationTolerancePercent / 100) : null;
+  const invalidationBreached = invalidationFloor !== null && mcap !== undefined && mcap <= invalidationFloor;
   const ceilingBreached = plan.doNotChaseAboveMcap !== null && mcap !== undefined && mcap > plan.doNotChaseAboveMcap;
   if (
     invalidationBreached ||

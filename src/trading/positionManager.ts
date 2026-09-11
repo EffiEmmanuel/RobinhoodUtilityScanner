@@ -286,9 +286,18 @@ function evaluateExits(ctx: {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
-  // Priority 2: technical invalidation.
-  if (plan?.invalidationMcap && ctx.currentMcap !== undefined && ctx.currentMcap <= plan.invalidationMcap) {
-    return { type: "INVALIDATION_EXIT", sellPercentOfRemaining: 100, reason: `market cap fell to invalidation level ($${Math.round(plan.invalidationMcap).toLocaleString()})`, isEmergency: false };
+  // Priority 2: technical invalidation. Tolerance-adjusted, not the AI's
+  // stated level directly — see tradingConfig.invalidationTolerancePercent
+  // (a normal post-launch wick isn't the same thing as the setup actually
+  // breaking; this exit was firing on exactly that kind of dip before).
+  const invalidationFloor = plan?.invalidationMcap ? plan.invalidationMcap * (1 - tradingConfig.invalidationTolerancePercent / 100) : undefined;
+  if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
+    return {
+      type: "INVALIDATION_EXIT",
+      sellPercentOfRemaining: 100,
+      reason: `market cap fell to tolerance-adjusted invalidation floor ($${Math.round(invalidationFloor).toLocaleString()}, AI level was $${Math.round(plan!.invalidationMcap!).toLocaleString()})`,
+      isEmergency: false,
+    };
   }
   if (positionRisk.riskExitTriggered) {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: false };

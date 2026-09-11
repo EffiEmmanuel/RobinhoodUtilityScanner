@@ -104,6 +104,23 @@ export const tradingConfig = {
   // observed support level is used — that data could itself be a brief noise
   // wick, never trust it past this no matter what.
   maxPullbackExtremeFloorPercent: num("MAX_PULLBACK_EXTREME_FLOOR_PERCENT", 60),
+
+  // User directive 2026-09-11, evidence: Flypad breached its AI-stated
+  // technicalInvalidationMcap and was cancelled/exited on that single touch
+  // — then ran 3x from that exact dip. "Once a token bonds, it usually tips
+  // a bit — that should be normal." The AI's invalidation level is a single
+  // point estimate with no allowance for the routine post-launch/post-
+  // bonding-curve-graduation wick this chain's tokens commonly show right
+  // after going live on a real AMM pool. Two tiers instead of one: the AI's
+  // stated level is now the SOFT floor (tracked, not acted on alone) — only
+  // a breach this many percent FURTHER below it counts as the setup
+  // actually being broken. Applied identically in entryMonitor.ts's
+  // invalidationBreached (pre-buy) and positionManager.ts's
+  // INVALIDATION_EXIT (open-position exit) — both derive the same
+  // tolerance-adjusted hard floor from plan.invalidationMcap rather than
+  // using it directly.
+  invalidationTolerancePercent: num("INVALIDATION_TOLERANCE_PERCENT", 20),
+
   // Tightened from 20s — deliberately not literally 1s: DexScreener's public
   // API has no confirmed rate-limit headroom for that at 24/7 scale, and this
   // is still the cheap, free, deterministic layer, not an AI call. Raise or
