@@ -1558,6 +1558,22 @@
             })
           );
         }
+        // fmtUsd is fixed at 2 decimals — fine for dollar amounts (position
+        // size, PnL, equity) but meaningless for a per-token unit price: this
+        // app's tokens routinely price in the $0.0000xxx range, where fmtUsd
+        // collapses everything to "$0.00" or rounds up to "$0.01" (confirmed
+        // live — that's literally what the Entry column and the modal's
+        // Price stat chip were showing). Falls back to fmtUsd unchanged for
+        // anything a cent or above, where 2 decimals is already meaningful.
+        function fmtTokenPrice(n) {
+          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
+          var abs = Math.abs(n);
+          if (abs === 0 || abs >= 0.01) return fmtUsd(n);
+          var sign = n < 0 ? "-" : "";
+          var leadingZeros = Math.max(0, -Math.floor(Math.log10(abs)) - 1);
+          var decimals = Math.min(leadingZeros + 4, 18); // ~4 significant digits past the leading zeros
+          return sign + "$" + abs.toFixed(decimals);
+        }
         function fmtEth(n) {
           if (n === null || n === undefined || isNaN(n)) return "&mdash;";
           return (
@@ -1925,7 +1941,7 @@
                 esc(t.mode) +
                 "</span></td>" +
                 "<td>" +
-                (entry ? fmtUsd(entry) : "&mdash;") +
+                (entry ? fmtTokenPrice(entry) : "&mdash;") +
                 "</td>" +
                 "<td>" +
                 fmtMultiple(mult) +
@@ -2434,6 +2450,8 @@
             display = "&mdash;";
           } else if (opts.isFraction) {
             display = Math.round(value * 100) + "%";
+          } else if (opts.isTokenPrice) {
+            display = fmtTokenPrice(value);
           } else if (opts.isUsd) {
             display = fmtUsd(value);
           } else {
@@ -2769,7 +2787,7 @@
           if (snap) {
             sections.push(
               '<div class="modal-section"><h4>Latest market snapshot</h4><div class="stat-grid">' +
-                statChip("Price", snap.priceUsd, { isUsd: true }) +
+                statChip("Price", snap.priceUsd, { isTokenPrice: true }) +
                 statChip("Market cap", snap.marketCapUsd, { isUsd: true }) +
                 statChip("Liquidity", snap.liquidityUsd, { isUsd: true }) +
                 '</div><p class="modal-note" style="margin-top:8px;">captured ' +
