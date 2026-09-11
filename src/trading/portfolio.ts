@@ -182,7 +182,11 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   }
 
   const state = await getPortfolioState();
-  if (state.openPositionCount >= tradingConfig.maxOpenPositions) {
+  // maxOpenPositions <= 0 means no count cap (see config.ts) — total real
+  // risk still stays bounded by maxTotalDeployedPercent/maxSinglePositionPercent
+  // below, this only ever limited how many *positions* could be open at once,
+  // not how much capital could be at risk.
+  if (tradingConfig.maxOpenPositions > 0 && state.openPositionCount >= tradingConfig.maxOpenPositions) {
     reasons.push(`max open positions reached (${state.openPositionCount}/${tradingConfig.maxOpenPositions})`);
   }
 

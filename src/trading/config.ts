@@ -72,6 +72,13 @@ export const tradingConfig = {
   minReservePercent: num("MIN_RESERVE_PERCENT", 50),
   maxTotalDeployedPercent: num("MAX_TOTAL_DEPLOYED_PERCENT", 50),
   maxSinglePositionPercent: num("MAX_SINGLE_POSITION_PERCENT", 25),
+  // User directive 2026-09-11: this cap was blocking new entries outright
+  // ("max open positions reached (2/2)") while capital was still available
+  // under maxTotalDeployedPercent/maxSinglePositionPercent above — those two
+  // already bound total real risk (how much capital can ever be deployed at
+  // once, and how much any single position can be), so a separate hard count
+  // limit was redundant risk control, not the only one. 0 (or below) means no
+  // count cap at all — see checkCircuitBreakers in portfolio.ts.
   maxOpenPositions: num("MAX_OPEN_POSITIONS", 2),
 
   // Circuit breakers (§25).
