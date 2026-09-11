@@ -2605,8 +2605,17 @@
           var candidate =
             (token.tradeCandidates && token.tradeCandidates[0]) || null;
           if (candidate) {
+            // decisions now carries both candidate_eligibility and
+            // entry_revalidation snapshots (see server.ts) — pick the one
+            // this section actually means, rather than assuming [0].
             var candDecision =
-              (candidate.decisions && candidate.decisions[0]) || null;
+              (candidate.decisions || []).find(function (d) {
+                return d.stage === "candidate_eligibility";
+              }) || null;
+            var rejectionDecision =
+              (candidate.decisions || []).find(function (d) {
+                return d.stage === "entry_revalidation";
+              }) || null;
             var eligibilityNote;
             if (candidate.status === "REJECTED") {
               eligibilityNote =
@@ -2780,6 +2789,13 @@
               '<div class="modal-section"><h4>Trade plan &amp; position</h4>' +
                 '<p class="modal-note">Exit strategy (profit-taking steps, trailing stop) is governed by the active strategy version, applied once a position opens.</p>' +
                 kvTable(planRows) +
+                (plan &&
+                plan.pendingEntry &&
+                plan.pendingEntry.status === "REJECTED" &&
+                rejectionDecision &&
+                rejectionDecision.finalReasons
+                  ? listBlock("Why rejected", rejectionDecision.finalReasons)
+                  : "") +
                 "</div>"
             );
           }

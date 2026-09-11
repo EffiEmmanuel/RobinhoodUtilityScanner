@@ -386,6 +386,29 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
 async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: string[]): Promise<void> {
   await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.REJECTED } });
   await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
+  // User directive 2026-09-11: a revalidation-stage rejection (slippage,
+  // price impact, liquidity collapse, sizing, sell-path checks — everything
+  // validateEntry/calculatePositionSize can reject on) was previously only
+  // ever logged, never persisted — the dashboard's "why was this rejected"
+  // had no queryable answer, only Railway logs. Confirmed live repeatedly
+  // tonight (CME, SEXFLY, TRACE) that this is the single most common
+  // follow-up question once a token's status shows REJECTED. Recorded the
+  // same way a BUY decision already is in openTrade below.
+  const strategy = await getActiveStrategyVersion();
+  await db.tradeDecisionSnapshot.create({
+    data: {
+      candidateId,
+      decision: TradeDecision.SKIP,
+      stage: "entry_revalidation",
+      strategyVersionId: strategy.id,
+      marketState: {},
+      projectState: {},
+      technicalState: {},
+      portfolioState: {},
+      deterministicRules: { reasons },
+      finalReasons: reasons,
+    },
+  });
   logger.info({ pendingEntryId: entry.id, candidateId, reasons }, "entry rejected at revalidation");
 }
 

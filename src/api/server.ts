@@ -166,7 +166,13 @@ export function buildServer() {
         tradeCandidates: {
           orderBy: { createdAt: "desc" },
           include: {
-            decisions: { where: { stage: "candidate_eligibility" }, orderBy: { createdAt: "desc" }, take: 1 },
+            // candidate_eligibility explains the "Trade eligibility" badge;
+            // entry_revalidation explains why a triggered pending entry
+            // ultimately didn't buy (slippage/liquidity/sizing/sell-path —
+            // see entryMonitor.ts's rejectEntry) — the single most common
+            // follow-up question once a candidate shows REJECTED. Both
+            // fetched here, the dashboard picks the one it needs per section.
+            decisions: { where: { stage: { in: ["candidate_eligibility", "entry_revalidation"] } }, orderBy: { createdAt: "desc" }, take: 5 },
             // The actual target-entry/exit-plan data for "what are we
             // planning to do with this token" — the dashboard shows this as
             // its own section regardless of whether a trade has opened yet.
