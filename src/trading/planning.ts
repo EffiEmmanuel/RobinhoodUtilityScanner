@@ -125,6 +125,26 @@ export async function planCandidate(candidateId: string): Promise<void> {
     clampedZone = { min: (currentMcap ?? 0) * 0.9, max: (currentMcap ?? 0) * 1.1, clamped: false };
   }
 
+  // User directive 2026-09-11, evidence: Stream's real price path on a
+  // WAIT_FOR_ENTRY plan with a $64,000-$66,000 zone was 66,307 -> 60,012 ->
+  // 57,554 -> 63,324 -> 68,687 -> 82,462 — DexScreener's own update cadence
+  // on a token moving this fast meant no sampled price ever landed inside
+  // that narrow 2K-wide window; it undershot well below the zone (a BETTER
+  // price than planned) and rocketed back up through it without a snapshot
+  // ever catching it, then breached doNotChaseAboveMcap before the entry was
+  // next checked — a real 2x missed entirely. The zone's lower bound
+  // rejected a price that was cheaper than intended, not one that was a bad
+  // entry; invalidationMcap (with its own tolerance, see
+  // INVALIDATION_TOLERANCE_PERCENT) is what should decide "too cheap to
+  // still be a good entry," not this separate, much narrower floor. Widen
+  // the floor down to the tolerance-adjusted invalidation level whenever
+  // that's lower than the AI's own proposed minimum, so undershooting the
+  // target on the way down is a better fill, not a miss.
+  if (analysis.technicalInvalidationMcap != null && clampedZone.min !== undefined) {
+    const invalidationFloor = analysis.technicalInvalidationMcap * (1 - tradingConfig.invalidationTolerancePercent / 100);
+    clampedZone = { ...clampedZone, min: Math.min(clampedZone.min, invalidationFloor) };
+  }
+
   const plan = await db.tradePlan.create({
     data: {
       candidateId: candidate.id,
