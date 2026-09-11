@@ -9,6 +9,7 @@ import {
   ExecutionStatus,
   LedgerEntryType,
   TradingMode,
+  TradePlanAction,
 } from "../generated/prisma";
 import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
@@ -83,6 +84,25 @@ export async function recoverStalledRevalidatingEntries(): Promise<void> {
 // can't jointly race past maxOpenPositions/available capital.
 const PENDING_ENTRY_BATCH_SIZE = 8;
 
+// User directive 2026-09-11, proactive follow-up to the batch-concurrency
+// fix above: raw FIFO throughput helps, but under real load the entries that
+// matter most (already-triggered-and-deferred, or BUY_NOW — meant to fire
+// close to immediately) shouldn't have to wait behind a pile of ordinary
+// WAIT_FOR_ENTRY rows just because those happen to be older. Pulling a wider
+// pool than the batch and sorting it by urgency (cheap — no extra network
+// call, just the plan's own action + whether it already triggered once)
+// means a time-sensitive entry gets picked first even when the backlog is
+// large, instead of only benefiting once the backlog has fully drained.
+// Bounded rather than unbounded so this stays a cheap, single indexed query
+// no matter how large the backlog ever grows.
+const CANDIDATE_POOL_SIZE = 40;
+
+function entryPriorityRank(entry: { triggeredAt: Date | null; tradePlan: { action: TradePlanAction } }): number {
+  if (entry.triggeredAt) return 0; // already in-zone once and deferred (e.g. circuit breaker) — most urgent to recheck
+  if (entry.tradePlan.action === TradePlanAction.BUY_NOW) return 1; // meant to fire close to immediately
+  return 2; // ordinary WAIT_FOR_ENTRY — FIFO within this bucket (Array.prototype.sort is stable)
+}
+
 export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 
 // Confirmed live 2026-09-11: a pending entry (SCHIFFY) got claimed
@@ -117,25 +137,34 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Claims and evaluates up to PENDING_ENTRY_BATCH_SIZE of the oldest ACTIVE
- * pending entries concurrently — see the comment on that constant. A
- * freshly-replanned entry is a brand-new row (createdAt = now), so it sorts
- * to the back of the queue and won't be re-picked until everything older
- * than it has had its turn — the old single-item "replanned -> cooldown"
- * throttle is no longer needed for that reason, FIFO ordering does it
- * naturally as long as there's a real backlog (the whole point of this
- * change). One item's timeout/error is isolated via allSettled and can't
- * block the rest of the batch.
+ * Claims and evaluates up to PENDING_ENTRY_BATCH_SIZE of the highest-priority
+ * ACTIVE pending entries concurrently — see the comments on that constant,
+ * CANDIDATE_POOL_SIZE, and entryPriorityRank above. A freshly-replanned entry
+ * is a brand-new row (createdAt = now) with no triggeredAt yet, so within its
+ * priority bucket it still sorts to the back and won't be re-picked until
+ * everything ahead of it has had a turn — the old single-item "replanned ->
+ * cooldown" throttle is no longer needed for that reason. One item's
+ * timeout/error is isolated via allSettled and can't block the rest of the
+ * batch.
  */
 export async function processPendingEntries(): Promise<PendingEntryTickResult> {
-  const candidates = await db.pendingEntry.findMany({
+  const pool = await db.pendingEntry.findMany({
     where: { status: PendingEntryStatus.ACTIVE },
     orderBy: { createdAt: "asc" },
-    take: PENDING_ENTRY_BATCH_SIZE,
+    take: CANDIDATE_POOL_SIZE,
+    include: { tradePlan: { select: { action: true } } },
   });
-  if (candidates.length === 0) return "idle";
+  if (pool.length === 0) return "idle";
+  if (pool.length === CANDIDATE_POOL_SIZE) {
+    logger.warn({ poolSize: CANDIDATE_POOL_SIZE }, "pending-entry queue backlog at or above the priority-sort pool size — throughput may still be falling behind candidate generation");
+  }
 
-  const results = await Promise.allSettled(candidates.map((candidate) => processOnePendingEntry(candidate)));
+  const batch = pool
+    .slice()
+    .sort((a, b) => entryPriorityRank(a) - entryPriorityRank(b))
+    .slice(0, PENDING_ENTRY_BATCH_SIZE);
+
+  const results = await Promise.allSettled(batch.map((candidate) => processOnePendingEntry(candidate)));
   const anyReplanned = results.some((r) => r.status === "fulfilled" && r.value === "replanned");
   return anyReplanned ? "replanned" : "checked";
 }
