@@ -15,6 +15,26 @@ import { tradingConfig } from "./config";
 import { shouldRunStrategyReview, runPositionStrategyReview, applyReentryTarget, checkAndExecutePendingReentry } from "./positionStrategy";
 import type { PositionStrategyDecision } from "../ai/schemas";
 
+// When an exit first started being refused by the slippage guard, per trade —
+// drives tradingConfig.stuckExitEscalateAfterMinutes. In memory on purpose:
+// the only thing lost on a restart is the elapsed clock, which restarts
+// rather than escalating something prematurely, and a position that's
+// genuinely unsellable will re-accumulate the time within minutes anyway.
+const exitBlockedSince = new Map<string, number>();
+
+function markExitBlocked(tradeId: string): void {
+  if (!exitBlockedSince.has(tradeId)) exitBlockedSince.set(tradeId, Date.now());
+}
+
+function clearExitBlocked(tradeId: string): void {
+  exitBlockedSince.delete(tradeId);
+}
+
+function blockedExitAgeMinutes(tradeId: string): number {
+  const since = exitBlockedSince.get(tradeId);
+  return since === undefined ? 0 : (Date.now() - since) / 60_000;
+}
+
 interface ExitDecision {
   type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
@@ -351,11 +371,28 @@ async function executeSell(
   // A pre-trade estimate only, to gate on slippage before ever executing —
   // mirrors the same estimate-then-execute split used for buys (§17).
   const preEstimate = await getSellEstimate(tokenAddress, sellTokens, pair);
-  const exitCheck = validateExit({ isEmergency: decision.isEmergency, estimatedSlippageBps: preEstimate.estimatedSlippageBps });
+  const stuckForMinutes = blockedExitAgeMinutes(trade.id);
+  const escalate =
+    tradingConfig.stuckExitEscalateAfterMinutes > 0 && stuckForMinutes >= tradingConfig.stuckExitEscalateAfterMinutes;
+  const exitCheck = validateExit({
+    isEmergency: decision.isEmergency || escalate,
+    estimatedSlippageBps: preEstimate.estimatedSlippageBps,
+  });
   if (!exitCheck.approved) {
-    logger.warn({ tradeId: trade.id, reasons: exitCheck.reasons }, "exit rejected by slippage guard — will retry next tick");
+    markExitBlocked(trade.id);
+    logger.warn(
+      { tradeId: trade.id, reasons: exitCheck.reasons, blockedForMinutes: Math.round(stuckForMinutes) },
+      "exit rejected by slippage guard — will retry next tick"
+    );
     return;
   }
+  if (escalate && !decision.isEmergency) {
+    logger.warn(
+      { tradeId: trade.id, blockedForMinutes: Math.round(stuckForMinutes), estimatedSlippageBps: preEstimate.estimatedSlippageBps },
+      "exit has been blocked by the slippage guard too long — escalating to an emergency exit rather than leaving the position unsellable"
+    );
+  }
+  clearExitBlocked(trade.id);
 
   let fill: FillResult;
   try {

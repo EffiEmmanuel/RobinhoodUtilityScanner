@@ -158,7 +158,10 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   const token = tokenAddress as `0x${string}`;
   const decimals = await getTokenDecimals(client, token);
   const tokenAmountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
-  const quote = await getLiveQuote(token, false, tokenAmountRaw);
+  // Must quote the SAME venue the real sell will use (exits may route through
+  // a predatory-fee pool when it's the only one) — otherwise the slippage
+  // guard is judging a pool we'd never actually trade through.
+  const quote = await getLiveQuote(token, false, tokenAmountRaw, { allowHighFeePools: true });
   if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100 };
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
@@ -268,6 +271,9 @@ export async function isSellable(tokenAddress: string, pair: MarketPair | undefi
       amountToSimulate = 1n; // decimals lookup failed — fall back to the dust check rather than skip it
     }
   }
-  const quote = await getLiveQuote(tokenAddress as `0x${string}`, false, amountToSimulate);
+  // Same venue the real exit would use — a token whose only pool is
+  // high-fee is still sellable, just expensively, and calling it "no sell
+  // path" here would feed validateEntry's honeypot rejection a false signal.
+  const quote = await getLiveQuote(tokenAddress as `0x${string}`, false, amountToSimulate, { allowHighFeePools: true });
   return quote !== undefined;
 }

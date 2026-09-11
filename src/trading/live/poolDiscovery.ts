@@ -72,7 +72,25 @@ const LOG_SCAN_MAX_CHUNKS = 30; // ~12M blocks, ~14 days at 100ms/block
  * that will spend real ETH is exactly the kind of shortcut that's not worth
  * the risk.
  */
-export async function discoverPool(client: PublicClient, tokenAddress: `0x${string}`): Promise<DiscoveredPool | undefined> {
+export interface DiscoverPoolOptions {
+  /**
+   * Let a pool past MAX_REASONABLE_POOL_FEE be used anyway. Confirmed live
+   * 2026-09-11: OPAI's only real venue was an 18%-fee pool behind a custom
+   * hook, so refusing it stranded a position sitting at +322% — every exit
+   * attempt was rejected and retried forever while the gain stayed
+   * unbankable. Refusing to BUY into a fee trap is right; refusing to SELL
+   * out of one is not, because by then the fee is a sunk cost and 18% is
+   * strictly better than never exiting at all. Exits pass true; entries
+   * never do.
+   */
+  allowHighFeePools?: boolean;
+}
+
+export async function discoverPool(
+  client: PublicClient,
+  tokenAddress: `0x${string}`,
+  options: DiscoverPoolOptions = {}
+): Promise<DiscoveredPool | undefined> {
   const token = getAddress(tokenAddress);
   let logScanFailed = false;
 
@@ -92,7 +110,7 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
         },
         poolId: log.args.id as `0x${string}`,
       }));
-      const withLiquidity = await pickPoolWithLiquidity(client, candidates);
+      const withLiquidity = await pickPoolWithLiquidity(client, candidates, options);
       if (withLiquidity) return withLiquidity;
     }
   } catch (err) {
@@ -111,7 +129,7 @@ export async function discoverPool(client: PublicClient, tokenAddress: `0x${stri
     };
     return { poolKey, poolId: computePoolId(poolKey) };
   });
-  const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates);
+  const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates, options);
   if (fallbackResult) return fallbackResult;
 
   // Confirmed live 2026-09-11: the event-log scan above is the ONLY mechanism
@@ -184,17 +202,27 @@ async function scanInitializeLogsBackward(client: PublicClient, token: `0x${stri
  * genuinely errored — never let an infra failure masquerade as a clean
  * on-chain negative.
  */
-async function pickPoolWithLiquidity(client: PublicClient, candidates: PoolCandidate[]): Promise<DiscoveredPool | undefined> {
+async function pickPoolWithLiquidity(
+  client: PublicClient,
+  candidates: PoolCandidate[],
+  options: DiscoverPoolOptions = {}
+): Promise<DiscoveredPool | undefined> {
   let best: { candidate: PoolCandidate; liquidity: bigint } | undefined;
   const errors: unknown[] = [];
 
   for (const candidate of candidates) {
     if (candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
+      if (!options.allowHighFeePools) {
+        logger.warn(
+          { poolId: candidate.poolId, feeBps: candidate.poolKey.fee / 100 },
+          "skipping pool with predatory LP fee (>5%) — refusing to trade through it regardless of liquidity"
+        );
+        continue;
+      }
       logger.warn(
         { poolId: candidate.poolId, feeBps: candidate.poolKey.fee / 100 },
-        "skipping pool with predatory LP fee (>5%) — refusing to trade through it regardless of liquidity"
+        "using a predatory-fee pool because this is an EXIT — the fee is sunk by now and paying it beats being unable to sell at all"
       );
-      continue;
     }
     try {
       const [slot0, liquidity] = await Promise.all([

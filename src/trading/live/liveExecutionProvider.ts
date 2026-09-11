@@ -57,9 +57,14 @@ export interface LiveQuote {
 }
 
 /** Real on-chain quote via V4Quoter — `eth_call`-simulated, never a state change. */
-export async function getLiveQuote(tokenAddress: `0x${string}`, isBuy: boolean, amountIn: bigint): Promise<LiveQuote | undefined> {
+export async function getLiveQuote(
+  tokenAddress: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  options: { allowHighFeePools?: boolean } = {}
+): Promise<LiveQuote | undefined> {
   const client = getPublicClient();
-  const pool = await discoverPool(client, tokenAddress);
+  const pool = await discoverPool(client, tokenAddress, options);
   if (!pool) {
     logger.warn({ tokenAddress }, "no live V4 pool found for this token — cannot quote");
     return undefined;
@@ -129,7 +134,9 @@ export async function executeLiveBuy(tokenAddress: `0x${string}`, amountInWei: b
 /** Sell: pay with the token via Permit2 (approvals topped up only if actually insufficient). */
 export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: bigint, maxSlippageBps: number): Promise<LiveSwapResult> {
   if (!isWalletConfigured()) throw new Error("BOT_WALLET_PRIVATE_KEY is not set — cannot execute a live sell");
-  const quote = await getLiveQuote(tokenAddress, false, tokenAmount);
+  // Exits may route through a predatory-fee pool when it's the only
+  // venue — see DiscoverPoolOptions.allowHighFeePools. Entries never do.
+  const quote = await getLiveQuote(tokenAddress, false, tokenAmount, { allowHighFeePools: true });
   if (!quote) throw new Error(`no live quote available for ${tokenAddress}`);
 
   const approvalTxHashes = await ensureSellApprovals(tokenAddress, tokenAmount);

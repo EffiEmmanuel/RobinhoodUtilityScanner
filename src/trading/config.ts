@@ -217,6 +217,16 @@ export const tradingConfig = {
   defaultMaxSellSlippageBps: num("DEFAULT_MAX_SELL_SLIPPAGE_BPS", 500),
   emergencyMaxSellSlippageBps: num("EMERGENCY_MAX_SELL_SLIPPAGE_BPS", 1000),
   maxBuyPriceImpactPercent: num("MAX_BUY_PRICE_IMPACT_PERCENT", 3),
+  // Confirmed live 2026-09-11: OPAI sat at +322% unrealized while every exit
+  // was rejected by the slippage guard and retried every few seconds,
+  // indefinitely — its only venue was an 18%-fee pool, so the estimate could
+  // never come in under defaultMaxSellSlippageBps no matter how long we
+  // waited. A guard that can never be satisfied isn't protecting the
+  // position, it's trapping it. After this long continuously blocked, the
+  // exit is retried as an emergency one (validateExit already lets an
+  // emergency through "to avoid an orphaned position"), on the reasoning
+  // that a bad fill beats an unsellable bag. 0 disables escalation.
+  stuckExitEscalateAfterMinutes: num("STUCK_EXIT_ESCALATE_AFTER_MINUTES", 5),
 
   // Small-account gas-ratio check (§23) — Robinhood Chain is a cheap L2, so
   // this is a small flat simulated cost, not a real gas oracle call.
