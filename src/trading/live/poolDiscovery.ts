@@ -86,12 +86,52 @@ export interface DiscoverPoolOptions {
   allowHighFeePools?: boolean;
 }
 
+// A token's pool key (currency0/1/fee/tickSpacing/hooks) and poolId never
+// change once found — only its liquidity does — so the expensive part of
+// discovery (scanning up to 12M blocks of Initialize events, or probing 4
+// standard fee tiers) only ever needs to happen once per token per process.
+// Confirmed live 2026-09-11: every buy/sell/isSellable call independently
+// re-ran full discovery, each costing several RPC round-trips before a single
+// price could even be read — the dominant cost in both execution latency and
+// RPC load, worse than the position-monitor tick interval itself for a token
+// held across many ticks. Keyed on tokenAddress+allowHighFeePools since an
+// entry (never allows a high-fee pool) and an exit (does) can legitimately
+// resolve to different pools for the same token. Never invalidated: a v4
+// pool's key is immutable once initialized, and a process restart naturally
+// clears this (in-memory only, nothing persisted).
+const poolKeyCache = new Map<string, PoolCandidate>();
+
+function cacheKey(token: `0x${string}`, allowHighFeePools: boolean): string {
+  return `${token.toLowerCase()}:${allowHighFeePools}`;
+}
+
 export async function discoverPool(
   client: PublicClient,
   tokenAddress: `0x${string}`,
   options: DiscoverPoolOptions = {}
 ): Promise<DiscoveredPool | undefined> {
   const token = getAddress(tokenAddress);
+  const cached = poolKeyCache.get(cacheKey(token, options.allowHighFeePools ?? false));
+  if (cached) {
+    // Liquidity is never cached — always re-read fresh (this is usually why
+    // discoverPool is being called at all: to price against current depth).
+    // A cache-hit skips the log scan and fee-tier probe only.
+    try {
+      const liquidity = await client.readContract({
+        address: UNISWAP_V4_ADDRESSES.stateView as `0x${string}`,
+        abi: STATE_VIEW_ABI,
+        functionName: "getLiquidity",
+        args: [cached.poolId],
+      });
+      return { ...cached, liquidity };
+    } catch (err) {
+      logger.warn({ token, err: String(err) }, "cached pool's liquidity read failed — falling back to full discovery this once");
+      // Falls through to full discovery below rather than returning stale/no
+      // liquidity — an infra hiccup here shouldn't evict a good cache entry
+      // (nothing removes it), just skip using it for this one call.
+    }
+  }
+
   let logScanFailed = false;
 
   try {
@@ -111,7 +151,10 @@ export async function discoverPool(
         poolId: log.args.id as `0x${string}`,
       }));
       const withLiquidity = await pickPoolWithLiquidity(client, candidates, options);
-      if (withLiquidity) return withLiquidity;
+      if (withLiquidity) {
+        poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), { poolKey: withLiquidity.poolKey, poolId: withLiquidity.poolId });
+        return withLiquidity;
+      }
     }
   } catch (err) {
     logScanFailed = true;
@@ -130,7 +173,10 @@ export async function discoverPool(
     return { poolKey, poolId: computePoolId(poolKey) };
   });
   const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates, options);
-  if (fallbackResult) return fallbackResult;
+  if (fallbackResult) {
+    poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), { poolKey: fallbackResult.poolKey, poolId: fallbackResult.poolId });
+    return fallbackResult;
+  }
 
   // Confirmed live 2026-09-11: the event-log scan above is the ONLY mechanism
   // that can ever find a pool behind a custom hook or nonstandard fee tier
