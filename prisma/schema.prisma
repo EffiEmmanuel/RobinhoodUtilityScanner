@@ -717,6 +717,23 @@ model LedgerEntry {
   @@index([occurredAt])
 }
 
+// User directive 2026-09-12: a manual "start the loss breakers fresh from
+// right now" trigger — portfolio.ts's checkCircuitBreakers uses the most
+// recent row here (if any, and if later than today's own midnight boundary)
+// as the floor for both the daily-realized-loss and consecutive-loss
+// windows, instead of always waiting for the next real day boundary. Needed
+// three times in one night already: a stale prior-day streak, a deposit
+// that should start a clean day, and a real same-day streak the user chose
+// to override. Append-only — a reset never deletes trade/ledger history,
+// it only moves what the breakers are willing to COUNT from that point on.
+model CircuitBreakerReset {
+  id      String   @id @default(cuid())
+  resetAt DateTime @default(now())
+  reason  String?
+
+  @@index([resetAt])
+}
+
 model PortfolioMilestone {
   id String @id @default(cuid())
 

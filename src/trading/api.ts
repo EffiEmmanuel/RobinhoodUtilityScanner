@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { db } from "../db";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
-import { getPortfolioState, checkCircuitBreakers } from "./portfolio";
+import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters } from "./portfolio";
 import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
@@ -45,6 +45,19 @@ export function registerTradingRoutes(app: FastifyInstance): void {
   app.post("/trading/resume", async () => {
     setTradingEnabled(true);
     return { tradingEnabled: true };
+  });
+
+  // User directive 2026-09-12: a manual "start the loss breakers fresh from
+  // right now" trigger — the daily-loss and consecutive-loss checks stop
+  // counting anything before this call. Real trade/ledger history is
+  // untouched; this only moves what those two breakers are willing to count
+  // from (see portfolio.ts's CircuitBreakerReset). The other breakers (kill
+  // switch, gas, max open positions) are unaffected — this can't be used to
+  // bypass those.
+  app.post("/trading/reset-circuit-breaker", async (req) => {
+    const { reason } = (req.body as { reason?: string } | undefined) ?? {};
+    await resetCircuitBreakerCounters(reason);
+    return checkCircuitBreakers();
   });
 
   app.get("/trade-candidates", async (req) => {

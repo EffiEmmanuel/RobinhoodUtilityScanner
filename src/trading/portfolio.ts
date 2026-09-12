@@ -280,8 +280,18 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
+  // User directive 2026-09-12, needed three times in one night: a manual
+  // "count losses from right now, not from midnight" override — POST
+  // /trading/reset-circuit-breaker records one of these. Only ever moves the
+  // floor FORWARD (a stale reset from a past day is ignored, so this can't
+  // accidentally un-scope a boundary that's already correct) and never
+  // touches the underlying trade/ledger history, only what these two
+  // breakers are willing to count from that point on.
+  const lastReset = await db.circuitBreakerReset.findFirst({ orderBy: { resetAt: "desc" } });
+  const countingSince = lastReset && lastReset.resetAt > startOfDay ? lastReset.resetAt : startOfDay;
+
   const todaysPnl = await db.ledgerEntry.findMany({
-    where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: startOfDay } },
+    where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: countingSince } },
   });
   const todaysRealizedPnl = todaysPnl.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
   const dailyRealizedLossPercent =
@@ -298,7 +308,7 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   // conservative mode's own, higher consecutive-loss hard stop can see the
   // whole streak — both still bounded to today.
   const recentClosed = await db.trade.findMany({
-    where: { status: TradeStatus.CLOSED, closedAt: { gte: startOfDay } },
+    where: { status: TradeStatus.CLOSED, closedAt: { gte: countingSince } },
     orderBy: { closedAt: "desc" },
     take: Math.max(tradingConfig.maxConsecutiveLosses, tradingConfig.conservativeHardStopConsecutiveLosses),
     select: { realizedPnlUsd: true },
@@ -308,6 +318,17 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
 
   const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
   return { paused: mode === "PAUSED", mode, reasons };
+}
+
+/**
+ * Manual override: the daily-loss and consecutive-loss breakers stop
+ * counting anything before now. See checkCircuitBreakers' countingSince and
+ * the CircuitBreakerReset model's doc comment for why this exists — a plain
+ * API trigger (POST /trading/reset-circuit-breaker), not automatic.
+ */
+export async function resetCircuitBreakerCounters(reason?: string): Promise<void> {
+  await db.circuitBreakerReset.create({ data: { reason } });
+  logger.info({ reason }, "circuit-breaker loss counters manually reset — counting from now");
 }
 
 export async function recordLedgerEntry(input: {
