@@ -193,7 +193,10 @@ export async function planCandidate(candidateId: string): Promise<void> {
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.WAITING } });
     if (isFirstPlan) {
-      await sendTradePlanEmail({
+      // Fire-and-forget, not awaited — see the matching note in
+      // entryMonitor.ts's openTrade: a slow SMTP send must never be able to
+      // hold up the planning loop moving on to the next candidate.
+      void sendTradePlanEmail({
         token: candidate.token,
         action,
         currentMcap,

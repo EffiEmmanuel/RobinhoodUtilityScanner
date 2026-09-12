@@ -516,7 +516,10 @@ async function executeSell(
     await closeTrade(trade, decision.reason);
   } else {
     await db.trade.update({ where: { id: trade.id }, data: { status: TradeStatus.PARTIALLY_EXITED } });
-    await sendPartialProfitEmail({ tradeId: trade.id, tokenId: trade.tokenId, multiple: 1 + (trade.mfePercent ?? 0) / 100, sellPercent: decision.sellPercentOfRemaining, mode: trade.mode }).catch(
+    // Fire-and-forget, not awaited — see the matching note in
+    // entryMonitor.ts's openTrade: a slow SMTP send must never be able to
+    // hold up the position-monitor tick.
+    void sendPartialProfitEmail({ tradeId: trade.id, tokenId: trade.tokenId, multiple: 1 + (trade.mfePercent ?? 0) / 100, sellPercent: decision.sellPercentOfRemaining, mode: trade.mode }).catch(
       (err) => logger.error({ tradeId: trade.id, err: String(err) }, "failed to send partial profit email")
     );
     logger.info({ tradeId: trade.id, decision: decision.type, sellTokens, provider: fill.provider }, "partial exit executed");
@@ -537,8 +540,11 @@ async function closeTrade(trade: Trade, exitReason: string): Promise<void> {
 
   logger.info({ tradeId: trade.id, realizedPnlUsd, realizedMultiple, exitReason }, "trade closed");
 
+  // Fire-and-forget, not awaited — see the matching note in
+  // entryMonitor.ts's openTrade: a slow SMTP send must never be able to hold
+  // up the position-monitor tick.
   const token = await db.token.findUnique({ where: { id: trade.tokenId } });
-  await sendTradeClosedEmail({ token, trade: updated }).catch((err) => logger.error({ tradeId: trade.id, err: String(err) }, "failed to send closed-trade email"));
+  void sendTradeClosedEmail({ token, trade: updated }).catch((err) => logger.error({ tradeId: trade.id, err: String(err) }, "failed to send closed-trade email"));
   await generatePostmortem(updated.id).catch((err) => logger.error({ tradeId: trade.id, err: String(err) }, "postmortem generation failed"));
   await checkPortfolioMilestones().catch((err) => logger.error({ err: String(err) }, "milestone check failed"));
 }

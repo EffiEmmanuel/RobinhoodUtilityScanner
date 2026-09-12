@@ -186,7 +186,29 @@ async function processOnePendingEntry(candidate: PendingEntry): Promise<"replann
     return replanned ? "replanned" : "checked";
   } catch (err) {
     logger.error({ pendingEntryId: candidate.id, err: String(err) }, "pending entry evaluation failed");
-    await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
+    // Confirmed live 2026-09-12: this used to reset straight to ACTIVE, with
+    // no way to know whether the timed-out evaluation had already bought
+    // before it timed out (that run keeps executing in the background —
+    // withTimeout races it, it doesn't cancel it). A hung trade-entry email
+    // outran the 90s timeout on CraftPad's BUY_NOW plan; openTrade() had
+    // already spent real money and was still finishing up when this handler
+    // put the pending entry back to ACTIVE, and the very next 5s tick bought
+    // it again on the same already-crashing token. Fire-and-forget emails
+    // fix the immediate cause, but this checks for the trade directly too,
+    // so any OTHER slow step that someday outruns the timeout can't repeat
+    // it: if a Trade already exists for this plan, the buy went through —
+    // mark the entry APPROVED (what its own success path would have set)
+    // instead of reopening it to a second buy.
+    const alreadyBought = await db.trade.findFirst({ where: { tradePlanId: candidate.tradePlanId }, select: { id: true } });
+    if (alreadyBought) {
+      logger.warn(
+        { pendingEntryId: candidate.id, tradeId: alreadyBought.id },
+        "the timed-out evaluation had already opened a trade before it timed out — marking approved instead of reactivating, to avoid buying it again"
+      );
+      await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.APPROVED } });
+    } else {
+      await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
+    }
     return "checked";
   }
 }
@@ -614,8 +636,18 @@ async function openTrade(input: {
     },
   });
 
+  // Confirmed live 2026-09-12: CraftPad bought TWICE within 2 minutes, on the
+  // same candidate/plan, for -$5.24 combined. Root cause: this was `await`ed
+  // before "trade opened" logged and this function returned — when Gmail SMTP
+  // hung for ~2 minutes on "Connection timeout", the whole evaluation outran
+  // PENDING_ENTRY_EVALUATION_TIMEOUT_MS (90s), whose recovery path has no way
+  // to know a real buy already went through and reset the pending entry back
+  // to ACTIVE — which the next 5s tick then re-triggered into a second buy on
+  // the same, already-crashing token. A confirmation email must never be able
+  // to hold up the function that just spent real money, so this — like every
+  // other trading-loop notification — is now fire-and-forget.
   const token = await db.token.findUnique({ where: { id: input.tokenId } });
-  await sendTradeEntryEmail({ token, trade, quote: fill }).catch((err) =>
+  void sendTradeEntryEmail({ token, trade, quote: fill }).catch((err) =>
     logger.error({ tradeId: trade.id, err: String(err) }, "failed to send trade entry email")
   );
 
