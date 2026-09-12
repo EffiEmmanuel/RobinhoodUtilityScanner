@@ -258,10 +258,18 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   const dailyRealizedLossPercent =
     todaysRealizedPnl < 0 && state.totalEquityUsd > 0 ? (Math.abs(todaysRealizedPnl) / state.totalEquityUsd) * 100 : 0;
 
-  // Reads past the normal limit so conservative mode's own, higher
-  // consecutive-loss hard stop can see the whole streak.
+  // User directive 2026-09-12: scoped to today, the same day boundary as the
+  // daily-loss-percent breaker just above — previously this had NO day
+  // boundary at all, so a losing streak persisted across days with nothing
+  // to clear it but a new win. Confirmed live: 3 losses on 2026-09-11 left
+  // this permanently tripped into 2026-09-12 with 0 open positions — no
+  // trade could ever close to produce that win while entries stayed paused,
+  // a genuine deadlock. A fresh day now means a fresh streak, exactly like
+  // the daily-loss check already works. Reads past the normal limit so
+  // conservative mode's own, higher consecutive-loss hard stop can see the
+  // whole streak — both still bounded to today.
   const recentClosed = await db.trade.findMany({
-    where: { status: TradeStatus.CLOSED },
+    where: { status: TradeStatus.CLOSED, closedAt: { gte: startOfDay } },
     orderBy: { closedAt: "desc" },
     take: Math.max(tradingConfig.maxConsecutiveLosses, tradingConfig.conservativeHardStopConsecutiveLosses),
     select: { realizedPnlUsd: true },
