@@ -421,7 +421,35 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    const quote = await getBuyEstimate(candidate.token.address, sizing.positionSizeUsd, pair);
+    // Shrink to fit the pool's real on-chain depth instead of rejecting
+    // outright (user directive 2026-09-12, after SIDEBET ran ~2x while we
+    // chased it, finally triggered, then got REJECTED forever purely because
+    // the size calculatePositionSize picked from quality/confidence/equity%
+    // was too big for this specific pool — CME/SEXFLY/TRACE lost the same
+    // way before it). The pool being thin relative to OUR size isn't a
+    // reason to walk away from a confirmed real move; it's a reason to buy
+    // less of it. Floor matches calculatePositionSize's own gas-viability
+    // floor — never sized below what's worth paying gas for.
+    let positionSizeUsd = sizing.positionSizeUsd;
+    let quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
+    const sizeFloorUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
+    let resized = false;
+    while (
+      (quote.estimatedSlippageBps > tradingConfig.defaultMaxBuySlippageBps ||
+        quote.estimatedPriceImpactPercent > tradingConfig.maxBuyPriceImpactPercent) &&
+      positionSizeUsd > sizeFloorUsd
+    ) {
+      positionSizeUsd = Math.max(positionSizeUsd / 2, sizeFloorUsd);
+      quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
+      resized = true;
+    }
+    if (resized) {
+      logger.info(
+        { pendingEntryId: entry.id, candidateId: candidate.id, from: sizing.positionSizeUsd, to: positionSizeUsd, estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent },
+        "position size shrunk to fit real on-chain liquidity depth"
+      );
+    }
+
     const entryResult = validateEntry({
       circuitBreakersPaused: circuitBreakers.paused,
       circuitBreakerReasons: circuitBreakers.reasons,
@@ -434,7 +462,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       priceChange5mPercent: pair.priceChange5m,
       estimatedSlippageBps: quote.estimatedSlippageBps,
       estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
-      positionSizeUsd: sizing.positionSizeUsd,
+      positionSizeUsd,
       availableToDeployUsd: portfolio.availableToDeployUsd,
     });
 
@@ -455,7 +483,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // 2026-09-12).
     const maxQuoteDiscountPercent = conservative ? tradingConfig.conservativeMaxQuoteDiscountPercent : tradingConfig.normalMaxQuoteDiscountPercent;
     const agreement = evaluateQuoteAgreement(
-      { spotPriceUsd: pair.priceUsd, positionSizeUsd: sizing.positionSizeUsd, quotedTokenAmount: quote.tokenAmount },
+      { spotPriceUsd: pair.priceUsd, positionSizeUsd, quotedTokenAmount: quote.tokenAmount },
       maxQuoteDiscountPercent
     );
     if (!agreement.passed) {
@@ -470,7 +498,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       strategyVersionId: plan.strategyVersionId,
       tokenId: candidate.tokenId,
       tokenAddress: candidate.token.address,
-      positionSizeUsd: sizing.positionSizeUsd,
+      positionSizeUsd,
       plannedEntryMcap: plan.currentMarketCap ?? undefined,
       actualEntryMcap: mcap,
       pair,
