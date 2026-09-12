@@ -313,6 +313,12 @@ export interface PositionRiskInput {
   maxLossPercent: number;
   catastrophicLossPercent: number;
   buySellRatio5m: number | undefined;
+  // Total 5m buys+sells — gates the extreme-sell-pressure check below.
+  // Confirmed live 2026-09-11: PERPSHOOD was sold on "extreme sell pressure
+  // (buy ratio 0%)" from a 5-minute window with 0 buys AND 0 sells — the
+  // ratio's own divide-by-zero guard (buys / max(total, 1)) reads a totally
+  // silent window as 100% sellers. It went on to reach 1.68x.
+  totalTxns5m: number | undefined;
   sellQuoteAvailable: boolean;
 }
 
@@ -337,8 +343,12 @@ export function validatePosition(input: PositionRiskInput): PositionRiskResult {
   if (input.unrealizedPnlPercent <= -input.maxLossPercent) {
     reasons.push(`loss ${input.unrealizedPnlPercent.toFixed(1)}% reached max tolerated loss`);
   }
-  if (input.buySellRatio5m !== undefined && input.buySellRatio5m < 0.2) {
-    reasons.push(`extreme sell pressure (buy ratio ${(input.buySellRatio5m * 100).toFixed(0)}%)`);
+  if (
+    input.buySellRatio5m !== undefined &&
+    input.buySellRatio5m < 0.2 &&
+    (input.totalTxns5m ?? 0) >= tradingConfig.minTxns5mForSellPressureExit
+  ) {
+    reasons.push(`extreme sell pressure (buy ratio ${(input.buySellRatio5m * 100).toFixed(0)}%, ${input.totalTxns5m} txns/5m)`);
   }
 
   if (reasons.length > 0) {

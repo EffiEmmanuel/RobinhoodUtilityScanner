@@ -282,6 +282,7 @@ describe("validatePosition", () => {
     maxLossPercent: 25,
     catastrophicLossPercent: 40,
     buySellRatio5m: 0.6,
+    totalTxns5m: 10,
     sellQuoteAvailable: true,
   };
 
@@ -299,6 +300,27 @@ describe("validatePosition", () => {
 
   it("does not trigger below all thresholds", () => {
     expect(validatePosition(base).riskExitTriggered).toBe(false);
+  });
+
+  it("does not trigger extreme sell pressure on a near-empty 5-minute window", () => {
+    // PERPSHOOD, 2026-09-11: sold on "extreme sell pressure (buy ratio 0%)"
+    // from a 5-minute window with 0 buys AND 0 sells — the ratio's own
+    // divide-by-zero guard read total silence as 100% sellers. It went on to
+    // reach 1.68x.
+    const result = validatePosition({ ...base, buySellRatio5m: 0, totalTxns5m: 0 });
+    expect(result.riskExitTriggered).toBe(false);
+  });
+
+  it("still triggers extreme sell pressure once there's real volume behind the ratio", () => {
+    const result = validatePosition({ ...base, buySellRatio5m: 0.1, totalTxns5m: 20 });
+    expect(result.riskExitTriggered).toBe(true);
+    expect(result.severity).toBe("WARNING");
+    expect(result.reasons[0]).toMatch(/extreme sell pressure/);
+  });
+
+  it("does not trigger extreme sell pressure just below the txn-count floor", () => {
+    const result = validatePosition({ ...base, buySellRatio5m: 0, totalTxns5m: 4 });
+    expect(result.riskExitTriggered).toBe(false);
   });
 });
 

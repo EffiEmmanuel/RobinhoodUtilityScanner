@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   resolveEntryMode,
   estimateTokenAgeMinutes,
+  evaluateChaseGuard,
   evaluateHighConvictionSetup,
   evaluateQuoteAgreement,
+  hasPriceStabilized,
   type HighConvictionInput,
 } from "./conservativeMode";
 import { tradingConfig } from "./config";
@@ -170,18 +172,78 @@ describe("evaluateHighConvictionSetup", () => {
 });
 
 describe("evaluateQuoteAgreement", () => {
+  const CONSERVATIVE = tradingConfig.conservativeMaxQuoteDiscountPercent; // 10
+  const NORMAL = tradingConfig.normalMaxQuoteDiscountPercent; // 30
+
   it("passes when the on-chain quote costs about what DexScreener shows (fees push it slightly higher)", () => {
-    expect(evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 4_900 }).passed).toBe(true);
+    expect(evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 4_900 }, CONSERVATIVE).passed).toBe(true);
   });
 
   it("blocks when the chain is far cheaper than DexScreener's price — stale data on a collapsing token", () => {
     // moltfly, 2026-09-11: filled 39% below the displayed price, then collapsed.
-    const result = evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 5 / (0.001 * 0.61) });
+    const result = evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 5 / (0.001 * 0.61) }, CONSERVATIVE);
     expect(result.passed).toBe(false);
     expect(result.failedChecks).toEqual(["quoteAgreement"]);
   });
 
   it("blocks when there is no usable quote", () => {
-    expect(evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 0 }).passed).toBe(false);
+    expect(evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 0 }, CONSERVATIVE).passed).toBe(false);
+  });
+
+  it("normal mode's looser cutoff lets a real dip like TUMBLE's through, where conservative mode would block it", () => {
+    // TUMBLE, 2026-09-11: filled 25% below the displayed price during a
+    // genuine dip and went on to be the day's best trade (+$4.87).
+    const input = { spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 5 / (0.001 * 0.75) };
+    expect(evaluateQuoteAgreement(input, NORMAL).passed).toBe(true);
+    expect(evaluateQuoteAgreement(input, CONSERVATIVE).passed).toBe(false);
+  });
+
+  it("normal mode still blocks a genuinely stale/collapsing quote", () => {
+    // Sheared, 2026-09-11: filled 82% below the displayed price.
+    const result = evaluateQuoteAgreement({ spotPriceUsd: 0.001, positionSizeUsd: 5, quotedTokenAmount: 5 / (0.001 * 0.18) }, NORMAL);
+    expect(result.passed).toBe(false);
+  });
+});
+
+describe("evaluateChaseGuard", () => {
+  const opts = { windowMinutes: 10, minSnapshots: 3, maxRunUpPercent: 30 };
+
+  it("passes a modest run-up", () => {
+    const result = evaluateChaseGuard({ snapshotCount: 10, runUpPercent: 8, drawdownPercent: 0 }, opts);
+    expect(result.passed).toBe(true);
+  });
+
+  it("blocks chasing a token that's already run up hard (BLACKHOLE: +46% in 3 minutes)", () => {
+    const result = evaluateChaseGuard({ snapshotCount: 14, runUpPercent: 46, drawdownPercent: 0 }, opts);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toEqual(["recentRunUp"]);
+  });
+
+  it("holds back until there's enough of our own price history to judge a run-up", () => {
+    const result = evaluateChaseGuard({ snapshotCount: 1, runUpPercent: 0, drawdownPercent: 0 }, opts);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toEqual(["recentHistory"]);
+  });
+
+  it("holds back with no recent-range data at all", () => {
+    expect(evaluateChaseGuard(undefined, opts).passed).toBe(false);
+  });
+});
+
+describe("hasPriceStabilized", () => {
+  it("is false with fewer than two readings", () => {
+    expect(hasPriceStabilized([])).toBe(false);
+    expect(hasPriceStabilized([100])).toBe(false);
+  });
+
+  it("is false while the latest reading is still a new low (still falling)", () => {
+    // PONSFLY/Sheared/FFSTR, 2026-09-11: each triggered its pullback zone
+    // while the price was still actively dropping tick over tick.
+    expect(hasPriceStabilized([100, 90])).toBe(false);
+  });
+
+  it("is true once the latest reading is at or above the one before it", () => {
+    expect(hasPriceStabilized([100, 90, 90])).toBe(true);
+    expect(hasPriceStabilized([100, 90, 92])).toBe(true);
   });
 });

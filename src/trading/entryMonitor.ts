@@ -13,7 +13,7 @@ import {
 } from "../generated/prisma";
 import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
-import { pollCandidateMarket, getRecentMcapRange } from "./marketAnalysis";
+import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./marketAnalysis";
 import { validateEntry, calculatePositionSize, type RiskBucket } from "./riskEngine";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
 import { getBuyEstimate, executeBuyFill, isSellable, type FillResult } from "./executionFacade";
@@ -22,7 +22,14 @@ import { tradingConfig } from "./config";
 import { sendTradeEntryEmail } from "./notifications";
 import { planCandidate } from "./planning";
 import { recordBuyFailure, recordBuySuccess } from "./executionAlerts";
-import { estimateTokenAgeMinutes, evaluateHighConvictionSetup, evaluateQuoteAgreement, type ConvictionResult } from "./conservativeMode";
+import {
+  estimateTokenAgeMinutes,
+  evaluateChaseGuard,
+  evaluateHighConvictionSetup,
+  evaluateQuoteAgreement,
+  hasPriceStabilized,
+  type ConvictionResult,
+} from "./conservativeMode";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -301,6 +308,18 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     return false;
   }
 
+  // A WAIT_FOR_ENTRY zone means "wait for a pullback" — reaching it while
+  // price is still actively falling isn't a pullback, it's the middle of the
+  // drop. BUY_NOW's zone is a synthetic ±10% band meant to fire near-
+  // instantly (see planCandidate), so this only applies to a genuine wait.
+  // User directive 2026-09-12: PONSFLY, Sheared and FFSTR all triggered this
+  // way and went on to 0.01x-0.14x of entry within hours.
+  if (plan.action === TradePlanAction.WAIT_FOR_ENTRY && !hasPriceStabilized(await getRecentMcapTicks(candidate.tokenId))) {
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE, lastCheckedAt: new Date() } });
+    logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, mcap }, "pullback zone reached but price is still falling — waiting for it to stabilize");
+    return false;
+  }
+
   // Everything from here on touches shared capital/position-count state, so
   // it's serialized process-wide (see serializeBuyDecision) — the cheap zone
   // check above stays fully concurrent across a batch, only the actual
@@ -323,12 +342,26 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     }
 
     const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number; analysis?: { marketRegime?: string } };
+    const conservative = circuitBreakers.mode === "CONSERVATIVE";
+
+    // Chase guard — every mode, not just conservative (user directive
+    // 2026-09-12): blocks buying a token that's already run up hard in our
+    // OWN recent snapshot history, not DexScreener's lagging 5m change. A
+    // miss defers rather than rejects — a run-up can cool off while the plan
+    // is still live, whereas a rejected candidate is never planned again.
+    const recentRange = await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap);
+    const chase = evaluateChaseGuard(recentRange, {
+      windowMinutes: tradingConfig.conservativeRecentWindowMinutes,
+      minSnapshots: tradingConfig.conservativeMinRecentSnapshots,
+      maxRunUpPercent: tradingConfig.conservativeMaxRecentRunUpPercent,
+    });
+    if (!chase.passed) {
+      await deferForConviction(entry, candidate.id, chase, conservative);
+      return;
+    }
 
     // Conservative mode: a loss breaker tripped, so this entry only goes ahead
-    // on a high-conviction setup. A miss defers rather than rejects — token
-    // age, a run-up cooling off and buy ratio can all come good while the plan
-    // is still live, whereas a rejected candidate is never planned again.
-    const conservative = circuitBreakers.mode === "CONSERVATIVE";
+    // on a high-conviction setup on top of the chase guard above.
     if (conservative) {
       const conviction = evaluateHighConvictionSetup({
         tokenAgeMinutes: estimateTokenAgeMinutes(candidate.token.firstSeenAt, pair.pairCreatedAt),
@@ -338,12 +371,12 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
         volume1hUsd: pair.volume1h,
         priceChange5mPercent: pair.priceChange5m,
         priceChange1hPercent: pair.priceChange1h,
-        recent: await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap),
+        recent: recentRange,
         marketRegime: planData.analysis?.marketRegime,
         planRiskScore: plan.riskScore,
       });
       if (!conviction.passed) {
-        await deferForConviction(entry, candidate.id, conviction);
+        await deferForConviction(entry, candidate.id, conviction, conservative);
         return;
       }
     }
@@ -393,19 +426,21 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    // Checked last because it needs the real quote above.
-    if (conservative) {
-      const agreement = evaluateQuoteAgreement({
-        spotPriceUsd: pair.priceUsd,
-        positionSizeUsd: sizing.positionSizeUsd,
-        quotedTokenAmount: quote.tokenAmount,
-      });
-      if (!agreement.passed) {
-        await deferForConviction(entry, candidate.id, agreement);
-        return;
-      }
-      lastConvictionFailures.delete(entry.id);
+    // Stale-quote guard — every mode, checked last because it needs the real
+    // quote above. Looser outside conservative mode (30% vs 10%): TUMBLE's
+    // real dip filled 25% below DexScreener's displayed price and was the
+    // day's best trade, so normal mode shouldn't block that (user directive
+    // 2026-09-12).
+    const maxQuoteDiscountPercent = conservative ? tradingConfig.conservativeMaxQuoteDiscountPercent : tradingConfig.normalMaxQuoteDiscountPercent;
+    const agreement = evaluateQuoteAgreement(
+      { spotPriceUsd: pair.priceUsd, positionSizeUsd: sizing.positionSizeUsd, quotedTokenAmount: quote.tokenAmount },
+      maxQuoteDiscountPercent
+    );
+    if (!agreement.passed) {
+      await deferForConviction(entry, candidate.id, agreement, conservative);
+      return;
     }
+    lastConvictionFailures.delete(entry.id);
 
     await openTrade({
       candidateId: candidate.id,
@@ -461,19 +496,22 @@ async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: st
 // is one repeated row.
 const lastConvictionFailures = new Map<string, string>();
 
-async function deferForConviction(entry: PendingEntry, candidateId: string, result: ConvictionResult): Promise<void> {
+async function deferForConviction(entry: PendingEntry, candidateId: string, result: ConvictionResult, conservative: boolean): Promise<void> {
   await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
   const key = result.failedChecks.join(",");
   if (lastConvictionFailures.get(entry.id) === key) return;
   if (lastConvictionFailures.size >= 1000) lastConvictionFailures.clear();
   lastConvictionFailures.set(entry.id, key);
 
+  // Same checks (chase guard, stale-quote guard) fire in every mode now —
+  // the stage/log just say which gate was actually active when they did.
+  const stage = conservative ? "conservative_gate" : "entry_guard";
   const strategy = await getActiveStrategyVersion();
   await db.tradeDecisionSnapshot.create({
     data: {
       candidateId,
       decision: TradeDecision.WAIT,
-      stage: "conservative_gate",
+      stage,
       strategyVersionId: strategy.id,
       marketState: {},
       projectState: {},
@@ -483,7 +521,10 @@ async function deferForConviction(entry: PendingEntry, candidateId: string, resu
       finalReasons: result.reasons,
     },
   });
-  logger.info({ pendingEntryId: entry.id, candidateId, reasons: result.reasons }, "conservative mode: entry held back — not a high-conviction setup yet");
+  logger.info(
+    { pendingEntryId: entry.id, candidateId, reasons: result.reasons },
+    conservative ? "conservative mode: entry held back — not a high-conviction setup yet" : "entry held back — not ready yet"
+  );
 }
 
 async function openTrade(input: {

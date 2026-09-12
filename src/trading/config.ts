@@ -139,6 +139,12 @@ export const tradingConfig = {
   // snapshots showed a +46% run-up in 3 minutes. The four trades that chased a
   // 37-54% run-up (BLACKHOLE, PONSIBLE, THREE, MARRONA) lost $9.90 between
   // them; every winner was bought after a 0-8% run-up.
+  //
+  // User directive 2026-09-12: these three (window/snapshots/run-up) now also
+  // gate conservativeMode.ts's evaluateChaseGuard, which entryMonitor.ts runs
+  // on EVERY entry regardless of circuit-breaker mode, not just conservative
+  // mode — the chase pattern above isn't specific to a tripped breaker.
+  // conservativeMaxRecentDrawdownPercent stays conservative-mode-only.
   conservativeRecentWindowMinutes: num("CONSERVATIVE_RECENT_WINDOW_MINUTES", 10),
   conservativeMinRecentSnapshots: num("CONSERVATIVE_MIN_RECENT_SNAPSHOTS", 3),
   conservativeMaxRecentRunUpPercent: num("CONSERVATIVE_MAX_RECENT_RUN_UP_PERCENT", 30),
@@ -148,8 +154,21 @@ export const tradingConfig = {
   conservativeMaxPlanRiskScore: num("CONSERVATIVE_MAX_PLAN_RISK_SCORE", 85),
   // How far below DexScreener's price the on-chain quote may come in before
   // the data is treated as stale — see conservativeMode.ts's
-  // evaluateQuoteAgreement.
+  // evaluateQuoteAgreement. Conservative-mode-only value; normal mode uses
+  // normalMaxQuoteDiscountPercent below, looser on purpose.
   conservativeMaxQuoteDiscountPercent: num("CONSERVATIVE_MAX_QUOTE_DISCOUNT_PERCENT", 10),
+  // User directive 2026-09-12: the same stale-quote check, applied to every
+  // entry, not just conservative mode — but looser here, because TUMBLE (the
+  // day's best trade, +$4.87) filled 25% below DexScreener's displayed price
+  // during a genuine dip and shouldn't be blocked outside conservative mode.
+  normalMaxQuoteDiscountPercent: num("NORMAL_MAX_QUOTE_DISCOUNT_PERCENT", 30),
+  // User directive 2026-09-12: riskEngine.ts's validatePosition no longer
+  // fires "extreme sell pressure" below this many total 5m buys+sells.
+  // Confirmed live 2026-09-11: PERPSHOOD was sold on "extreme sell pressure
+  // (buy ratio 0%)" from a 5-minute window with 0 buys and 0 sells — the 0%
+  // ratio was buySellRatio5m's own divide-by-zero guard reading as total
+  // capitulation, not real sell pressure. It went on to reach 1.68x.
+  minTxns5mForSellPressureExit: num("MIN_TXNS_5M_FOR_SELL_PRESSURE_EXIT", 5),
   // User directive 2026-09-11 — "profit lockbox": skim this fraction of
   // every POSITIVE realized gain into a reserve the sizing formula can never
   // redeploy (see portfolio.ts's CASH_MOVEMENT_TYPES and

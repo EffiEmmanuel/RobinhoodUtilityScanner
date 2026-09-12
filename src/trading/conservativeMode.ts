@@ -7,7 +7,15 @@ import { tradingConfig } from "./config";
  * planning and sniping, but only buy setups we can be very confident in.
  * Exits are untouched.
  *
- * Everything here is pure (no DB, no network) so the gate can be tested
+ * This file also holds two checks that are NOT conservative-only —
+ * evaluateChaseGuard and evaluateQuoteAgreement — added to normal-mode
+ * entries too on 2026-09-12 (docs/trade-reviews/2026-09-11.md's "still to
+ * decide" #1). Both take their threshold as a parameter for exactly that
+ * reason: conservative mode calls them stricter than normal mode does.
+ * evaluateHighConvictionSetup, the rest of the bundle, stays conservative-
+ * mode-only.
+ *
+ * Everything here is pure (no DB, no network) so the gates can be tested
  * directly; entryMonitor.ts gathers the inputs. The evidence behind each
  * threshold is on its tradingConfig entry and in
  * docs/trade-reviews/2026-09-11.md.
@@ -118,6 +126,39 @@ export interface ConvictionResult {
   reasons: string[];
 }
 
+export interface ChaseGuardOptions {
+  windowMinutes: number;
+  minSnapshots: number;
+  maxRunUpPercent: number;
+}
+
+/**
+ * Blocks buying a token that's already run up hard in our OWN recent
+ * snapshot history — not DexScreener's 5m change, which lags on this chain
+ * (see RecentPriceRange's doc comment on marketAnalysis.ts's
+ * getRecentMcapRange). Added to EVERY mode on 2026-09-12, not just
+ * conservative: BLACKHOLE, PONSIBLE, THREE and MARRONA (-$9.90 combined) were
+ * each bought 37-54% above their own 10-minute low, with buyers no more than
+ * sellers — this alone would have blocked all four.
+ */
+export function evaluateChaseGuard(recent: RecentPriceRange | undefined, opts: ChaseGuardOptions): ConvictionResult {
+  if (!recent || recent.snapshotCount < opts.minSnapshots) {
+    return {
+      passed: false,
+      failedChecks: ["recentHistory"],
+      reasons: [`only ${recent?.snapshotCount ?? 0} of our own price snapshots in the last ${opts.windowMinutes} min (need ${opts.minSnapshots})`],
+    };
+  }
+  if (recent.runUpPercent > opts.maxRunUpPercent) {
+    return {
+      passed: false,
+      failedChecks: ["recentRunUp"],
+      reasons: [`already up ${recent.runUpPercent.toFixed(0)}% in the last ${opts.windowMinutes} min (> ${opts.maxRunUpPercent}%) — chasing`],
+    };
+  }
+  return { passed: true, failedChecks: [], reasons: [] };
+}
+
 export function evaluateHighConvictionSetup(input: HighConvictionInput): ConvictionResult {
   const c = tradingConfig;
   const failedChecks: string[] = [];
@@ -170,17 +211,24 @@ export function evaluateHighConvictionSetup(input: HighConvictionInput): Convict
     fail("priceChange5m", `5m price change ${pc5m.toFixed(0)}% outside ${c.conservativeMinPriceChange5mPercent}% to +${c.conservativeMaxPriceChange5mPercent}%`);
   }
 
+  // The chase half of this lives in evaluateChaseGuard below (shared with
+  // normal mode) — same window/threshold, so calling it here changes nothing
+  // for conservative mode, it just stops the logic existing twice.
   const recent = input.recent;
   const window = c.conservativeRecentWindowMinutes;
-  if (!recent || recent.snapshotCount < c.conservativeMinRecentSnapshots) {
-    fail("recentHistory", `only ${recent?.snapshotCount ?? 0} of our own price snapshots in the last ${window} min (need ${c.conservativeMinRecentSnapshots})`);
-  } else {
-    if (recent.runUpPercent > c.conservativeMaxRecentRunUpPercent) {
-      fail("recentRunUp", `already up ${recent.runUpPercent.toFixed(0)}% in the last ${window} min (> ${c.conservativeMaxRecentRunUpPercent}%) — chasing`);
-    }
-    if (recent.drawdownPercent > c.conservativeMaxRecentDrawdownPercent) {
-      fail("recentDrawdown", `down ${recent.drawdownPercent.toFixed(0)}% from its ${window}-min high (> ${c.conservativeMaxRecentDrawdownPercent}%) — falling knife`);
-    }
+  const chase = evaluateChaseGuard(recent, {
+    windowMinutes: window,
+    minSnapshots: c.conservativeMinRecentSnapshots,
+    maxRunUpPercent: c.conservativeMaxRecentRunUpPercent,
+  });
+  if (!chase.passed) {
+    failedChecks.push(...chase.failedChecks);
+    reasons.push(...chase.reasons);
+  }
+  // Drawdown (falling-knife) stays conservative-only — normal mode doesn't
+  // ask for this one.
+  if (recent && recent.snapshotCount >= c.conservativeMinRecentSnapshots && recent.drawdownPercent > c.conservativeMaxRecentDrawdownPercent) {
+    fail("recentDrawdown", `down ${recent.drawdownPercent.toFixed(0)}% from its ${window}-min high (> ${c.conservativeMaxRecentDrawdownPercent}%) — falling knife`);
   }
 
   if (!input.marketRegime || CONSERVATIVE_EXCLUDED_REGIMES.includes(input.marketRegime)) {
@@ -201,25 +249,46 @@ export function evaluateHighConvictionSetup(input: HighConvictionInput): Convict
  * implies, the setup we just evaluated isn't the market we'd be buying into:
  * either DexScreener hasn't caught up with a collapse yet, or it's pricing a
  * different pool. On 2026-09-11 PONSFLY, Sheared, OPAI, ladybug and moltfly
- * filled 39-84% below the displayed price, and all five were collapsing;
- * every other trade filled within 6% of it except TUMBLE (25% below, during a
- * real dip), which this cutoff would also skip. Paying ABOVE the displayed
+ * filled 39-84% below the displayed price, and all five were collapsing.
+ * TUMBLE filled 25% below during a genuine dip and was the day's best trade —
+ * why this takes its cutoff as a parameter instead of hardcoding one: added
+ * to normal-mode entries on 2026-09-12 with a looser cutoff
+ * (normalMaxQuoteDiscountPercent, ~30%) than conservative mode's
+ * (conservativeMaxQuoteDiscountPercent, ~10%) precisely so TUMBLE's kind of
+ * trade isn't blocked outside conservative mode. Paying ABOVE the displayed
  * price is already bounded by validateEntry's price-impact limit.
  */
-export function evaluateQuoteAgreement(input: { spotPriceUsd: number | undefined; positionSizeUsd: number; quotedTokenAmount: number }): ConvictionResult {
+export function evaluateQuoteAgreement(
+  input: { spotPriceUsd: number | undefined; positionSizeUsd: number; quotedTokenAmount: number },
+  maxDiscountPercent: number
+): ConvictionResult {
   if (!input.spotPriceUsd || input.spotPriceUsd <= 0 || input.quotedTokenAmount <= 0) {
     return { passed: false, failedChecks: ["quoteAgreement"], reasons: ["no usable on-chain quote to cross-check DexScreener's price against"] };
   }
   const quotedPriceUsd = input.positionSizeUsd / input.quotedTokenAmount;
   const discountPercent = ((input.spotPriceUsd - quotedPriceUsd) / input.spotPriceUsd) * 100;
-  if (discountPercent > tradingConfig.conservativeMaxQuoteDiscountPercent) {
+  if (discountPercent > maxDiscountPercent) {
     return {
       passed: false,
       failedChecks: ["quoteAgreement"],
-      reasons: [
-        `on-chain quote is ${discountPercent.toFixed(0)}% below DexScreener's price (> ${tradingConfig.conservativeMaxQuoteDiscountPercent}%) — its data is stale or pricing a different pool`,
-      ],
+      reasons: [`on-chain quote is ${discountPercent.toFixed(0)}% below DexScreener's price (> ${maxDiscountPercent}%) — its data is stale or pricing a different pool`],
     };
   }
   return { passed: true, failedChecks: [], reasons: [] };
+}
+
+/**
+ * True once our own snapshot history shows a WAIT_FOR_ENTRY pullback has
+ * actually paused — this tick's mcap reading isn't lower than the one before
+ * it. False whenever there are fewer than 2 readings to compare, so a zone
+ * can never trigger on its very first, still-in-freefall touch. User
+ * directive 2026-09-12: PONSFLY, Sheared and FFSTR all triggered their
+ * pullback zone while still actively falling — the "pullback" was the dump,
+ * not a bottom — and went on to 0.01x-0.14x of entry within hours.
+ * `readings` is oldest-first; only the last two matter.
+ */
+export function hasPriceStabilized(readings: number[]): boolean {
+  if (readings.length < 2) return false;
+  const [previous, current] = readings.slice(-2);
+  return current >= previous;
 }

@@ -177,8 +177,19 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   };
 }
 
-/** Sell-side counterpart to getBuyEstimate — quote-only, never executes. */
-export async function getSellEstimate(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent">> {
+/**
+ * Sell-side counterpart to getBuyEstimate — quote-only, never executes.
+ * Also positionManager.ts's source of truth for mark-to-market pricing on an
+ * open position (user directive 2026-09-12): DexScreener's pair.priceUsd is
+ * what the entry/exit-decision AI and the deterministic stop/profit checks
+ * used to price against, and it can lag a real collapse — confirmed live
+ * 2026-09-11, Sheared showed +329% unrealized off pair.priceUsd while an
+ * on-chain quote for the same size would have shown it was already losing,
+ * so its -15% stop never got a chance to fire. priceUsd here is 0 in every
+ * failure branch (no quote, no ETH rate) — callers must treat 0 as "no mark
+ * available" and fall back, never as a real $0 price.
+ */
+export async function getSellEstimate(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "priceUsd">> {
   if (!isLiveModeReady()) return getPaperSellQuote(tokenAmount, pair);
 
   const client = getPublicClient();
@@ -189,16 +200,16 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   // a predatory-fee pool when it's the only one) — otherwise the slippage
   // guard is judging a pool we'd never actually trade through.
   const quote = await getLiveQuote(token, false, tokenAmountRaw, { allowHighFeePools: true });
-  if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100 };
+  if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
-  if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100 };
+  if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
   const proceedsUsd = Number(formatUnits(quote.amountOut, 18)) * ethPriceUsd;
   const effectivePriceUsd = tokenAmount > 0 ? proceedsUsd / tokenAmount : 0;
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((spotPriceUsd - effectivePriceUsd) / spotPriceUsd) * 100) : 0;
   logSuspiciousQuote("sell", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
-  return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent };
+  return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, priceUsd: effectivePriceUsd };
 }
 
 export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<FillResult> {

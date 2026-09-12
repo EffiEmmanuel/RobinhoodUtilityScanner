@@ -102,7 +102,16 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     return;
   }
 
-  const priceUsd = pair?.priceUsd ?? trade.entryPriceUsd ?? 0;
+  // User directive 2026-09-12: price this position off a real on-chain sell
+  // quote for its actual remaining size, not DexScreener's spot price — see
+  // executionFacade.ts's getSellEstimate doc comment for why (Sheared showed
+  // +329% unrealized off pair.priceUsd while it was already collapsing).
+  // getSellEstimate returns priceUsd: 0 in every failure branch (no quote, no
+  // ETH rate) and PAPER/SHADOW's paper quote can legitimately be a real 0
+  // only when priceUsd/liquidity are themselves 0 — either way, > 0 is the
+  // right test for "this mark is usable," never trust a bare 0 as a fill.
+  const markQuote = pair ? await getSellEstimate(token.address, remainingTokens, pair).catch(() => undefined) : undefined;
+  const priceUsd = markQuote && markQuote.priceUsd > 0 ? markQuote.priceUsd : (pair?.priceUsd ?? trade.entryPriceUsd ?? 0);
   const entryPriceUsd = trade.entryPriceUsd ?? 0;
   const currentMultiple = entryPriceUsd > 0 ? priceUsd / entryPriceUsd : 1;
   const unrealizedPnlPercent = (currentMultiple - 1) * 100;
@@ -116,6 +125,9 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     pair?.buys5m !== undefined || pair?.sells5m !== undefined
       ? (pair.buys5m ?? 0) / Math.max((pair.buys5m ?? 0) + (pair.sells5m ?? 0), 1)
       : undefined;
+  // Raw trade count behind the ratio above — riskEngine.ts's validatePosition
+  // needs this to tell a real dump from a silent window read as 100% sellers.
+  const totalTxns5m = pair?.buys5m !== undefined || pair?.sells5m !== undefined ? (pair.buys5m ?? 0) + (pair.sells5m ?? 0) : undefined;
 
   // Continuous, free, deterministic technical read — computed every tick
   // regardless of whether an AI strategy review runs this cycle, so the
@@ -177,6 +189,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     unrealizedPnlPercent,
     liquidityUsd: pair?.liquidityUsd ?? 0,
     buySellRatio5m,
+    totalTxns5m,
     sellQuoteAvailable: await isSellable(token.address, pair, remainingTokens),
     profitStepsTaken,
   });
@@ -288,6 +301,7 @@ function evaluateExits(ctx: {
   unrealizedPnlPercent: number;
   liquidityUsd: number;
   buySellRatio5m: number | undefined;
+  totalTxns5m: number | undefined;
   sellQuoteAvailable: boolean;
   profitStepsTaken: number;
 }): ExitDecision | null {
@@ -301,6 +315,7 @@ function evaluateExits(ctx: {
     maxLossPercent: exitRules.maxLossPercent,
     catastrophicLossPercent: exitRules.catastrophicLossPercent,
     buySellRatio5m: ctx.buySellRatio5m,
+    totalTxns5m: ctx.totalTxns5m,
     sellQuoteAvailable: ctx.sellQuoteAvailable,
   });
   if (positionRisk.riskExitTriggered && positionRisk.severity === "CRITICAL") {

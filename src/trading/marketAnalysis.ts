@@ -58,6 +58,22 @@ export async function getRecentMcapRange(
   return { snapshotCount: mcaps.length, runUpPercent: (currentMcap / low - 1) * 100, drawdownPercent: (1 - currentMcap / high) * 100 };
 }
 
+/**
+ * The last two market-cap readings for a token, oldest first — used to check
+ * whether a still-falling price has actually paused (see
+ * conservativeMode.ts's hasPriceStabilized). Deliberately raw, ungapped
+ * snapshots rather than a windowed range — what matters here is only the
+ * most recent tick-over-tick direction, not how far it's moved overall.
+ */
+export async function getRecentMcapTicks(tokenId: string, count = 2): Promise<number[]> {
+  const rows = await db.marketSnapshot.findMany({
+    where: { tokenId, marketCapUsd: { not: null } },
+    orderBy: { capturedAt: "desc" },
+    take: count,
+  });
+  return rows.map((r) => r.marketCapUsd as number).reverse();
+}
+
 function ema(values: number[], period: number): number | undefined {
   if (values.length < period) return undefined;
   const k = 2 / (period + 1);
