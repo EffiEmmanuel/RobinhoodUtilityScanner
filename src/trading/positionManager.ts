@@ -327,16 +327,26 @@ function evaluateExits(ctx: {
   // (a normal post-launch wick isn't the same thing as the setup actually
   // breaking; this exit was firing on exactly that kind of dip before).
   const invalidationFloor = plan?.invalidationMcap ? plan.invalidationMcap * (1 - tradingConfig.invalidationTolerancePercent / 100) : undefined;
+  // Desk review D3, confirmed live 2026-09-11: this and the WARNING-severity
+  // RISK_EXIT below both realize a LOSS the moment they fire — same as the
+  // CRITICAL RISK_EXIT above, which was already isEmergency: true — but both
+  // used to queue behind defaultMaxSellSlippageBps (500bps) like a routine
+  // profit-taking sell, and only escalated to emergency after
+  // stuckExitEscalateAfterMinutes (5 min) of being blocked. THREE, PONSIBLE
+  // and FFSTR all slipped 4-9 points past their stated stop this way. A stop
+  // is not a discretionary trim; it should never wait in that queue at all —
+  // PROFIT_TARGET/TRAILING_EXIT/TIME_EXIT/AI_STRATEGY_EXIT stay non-emergency
+  // since those are genuinely discretionary.
   if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
     return {
       type: "INVALIDATION_EXIT",
       sellPercentOfRemaining: 100,
       reason: `market cap fell to tolerance-adjusted invalidation floor ($${Math.round(invalidationFloor).toLocaleString()}, AI level was $${Math.round(plan!.invalidationMcap!).toLocaleString()})`,
-      isEmergency: false,
+      isEmergency: true,
     };
   }
   if (positionRisk.riskExitTriggered) {
-    return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: false };
+    return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
   // Priority 3: staged profit-taking (§35/§36) — only the next step not yet
@@ -352,9 +362,19 @@ function evaluateExits(ctx: {
     };
   }
 
-  // Priority 4: trailing exit, once activated.
-  if (ctx.currentMultiple >= exitRules.trailingActivationMultiple) {
-    const peakMultiple = 1 + (trade.mfePercent ?? 0) / 100;
+  // Priority 4: trailing exit — armed once the position's PEAK (never the
+  // current tick's multiple) has ever crossed trailingActivationMultiple, and
+  // stays armed from then on. Desk review D5, confirmed live 2026-09-11:
+  // QUORUM peaked at 2.93x, then gapped straight to ~1.1x between two 5s
+  // monitor ticks (a real move, not a missed tick — see the desk review's D4
+  // on monitor cadence) — the old `ctx.currentMultiple >= activation` gate
+  // only looked at THIS tick's reading, so a position already well past
+  // activation but currently reading below it skipped the trail entirely and
+  // rode the same collapse down to a -36% catastrophic stop instead of
+  // banking anything from its 2.93x peak. trade.mfePercent already records
+  // the true best-ever multiple regardless of what currentMultiple reads now.
+  const peakMultiple = 1 + (trade.mfePercent ?? 0) / 100;
+  if (peakMultiple >= exitRules.trailingActivationMultiple) {
     const retracePercent = ((peakMultiple - ctx.currentMultiple) / peakMultiple) * 100;
     if (retracePercent >= exitRules.trailingPercent) {
       return {
