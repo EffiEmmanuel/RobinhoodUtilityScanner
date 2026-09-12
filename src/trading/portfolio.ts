@@ -40,38 +40,67 @@ export async function ensurePaperWalletSeeded(): Promise<void> {
   logger.info({ amount: tradingConfig.paperStartingBalanceUsd }, "seeded paper trading balance");
 }
 
+// Confirmed live 2026-09-12: this used to try exactly ONE token (the single
+// most recently active one) and return undefined on any failure — a
+// DexScreener rate-limit (documented elsewhere in this codebase as a real,
+// recurring issue), or that one token simply not having an ETH-quoted pair
+// right then, was enough to fail the whole lookup. getCashUsd's fallback for
+// "no rate" is summing historical ledger entries at whatever USD value they
+// were recorded at, which does not track ETH's price at all — a real
+// wallet holding 0.016 ETH (~$40.42 at the time) was reported as $18.48,
+// triggering a false "daily realized loss 37.8%" circuit-breaker trip on a
+// day with no such loss. Two independent fixes:
+//  1. Try several recently-active tokens, not just one — any single one
+//     failing no longer fails the whole lookup.
+//  2. Cache the last successful rate. ETH's price does not meaningfully
+//     move minute to minute, so reusing a rate that's merely a few minutes
+//     stale is far more honest than the ledger-sum fallback, which can be
+//     stale by days and silently ignores ETH price movement entirely.
+const ETH_PRICE_CANDIDATE_TOKENS = 10;
+const ETH_PRICE_CACHE_MAX_AGE_MS = 30 * 60_000;
+let cachedEthPriceUsd: { rate: number; at: number } | undefined;
+
 /**
  * A best-effort, current ETH/USD rate derived from Robinhood Chain's own DEX
  * data (not a mainnet-ETH price feed) — this chain's native gas token isn't
  * guaranteed to trade at mainnet parity, so the conversion rate should come
- * from what's actually happening on THIS chain. Picks whatever token was
- * most recently active and re-fetches its live pair fresh (priceUsd/
- * priceNative implies the native-token rate, same derivation executionFacade.ts
- * already uses for live trade sizing) — undefined if nothing is available,
- * never a stale/fabricated number.
+ * from what's actually happening on THIS chain. Undefined only when no fresh
+ * rate could be found AND no recent-enough cached one exists either — never a
+ * fabricated number, but also no longer this fragile on a single token.
  */
 export async function getEthPriceUsd(): Promise<number | undefined> {
-  const recentToken = await db.token.findFirst({
+  const recentTokens = await db.token.findMany({
     where: { marketSnapshots: { some: {} } },
     orderBy: { lastSeenAt: "desc" },
+    take: ETH_PRICE_CANDIDATE_TOKENS,
   });
-  if (!recentToken) return undefined;
-  try {
-    const market = await fetchMarketForToken(recentToken.chain, recentToken.address);
-    // dex/client.ts's fetchMarketForToken prefers an ETH-quoted primaryPair
-    // when one exists, but this token's only pair(s) could all be quoted in
-    // something else (a tokenized stock, a stablecoin) — this guard is what
-    // actually stops that from being misread as an ETH rate (see
-    // executionFacade.ts's deriveEthPriceUsd for the confirmed-live bug this
-    // mirrors). Falls through to the "most recently active token" fallback
-    // below when this one has no usable ETH pair, rather than fabricating a
-    // rate from whatever pair it does have.
-    const pair = market.primaryPair;
-    if (!pair || !isNativeEthQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) return undefined;
-    return pair.priceUsd / pair.priceNative;
-  } catch {
-    return undefined;
+  for (const token of recentTokens) {
+    try {
+      const market = await fetchMarketForToken(token.chain, token.address);
+      // dex/client.ts's fetchMarketForToken prefers an ETH-quoted primaryPair
+      // when one exists, but this token's only pair(s) could all be quoted in
+      // something else (a tokenized stock, a stablecoin) — this guard is what
+      // actually stops that from being misread as an ETH rate (see
+      // executionFacade.ts's deriveEthPriceUsd for the confirmed-live bug this
+      // mirrors). Falls through to try the next candidate rather than
+      // fabricating a rate from whatever pair it does have.
+      const pair = market.primaryPair;
+      if (!pair || !isNativeEthQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) continue;
+      const rate = pair.priceUsd / pair.priceNative;
+      cachedEthPriceUsd = { rate, at: Date.now() };
+      return rate;
+    } catch {
+      continue;
+    }
   }
+  if (cachedEthPriceUsd && Date.now() - cachedEthPriceUsd.at <= ETH_PRICE_CACHE_MAX_AGE_MS) {
+    logger.warn(
+      { cachedAt: new Date(cachedEthPriceUsd.at).toISOString(), rate: cachedEthPriceUsd.rate },
+      `no fresh ETH/USD rate from any of the ${ETH_PRICE_CANDIDATE_TOKENS} most recently active tokens — reusing the last known rate rather than falling back to the stale ledger sum`
+    );
+    return cachedEthPriceUsd.rate;
+  }
+  return undefined;
 }
 
 /**
