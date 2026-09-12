@@ -115,43 +115,75 @@ export const tradingConfig = {
   // completely again, exactly as they did before this mode existed.
   conservativeHardStopDailyLossPercent: num("CONSERVATIVE_HARD_STOP_DAILY_LOSS_PERCENT", 35),
   conservativeHardStopConsecutiveLosses: num("CONSERVATIVE_HARD_STOP_CONSECUTIVE_LOSSES", 5),
+  //
+  // User directive 2026-09-12: raised across the board. A tripped LOSS
+  // breaker was hard-disabling this mode entirely (full pause) for several
+  // hours tonight, during which discovery/research/planning kept running —
+  // and kept spending real AI and X API credits — on candidates that could
+  // never be traded. "Why are we paying for research we can't act on" is a
+  // real cost with no offsetting benefit; a much stricter version of this
+  // gate at least lets the pipeline's own output occasionally pay for
+  // itself on genuinely rare, excellent setups, rather than blocking
+  // everything indiscriminately. Re-checked against the fuller dataset this
+  // covers now (491 candidates across ~3.3 days, up from 340/15 trades):
+  // this tightened bundle passes only ~1-1.5 candidates/day (O1BOT, PRISM,
+  // PROLOGUE, LAURA, WALL3 in that window), all with max24h between
+  // 1.4x-2.7x and zero drawdown worse than -19% — genuinely rare, but
+  // n=4-5 is small; re-check as more data comes in under the new bar,
+  // same caveat the original thresholds carried.
+  //
   // Candidates under an hour old fell 50%+ within 24h 74-85% of the time, vs
   // 16% for tokens over a day old. All nine of 2026-09-11's trades that went
-  // to near zero were under 30 minutes old at entry.
+  // to near zero were under 30 minutes old at entry. Not raised further this
+  // pass — the backtest above found no additional benefit past 60 min.
   conservativeMinTokenAgeMinutes: num("CONSERVATIVE_MIN_TOKEN_AGE_MINUTES", 60),
-  conservativeMinLiquidityUsd: num("CONSERVATIVE_MIN_LIQUIDITY_USD", 40_000),
-  conservativeMinHourlyTxns: num("CONSERVATIVE_MIN_HOURLY_TXNS", 30),
+  conservativeMinLiquidityUsd: num("CONSERVATIVE_MIN_LIQUIDITY_USD", 60_000),
+  conservativeMinHourlyTxns: num("CONSERVATIVE_MIN_HOURLY_TXNS", 50),
   // Buy ratio mattered most of everything tested: moving the floor from 52%
   // to 55% took the -50%-fall rate from 12% to 5%. Around 50% is churn, not
   // accumulation (BLACKHOLE, FFSTR, OPAI); well above 80% is usually bots
-  // ahead of a dump.
-  conservativeMinBuyRatio1h: num("CONSERVATIVE_MIN_BUY_RATIO_1H", 0.55),
-  conservativeMaxBuyRatio1h: num("CONSERVATIVE_MAX_BUY_RATIO_1H", 0.8),
+  // ahead of a dump. Narrowed further 2026-09-12 for the same reason.
+  conservativeMinBuyRatio1h: num("CONSERVATIVE_MIN_BUY_RATIO_1H", 0.57),
+  conservativeMaxBuyRatio1h: num("CONSERVATIVE_MAX_BUY_RATIO_1H", 0.78),
   // An hour's volume far above the pool's liquidity is wash/churn trading —
   // PONSFLY traded 27x its liquidity in an hour, OPAI 40x.
-  conservativeMaxVolumeToLiquidity1h: num("CONSERVATIVE_MAX_VOLUME_TO_LIQUIDITY_1H", 5),
-  conservativeMinPriceChange1hPercent: num("CONSERVATIVE_MIN_PRICE_CHANGE_1H_PERCENT", -30),
-  conservativeMaxPriceChange1hPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_1H_PERCENT", 500),
+  conservativeMaxVolumeToLiquidity1h: num("CONSERVATIVE_MAX_VOLUME_TO_LIQUIDITY_1H", 4),
+  conservativeMinPriceChange1hPercent: num("CONSERVATIVE_MIN_PRICE_CHANGE_1H_PERCENT", -25),
+  // Lowered hard from 500%: THREE was already +7,553% on the hour when it
+  // triggered and it was a chase, not a discovery — this bundle isn't meant
+  // to catch a token mid-parabola at all, chasing is what evaluateChaseGuard
+  // (below) and the discovery pipeline's own momentum override are for.
+  conservativeMaxPriceChange1hPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_1H_PERCENT", 350),
   conservativeMinPriceChange5mPercent: num("CONSERVATIVE_MIN_PRICE_CHANGE_5M_PERCENT", -15),
-  conservativeMaxPriceChange5mPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_5M_PERCENT", 30),
+  conservativeMaxPriceChange5mPercent: num("CONSERVATIVE_MAX_PRICE_CHANGE_5M_PERCENT", 25),
   // Measured on OUR OWN MarketSnapshot history, not DexScreener's 5m change,
   // which lags on this chain: BLACKHOLE's reported 5m change was -9% while our
   // snapshots showed a +46% run-up in 3 minutes. The four trades that chased a
   // 37-54% run-up (BLACKHOLE, PONSIBLE, THREE, MARRONA) lost $9.90 between
   // them; every winner was bought after a 0-8% run-up.
   //
-  // User directive 2026-09-12: these three (window/snapshots/run-up) now also
+  // User directive 2026-09-12: these three (window/snapshots/run-up) also
   // gate conservativeMode.ts's evaluateChaseGuard, which entryMonitor.ts runs
   // on EVERY entry regardless of circuit-breaker mode, not just conservative
-  // mode — the chase pattern above isn't specific to a tripped breaker.
+  // mode — the chase pattern above isn't specific to a tripped breaker. Only
+  // the window/snapshot-count are actually shared, though: the run-up bar
+  // itself is conservativeStrictMaxRunUpPercent below, deliberately a
+  // SEPARATE, stricter number, so raising conservative mode's own bar can
+  // never quietly tighten normal mode's already-tuned chase guard too.
   // conservativeMaxRecentDrawdownPercent stays conservative-mode-only.
   conservativeRecentWindowMinutes: num("CONSERVATIVE_RECENT_WINDOW_MINUTES", 10),
   conservativeMinRecentSnapshots: num("CONSERVATIVE_MIN_RECENT_SNAPSHOTS", 3),
+  // Normal mode's always-on chase guard (entryMonitor.ts) — unchanged 2026-09-12.
   conservativeMaxRecentRunUpPercent: num("CONSERVATIVE_MAX_RECENT_RUN_UP_PERCENT", 30),
-  conservativeMaxRecentDrawdownPercent: num("CONSERVATIVE_MAX_RECENT_DRAWDOWN_PERCENT", 20),
+  // Conservative-mode-only, stricter than the shared value above — see the
+  // note on conservativeRecentWindowMinutes.
+  conservativeStrictMaxRunUpPercent: num("CONSERVATIVE_STRICT_MAX_RUN_UP_PERCENT", 25),
+  conservativeMaxRecentDrawdownPercent: num("CONSERVATIVE_MAX_RECENT_DRAWDOWN_PERCENT", 18),
   // The AI plan's own risk score; at or above this the entry is held back.
   // Candidates whose plan scored 85+ fell 50%+ within 24h 68% of the time.
-  conservativeMaxPlanRiskScore: num("CONSERVATIVE_MAX_PLAN_RISK_SCORE", 85),
+  // Lowered hard 2026-09-12 to only accept a plan the AI itself assessed as
+  // low-to-moderate risk, not merely "under the old, much higher bar."
+  conservativeMaxPlanRiskScore: num("CONSERVATIVE_MAX_PLAN_RISK_SCORE", 70),
   // How far below DexScreener's price the on-chain quote may come in before
   // the data is treated as stale — see conservativeMode.ts's
   // evaluateQuoteAgreement. Conservative-mode-only value; normal mode uses

@@ -211,15 +211,18 @@ export function evaluateHighConvictionSetup(input: HighConvictionInput): Convict
     fail("priceChange5m", `5m price change ${pc5m.toFixed(0)}% outside ${c.conservativeMinPriceChange5mPercent}% to +${c.conservativeMaxPriceChange5mPercent}%`);
   }
 
-  // The chase half of this lives in evaluateChaseGuard below (shared with
-  // normal mode) — same window/threshold, so calling it here changes nothing
-  // for conservative mode, it just stops the logic existing twice.
+  // The chase half of this reuses evaluateChaseGuard below (also called
+  // unconditionally in entryMonitor.ts for every mode), but with its OWN,
+  // stricter run-up threshold — conservativeStrictMaxRunUpPercent, not
+  // conservativeMaxRecentRunUpPercent. Raising the bar on this bundle must
+  // never quietly tighten normal mode's always-on chase guard too, which
+  // shares that other value and was already tuned separately.
   const recent = input.recent;
   const window = c.conservativeRecentWindowMinutes;
   const chase = evaluateChaseGuard(recent, {
     windowMinutes: window,
     minSnapshots: c.conservativeMinRecentSnapshots,
-    maxRunUpPercent: c.conservativeMaxRecentRunUpPercent,
+    maxRunUpPercent: c.conservativeStrictMaxRunUpPercent,
   });
   if (!chase.passed) {
     failedChecks.push(...chase.failedChecks);

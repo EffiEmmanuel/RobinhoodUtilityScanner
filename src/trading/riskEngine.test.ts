@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
   calculatePositionSize,
@@ -171,8 +172,9 @@ describe("calculatePositionSize", () => {
       liquidityUsd: 1_000_000,
     });
     expect(result.approved).toBe(true);
-    // default maxSinglePositionPercent is 25% of the $1000 test portfolio equity
-    expect(result.positionSizeUsd).toBeLessThanOrEqual(250);
+    // Reads the live config rather than hardcoding the value, so this stays
+    // correct whatever MAX_SINGLE_POSITION_PERCENT is actually set to.
+    expect(result.positionSizeUsd).toBeLessThanOrEqual(1000 * (tradingConfig.maxSinglePositionPercent / 100));
   });
 
   it("caps position size at remaining deployable capital", () => {
