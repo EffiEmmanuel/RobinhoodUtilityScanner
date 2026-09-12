@@ -2,6 +2,7 @@ import { parseEther, formatUnits } from "viem";
 import { logger } from "../logger";
 import { sleep } from "../util/http";
 import type { MarketPair } from "../dex/types";
+import { isNativeEthQuoted } from "../dex/client";
 import { tradingConfig } from "./config";
 import { getPaperQuote, getPaperSellQuote, isSellQuoteAvailable as isPaperSellQuoteAvailable, type PaperQuote } from "./execution";
 import { isLiveModeReady, executeLiveBuy, executeLiveSell, getLiveQuote } from "./live/liveExecutionProvider";
@@ -21,7 +22,15 @@ export interface FillResult extends PaperQuote {
   approvalTxHashes?: string[];
 }
 
-function deriveEthPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative">): number | undefined {
+// Confirmed live 2026-09-11: OPAI's primaryPair was quoted in QQQ (a
+// tokenized stock) with $30K liquidity, dwarfing its real $1.2K ETH pair.
+// priceUsd/priceNative on that pair is USD-per-QQQ, not USD-per-ETH — reading
+// it as an ETH rate sized a live buy ~3.6x over (spent ~$12.60 while
+// recording $3.55). dex/client.ts now prefers an ETH-quoted primaryPair when
+// one exists at all, but this is the load-bearing check: refuse outright
+// rather than silently derive a wrong rate from whatever pair was passed in.
+function deriveEthPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative" | "quoteTokenAddress">): number | undefined {
+  if (!isNativeEthQuoted(pair)) return undefined;
   if (!pair.priceUsd || !pair.priceNative || pair.priceNative === 0) return undefined;
   return pair.priceUsd / pair.priceNative;
 }

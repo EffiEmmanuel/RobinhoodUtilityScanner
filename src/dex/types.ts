@@ -16,7 +16,14 @@ export interface MarketPair {
   pairAddress: string;
   url: string;
   priceUsd?: number;
-  priceNative?: number; // price denominated in the quote token (ETH on Robinhood Chain) — used to convert USD position sizes into wei for live execution
+  // Price denominated in the quote token — NOT reliably ETH. A pair's quote
+  // token can be any other token that's ever been paired against this one
+  // (a tokenized stock, a stablecoin, ...); only trust this as an ETH price
+  // when quoteTokenAddress below is actually the native-ETH address. Confirmed
+  // live 2026-09-11: OPAI's deepest DexScreener pair was quoted in QQQ, and
+  // treating priceUsd/priceNative as ETH/USD there sized a live buy ~3.6x over
+  // — see dex/client.ts's isNativeEthQuoted.
+  priceNative?: number;
   marketCapUsd?: number;
   fdvUsd?: number;
   liquidityUsd?: number;
@@ -34,6 +41,11 @@ export interface MarketPair {
   baseTokenName?: string;
   baseTokenSymbol?: string;
   quoteSymbol?: string;
+  // The quote token's contract address, checksummed as DexScreener returns
+  // it. See isNativeEthQuoted in dex/client.ts — this is what actually tells
+  // an ETH pair apart from one quoted in some other token that only happens
+  // to share ETH's liquidity depth.
+  quoteTokenAddress?: string;
   // DexScreener renders these on a token's page for virtually any pair,
   // independent of whether the project ever submitted the separate, narrower
   // token-profiles "update token info" product (see DiscoveredTokenProfile

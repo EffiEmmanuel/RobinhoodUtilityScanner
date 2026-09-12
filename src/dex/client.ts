@@ -80,11 +80,33 @@ function normalizePair(raw: RawPair): MarketPair {
     baseTokenName: raw.baseToken?.name,
     baseTokenSymbol: raw.baseToken?.symbol,
     quoteSymbol: raw.quoteToken?.symbol,
+    quoteTokenAddress: raw.quoteToken?.address,
     imageUrl: raw.info?.imageUrl,
     headerUrl: raw.info?.header,
     websites: (raw.info?.websites ?? []).map((w) => w.url),
     socials: (raw.info?.socials ?? []).map((s) => ({ type: s.type, url: s.url })),
   };
+}
+
+// The canonical zero address viem/Uniswap use to represent native ETH as a
+// "token" in a PoolKey (see trading/live/contracts.ts's NATIVE_ETH_CURRENCY) —
+// duplicated as a literal rather than imported so this file (general DEX data
+// fetching) doesn't reach into the live-execution module for one constant.
+// Confirmed live against DexScreener's own data: a genuinely ETH-quoted pair
+// reports its quoteToken.address as exactly this.
+const NATIVE_ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Whether a pair's quote token is actually native ETH — NOT implied by the
+ * pair having the most liquidity, or even by quoteSymbol reading "ETH" (a
+ * wrapped/bridged look-alike could share the label). Confirmed live
+ * 2026-09-11: OPAI's highest-liquidity pair was quoted in QQQ (a tokenized
+ * stock), and code that assumed "primary pair" meant "ETH pair" derived a
+ * $714.93 ETH/USD rate from it (real: ~$2,538) — see executionFacade.ts's
+ * deriveEthPriceUsd, which now refuses to use a pair unless this is true.
+ */
+export function isNativeEthQuoted(pair: Pick<MarketPair, "quoteTokenAddress">): boolean {
+  return pair.quoteTokenAddress?.toLowerCase() === NATIVE_ETH_ADDRESS;
 }
 
 export async function fetchLatestTokenProfiles(): Promise<DiscoveredTokenProfile[]> {
@@ -104,6 +126,17 @@ export async function fetchMarketForToken(
   const url = `${config.dexscreenerBaseUrl}/token-pairs/v1/${chainId}/${tokenAddress}`;
   const raw = await fetchJsonWithRetry<RawPair[]>(url);
   const pairs = (Array.isArray(raw) ? raw : []).map(normalizePair);
-  const primaryPair = pairs.slice().sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))[0];
+  // ETH-quoted pairs first (ties broken by liquidity), non-ETH pairs after —
+  // never the reverse. Live execution can only ever route through an
+  // ETH-quoted v4 pool (poolDiscovery.ts hardcodes currency0 = native ETH),
+  // so a "primary pair" that isn't ETH-quoted is a pool we could never
+  // actually trade through anyway; picking it instead of a real, if smaller,
+  // ETH pair is what let OPAI's QQQ-quoted pair masquerade as the market
+  // (see isNativeEthQuoted's own doc comment). Liquidity still breaks ties
+  // within each group, so a deeper ETH pool is still preferred over a
+  // shallower one.
+  const primaryPair = pairs
+    .slice()
+    .sort((a, b) => Number(isNativeEthQuoted(b)) - Number(isNativeEthQuoted(a)) || (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))[0];
   return { pairs, primaryPair };
 }

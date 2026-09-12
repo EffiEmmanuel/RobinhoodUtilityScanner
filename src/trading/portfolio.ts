@@ -4,7 +4,7 @@ import { LedgerEntryType, TradeStatus } from "../generated/prisma";
 import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
-import { fetchMarketForToken } from "../dex/client";
+import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
 import { summarizeError } from "../util/errors";
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
@@ -58,8 +58,16 @@ export async function getEthPriceUsd(): Promise<number | undefined> {
   if (!recentToken) return undefined;
   try {
     const market = await fetchMarketForToken(recentToken.chain, recentToken.address);
+    // dex/client.ts's fetchMarketForToken prefers an ETH-quoted primaryPair
+    // when one exists, but this token's only pair(s) could all be quoted in
+    // something else (a tokenized stock, a stablecoin) — this guard is what
+    // actually stops that from being misread as an ETH rate (see
+    // executionFacade.ts's deriveEthPriceUsd for the confirmed-live bug this
+    // mirrors). Falls through to the "most recently active token" fallback
+    // below when this one has no usable ETH pair, rather than fabricating a
+    // rate from whatever pair it does have.
     const pair = market.primaryPair;
-    if (!pair?.priceUsd || !pair?.priceNative || pair.priceNative === 0) return undefined;
+    if (!pair || !isNativeEthQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) return undefined;
     return pair.priceUsd / pair.priceNative;
   } catch {
     return undefined;
