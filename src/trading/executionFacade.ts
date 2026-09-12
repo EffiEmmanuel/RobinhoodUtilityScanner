@@ -9,6 +9,7 @@ import { isLiveModeReady, executeLiveBuy, executeLiveSell, getLiveQuote } from "
 import type { PoolKey } from "./live/poolDiscovery";
 import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
+import { ensureSellApprovals } from "./live/permit2Approvals";
 
 /**
  * The one seam entryMonitor.ts and positionManager.ts call through — neither
@@ -141,11 +142,28 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   }
 
   const decimals = await getTokenDecimals(client, token);
-  const tokenAmount = Number(formatUnits(balanceAfter - balanceBefore, decimals));
+  const boughtRaw = balanceAfter - balanceBefore;
+  const tokenAmount = Number(formatUnits(boughtRaw, decimals));
   const gasCostEth = Number(formatUnits(receipt.gasUsed * receipt.effectiveGasPrice, 18));
   const gasCostUsd = gasCostEth * ethPriceUsd;
 
   logger.info({ tokenAddress, txHash: result.txHash, tokenAmount, gasCostUsd }, "live buy confirmed");
+
+  // Desk review D8: Permit2 approvals were only ever requested at SELL time,
+  // so a stop-loss or profit-target exit had to wait on 1-2 approval
+  // transactions (and their own receipts) before the actual sell could even
+  // be signed — pure latency added to exactly the moment speed matters most.
+  // Fire-and-forget here: best-effort, never blocks or fails the buy that
+  // already succeeded, and ensureSellApprovals is idempotent (a no-op if
+  // already sufficient) so this only ever saves time, never duplicates work.
+  // Approvals are still short-lived (see permit2Approvals.ts's TTL) — a
+  // position held past that just re-approves at sell time exactly as before,
+  // no regression for long holds, but every fast flip (most of today's
+  // trades closed within minutes) now exits without an approval on the
+  // critical path at all.
+  ensureSellApprovals(token, boughtRaw).catch((err) =>
+    logger.warn({ tokenAddress, err: String(err) }, "pre-approving this position for a future sell failed — will retry at sell time instead")
+  );
 
   return {
     priceUsd: tokenAmount > 0 ? positionSizeUsd / tokenAmount : 0,
