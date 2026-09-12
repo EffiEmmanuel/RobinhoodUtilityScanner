@@ -234,7 +234,10 @@ export async function recordPortfolioSnapshot(state?: PortfolioState): Promise<v
   });
 }
 
-async function getTotalRealizedPnlUsd(): Promise<number> {
+/** All-time realized PnL, summed straight from the ledger — exported for
+ * /trading/status's account-health stat card, in addition to its existing
+ * use inside recordPortfolioSnapshot. */
+export async function getTotalRealizedPnlUsd(): Promise<number> {
   const entries = await db.ledgerEntry.findMany({ where: { type: LedgerEntryType.REALIZED_PNL } });
   return entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
 }

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { db } from "../db";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
-import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters } from "./portfolio";
+import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd } from "./portfolio";
 import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
@@ -20,13 +20,23 @@ import { PendingEntryStatus, StrategyStatus, TradeStatus } from "../generated/pr
  * reachable from any module this file imports. */
 export function registerTradingRoutes(app: FastifyInstance): void {
   app.get("/trading/status", async () => {
-    const [portfolio, circuitBreakers] = await Promise.all([getPortfolioState(), checkCircuitBreakers()]);
+    const [portfolio, circuitBreakers, realizedPnlUsd] = await Promise.all([
+      getPortfolioState(),
+      checkCircuitBreakers(),
+      getTotalRealizedPnlUsd(),
+    ]);
+    // User directive 2026-09-12: the dashboard's account-health stat card.
+    // unrealizedPnlUsd is derived the same way recordPortfolioSnapshot
+    // already does (open positions' current value vs. what they cost),
+    // not stored separately — no new query needed, portfolio has both figures.
+    const unrealizedPnlUsd = portfolio.openPositionValueUsd - portfolio.deployedUsd;
+    const totalPnlUsd = realizedPnlUsd + unrealizedPnlUsd;
     const walletConfigured = isWalletConfigured();
     return {
       mode: tradingConfig.mode,
       tradingEnabled: isTradingEnabled(),
       circuitBreakers,
-      portfolio,
+      portfolio: { ...portfolio, realizedPnlUsd, unrealizedPnlUsd, totalPnlUsd },
       live: {
         walletConfigured,
         walletAddress: walletConfigured ? getWalletAddress() : null,

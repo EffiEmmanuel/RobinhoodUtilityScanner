@@ -1861,6 +1861,19 @@
               value: fmtEthWithUsd(p.totalEquityUsd, p.ethPriceUsd),
             },
             {
+              // User directive 2026-09-12: account-health-at-a-glance —
+              // green when the account is up all-time, red when it's down.
+              // Realized (banked, from closed trades) + unrealized (current
+              // open positions' paper gain/loss) — see /trading/status.
+              label: "Total PnL",
+              value: fmtUsdSpan(p.totalPnlUsd),
+              sub:
+                "realized " +
+                fmtUsd(p.realizedPnlUsd) +
+                " &middot; unrealized " +
+                fmtUsd(p.unrealizedPnlUsd),
+            },
+            {
               label: "Cash",
               value: fmtEthWithUsd(p.cashUsd, p.ethPriceUsd, p.cashEth),
             },
@@ -1889,7 +1902,9 @@
                 esc(t.label) +
                 '</span><span class="value">' +
                 t.value +
-                "</span></div>"
+                "</span>" +
+                (t.sub ? '<span class="sub">' + t.sub + "</span>" : "") +
+                "</div>"
               );
             })
             .join("");
