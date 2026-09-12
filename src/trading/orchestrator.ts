@@ -9,11 +9,18 @@ import { planCandidate } from "./planning";
 import { processPendingEntries, recoverStuckPendingEntries, recoverStalledRevalidatingEntries } from "./entryMonitor";
 import { runPositionMonitorTick } from "./positionManager";
 import { pollCandidateOutcomes } from "./outcomes";
-import { ensurePaperWalletSeeded, recordPortfolioSnapshot } from "./portfolio";
+import { ensurePaperWalletSeeded, recordPortfolioSnapshot, checkCircuitBreakers } from "./portfolio";
+import { checkForCircuitBreakerTransition } from "./circuitBreakerAlerts";
 import { getActiveStrategyVersion } from "./strategy";
 
 const CANDIDATE_GENERATION_INTERVAL_SECONDS = 30;
 const OUTCOME_POLL_INTERVAL_SECONDS = 300; // 5 min — this is 15m/1h/6h/24h/48h bucketed data, no need to hammer it
+// checkCircuitBreakers() is already called from several other places
+// (entryMonitor.ts only once a pending entry is actually in-zone, the
+// dashboard's /trading/status only while someone has it open) — neither is
+// reliable/unconditional enough to promise the user an email promptly. This
+// dedicated poll is the actual guarantee.
+const CIRCUIT_BREAKER_ALERT_INTERVAL_SECONDS = 20;
 const CLAIM_IDLE_DELAY_MS = 3000;
 
 async function claimNextQualifiedCandidate(): Promise<string | undefined> {
@@ -133,6 +140,17 @@ async function candidateGenerationLoop(signal: { stopped: boolean }): Promise<vo
   }
 }
 
+async function circuitBreakerAlertLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      checkForCircuitBreakerTransition(await checkCircuitBreakers());
+    } catch (err) {
+      logger.error({ err: String(err) }, "circuit breaker alert check failed");
+    }
+    await sleep(CIRCUIT_BREAKER_ALERT_INTERVAL_SECONDS * 1000);
+  }
+}
+
 async function outcomePollLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
     try {
@@ -169,6 +187,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     entryMonitorLoop(signal),
     positionMonitorLoop(signal),
     outcomePollLoop(signal),
+    circuitBreakerAlertLoop(signal),
   ];
   Promise.allSettled(loops);
 

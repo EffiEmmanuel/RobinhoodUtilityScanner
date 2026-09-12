@@ -188,6 +188,27 @@ export async function sendTradePlanEmail(input: {
   );
 }
 
+/**
+ * User directive 2026-09-12: email the moment new entries stop being NORMAL
+ * — previously the only way to notice was checking the dashboard. Fired once
+ * per transition into a non-NORMAL mode (see circuitBreakerAlerts.ts), not on
+ * every poll while it stays tripped.
+ */
+export async function sendCircuitBreakerEmail(input: { mode: "PAUSED" | "CONSERVATIVE"; reasons: string[] }): Promise<void> {
+  const isPaused = input.mode === "PAUSED";
+  await send(
+    isPaused ? "New entries PAUSED — circuit breaker tripped" : "Conservative mode engaged — a loss limit tripped",
+    [
+      isPaused
+        ? "New trade entries have stopped completely. Open positions keep being monitored and can still exit normally."
+        : "A loss limit tripped, but new entries continue — only a high-conviction setup gets bought (see conservativeMode.ts). Open positions are unaffected.",
+      "",
+      "Reasons:",
+      ...input.reasons.map((r) => `- ${r}`),
+    ].join("\n")
+  );
+}
+
 export async function sendMilestoneEmail(input: { targetUsd: number; portfolio: PortfolioState }): Promise<void> {
   await send(
     `Portfolio Milestone — Hit $${input.targetUsd.toLocaleString()}`,

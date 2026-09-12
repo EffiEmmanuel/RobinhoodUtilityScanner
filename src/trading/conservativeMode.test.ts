@@ -24,15 +24,34 @@ describe("resolveEntryMode", () => {
     ).toBe("NORMAL");
   });
 
-  it("switches to CONSERVATIVE instead of pausing when only a loss limit tripped", () => {
-    // 2026-09-11: daily realized loss 22.2% against a 20% limit, plus 3 losses in a row.
-    const result = resolveEntryMode({
-      ...calm,
-      dailyRealizedLossPercent: tradingConfig.maxDailyRealizedLossPercent,
-      consecutiveLosses: tradingConfig.maxConsecutiveLosses,
-    });
-    expect(result.mode).toBe("CONSERVATIVE");
-    expect(result.reasons).toHaveLength(2);
+  // 2026-09-11: daily realized loss 22.2% against a 20% limit, plus 3 losses in a row.
+  const tripped = { ...calm, dailyRealizedLossPercent: tradingConfig.maxDailyRealizedLossPercent, consecutiveLosses: tradingConfig.maxConsecutiveLosses };
+
+  it("switches to CONSERVATIVE instead of pausing when only a loss limit tripped, if conservative mode is enabled", () => {
+    const original = tradingConfig.conservativeModeEnabled;
+    tradingConfig.conservativeModeEnabled = true;
+    try {
+      const result = resolveEntryMode(tripped);
+      expect(result.mode).toBe("CONSERVATIVE");
+      expect(result.reasons).toHaveLength(2);
+    } finally {
+      tradingConfig.conservativeModeEnabled = original;
+    }
+  });
+
+  it("fully pauses on the same trip when conservative mode is disabled", () => {
+    // User directive 2026-09-12: hard-disabled in production
+    // (CONSERVATIVE_MODE_ENABLED=false) — "let it be triggered another day"
+    // rather than keep trading through a tripped loss breaker.
+    const original = tradingConfig.conservativeModeEnabled;
+    tradingConfig.conservativeModeEnabled = false;
+    try {
+      const result = resolveEntryMode(tripped);
+      expect(result.mode).toBe("PAUSED");
+      expect(result.reasons).toHaveLength(2);
+    } finally {
+      tradingConfig.conservativeModeEnabled = original;
+    }
   });
 
   it("still fully pauses on a non-loss breaker, even alongside a loss breaker", () => {
@@ -45,12 +64,27 @@ describe("resolveEntryMode", () => {
     expect(result.reasons).toContain("global kill switch is engaged");
   });
 
+  // Both hard-stop tests need conservative mode actually ENABLED — otherwise
+  // resolveEntryMode short-circuits to PAUSED before ever reaching the
+  // hard-stop check below, and the test would pass without exercising it.
   it("fully pauses again past the conservative-mode daily loss hard stop", () => {
-    expect(resolveEntryMode({ ...calm, dailyRealizedLossPercent: tradingConfig.conservativeHardStopDailyLossPercent }).mode).toBe("PAUSED");
+    const original = tradingConfig.conservativeModeEnabled;
+    tradingConfig.conservativeModeEnabled = true;
+    try {
+      expect(resolveEntryMode({ ...calm, dailyRealizedLossPercent: tradingConfig.conservativeHardStopDailyLossPercent }).mode).toBe("PAUSED");
+    } finally {
+      tradingConfig.conservativeModeEnabled = original;
+    }
   });
 
   it("fully pauses again past the conservative-mode consecutive-loss hard stop", () => {
-    expect(resolveEntryMode({ ...calm, consecutiveLosses: tradingConfig.conservativeHardStopConsecutiveLosses }).mode).toBe("PAUSED");
+    const original = tradingConfig.conservativeModeEnabled;
+    tradingConfig.conservativeModeEnabled = true;
+    try {
+      expect(resolveEntryMode({ ...calm, consecutiveLosses: tradingConfig.conservativeHardStopConsecutiveLosses }).mode).toBe("PAUSED");
+    } finally {
+      tradingConfig.conservativeModeEnabled = original;
+    }
   });
 });
 
