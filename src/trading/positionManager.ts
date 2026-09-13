@@ -132,7 +132,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // Continuous, free, deterministic technical read — computed every tick
   // regardless of whether an AI strategy review runs this cycle, so the
   // stored PositionSnapshot history is always complete for later analysis.
-  const technical = await computeTechnicalFeatures(trade.tokenId, pair);
+  const technical = await computeTechnicalFeatures(trade.tokenId, pair, token.address);
 
   await db.positionSnapshot.create({
     data: {

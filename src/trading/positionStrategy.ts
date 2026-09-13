@@ -94,7 +94,7 @@ export async function runPositionStrategyReview(input: {
 
   const strategy = await getActiveStrategyVersion();
   const exitRules = strategy.exitRules as unknown as ExitRules;
-  const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair);
+  const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair, token.address);
   const researchSummary = await fetchResearchSummary(trade);
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
 

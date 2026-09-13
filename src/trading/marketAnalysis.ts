@@ -1,7 +1,11 @@
+import { getAddress } from "viem";
 import { db } from "../db";
+import { logger } from "../logger";
 import { captureMarketSnapshot } from "../research/market";
 import type { MarketPair } from "../dex/types";
 import type { RecentPriceRange } from "./conservativeMode";
+import { getPublicClient } from "./live/wallet";
+import { getOnChainSwapHistory } from "./live/swapHistory";
 
 /**
  * DexScreener's public API has no OHLCV/candles endpoint — this module builds
@@ -98,6 +102,7 @@ function simpleRsi(values: number[], period: number): number | undefined {
 
 export type Confidence = "LOW" | "MEDIUM" | "HIGH";
 export type Trend = "RISING" | "FALLING" | "FLAT";
+export type SupportResistanceSource = "ONCHAIN_HISTORY" | "SNAPSHOT_POLLING";
 
 export interface TechnicalFeatures {
   dataPoints: number;
@@ -112,6 +117,9 @@ export interface TechnicalFeatures {
   // support/resistance available without an OHLCV/candles API.
   swingHighMcap?: number;
   swingLowMcap?: number;
+  supportResistanceSource: SupportResistanceSource;
+  onchainSupportStale?: boolean;
+  onchainDataPoints?: number;
   drawdownFromHighPercent?: number;
   distanceFromLowPercent?: number;
   mcapVelocityPercentPerHour?: number;
@@ -148,7 +156,7 @@ function volumeTrend(volumes: number[]): Trend | undefined {
   return "FLAT";
 }
 
-export async function computeTechnicalFeatures(tokenId: string, latestPair: MarketPair | undefined): Promise<TechnicalFeatures> {
+export async function computeTechnicalFeatures(tokenId: string, latestPair: MarketPair | undefined, tokenAddress: string): Promise<TechnicalFeatures> {
   const series = await getSnapshotSeries(tokenId);
   const mcaps = series.map((s) => s.mcap);
   const volumes = series.map((s) => s.volume5m).filter((v): v is number => v !== null);
@@ -157,6 +165,7 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
   const features: TechnicalFeatures = {
     dataPoints: series.length,
     confidence,
+    supportResistanceSource: "SNAPSHOT_POLLING",
     currentMcap: latestPair?.marketCapUsd ?? mcaps[mcaps.length - 1],
     liquidityToMcapRatio:
       latestPair?.liquidityUsd !== undefined && latestPair?.marketCapUsd
@@ -186,8 +195,7 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
     features.swingHighMcap = swingHigh;
     features.swingLowMcap = swingLow;
     const current = features.currentMcap ?? mcaps[mcaps.length - 1];
-    features.drawdownFromHighPercent = swingHigh > 0 ? ((current - swingHigh) / swingHigh) * 100 : undefined;
-    features.distanceFromLowPercent = swingLow > 0 ? ((current - swingLow) / swingLow) * 100 : undefined;
+    applySwingDerivedPercentages(features, current);
 
     const first = series[0];
     const last = series[series.length - 1];
@@ -201,7 +209,32 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
   features.ema20 = ema(mcaps, 20);
   features.rsi14Like = simpleRsi(mcaps, 14);
 
+  try {
+    const onchain = await getOnChainSwapHistory(getPublicClient(), getAddress(tokenAddress), features.currentMcap, latestPair?.priceUsd);
+    if (onchain?.swingLowMcap !== undefined && onchain?.swingHighMcap !== undefined) {
+      features.swingHighMcap = onchain.swingHighMcap;
+      features.swingLowMcap = onchain.swingLowMcap;
+      applySwingDerivedPercentages(features, features.currentMcap);
+      features.supportResistanceSource = "ONCHAIN_HISTORY";
+      features.onchainSupportStale = onchain.stale;
+      features.onchainDataPoints = onchain.dataPoints;
+    }
+  } catch (err) {
+    logger.warn({ tokenAddress, err: String(err) }, "on-chain swap-history lookup failed — falling back to snapshot-derived support/resistance");
+  }
+
   return features;
+}
+
+function applySwingDerivedPercentages(features: TechnicalFeatures, current: number | undefined): void {
+  features.drawdownFromHighPercent =
+    current !== undefined && features.swingHighMcap !== undefined && features.swingHighMcap > 0
+      ? ((current - features.swingHighMcap) / features.swingHighMcap) * 100
+      : undefined;
+  features.distanceFromLowPercent =
+    current !== undefined && features.swingLowMcap !== undefined && features.swingLowMcap > 0
+      ? ((current - features.swingLowMcap) / features.swingLowMcap) * 100
+      : undefined;
 }
 
 /**
@@ -233,11 +266,14 @@ export function formatTechnicalFeaturesForPrompt(f: TechnicalFeatures): string {
   const lines = [
     `Data points collected so far: ${f.dataPoints} (confidence: ${f.confidence} — below ~6 snapshots, treat every number here as provisional)`,
     f.currentMcap !== undefined ? `Current market cap: $${Math.round(f.currentMcap).toLocaleString()}` : undefined,
+    f.supportResistanceSource === "ONCHAIN_HISTORY"
+      ? `Support/resistance source: real on-chain Swap history (${f.onchainDataPoints ?? "unknown"} swaps${f.onchainSupportStale ? ", cached/stale after refresh failure" : ""})`
+      : "Support/resistance source: our own polling snapshots only, not full on-chain history",
     f.swingHighMcap !== undefined
-      ? `Nearest resistance (highest mcap observed since we started watching): $${Math.round(f.swingHighMcap).toLocaleString()}${f.drawdownFromHighPercent !== undefined ? ` (currently ${f.drawdownFromHighPercent.toFixed(1)}% from it)` : ""}`
+      ? `${f.supportResistanceSource === "ONCHAIN_HISTORY" ? "Nearest resistance (highest reconstructed on-chain mcap)" : "Highest mcap observed since we started watching"}: $${Math.round(f.swingHighMcap).toLocaleString()}${f.drawdownFromHighPercent !== undefined ? ` (currently ${f.drawdownFromHighPercent.toFixed(1)}% from it)` : ""}`
       : undefined,
     f.swingLowMcap !== undefined
-      ? `Nearest support (lowest mcap observed since we started watching): $${Math.round(f.swingLowMcap).toLocaleString()}${f.distanceFromLowPercent !== undefined ? ` (currently +${f.distanceFromLowPercent.toFixed(1)}% above it)` : ""}`
+      ? `${f.supportResistanceSource === "ONCHAIN_HISTORY" ? "Nearest support (lowest reconstructed on-chain mcap)" : "Lowest mcap observed since we started watching"}: $${Math.round(f.swingLowMcap).toLocaleString()}${f.distanceFromLowPercent !== undefined ? ` (currently +${f.distanceFromLowPercent.toFixed(1)}% above it)` : ""}`
       : undefined,
     f.mcapVelocityPercentPerHour !== undefined ? `Market cap velocity: ${f.mcapVelocityPercentPerHour.toFixed(1)}%/hour` : undefined,
     f.ema9 !== undefined && f.ema20 !== undefined

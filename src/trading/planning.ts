@@ -8,6 +8,7 @@ import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesF
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
+import { classifyTradeLane } from "./tradeLane";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
@@ -40,7 +41,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
   const strategy = await getActiveStrategyVersion();
   const market = await pollCandidateMarket(candidate.tokenId, candidate.token.chain, candidate.token.address);
-  const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair);
+  const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair, candidate.token.address);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
   const hourlyTxns = (market.primaryPair?.buys1h ?? 0) + (market.primaryPair?.sells1h ?? 0);
@@ -52,15 +53,27 @@ export async function planCandidate(candidateId: string): Promise<void> {
     hourlyTxns,
     hardReject: run.hardReject,
   });
+  const qualificationPath = freshEval.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : (candidate.qualificationPath ?? "NORMAL");
+  const lane = classifyTradeLane({
+    evaluation: freshEval,
+    qualificationPath,
+    qualityScore: candidate.qualityScore,
+    researchConfidence: candidate.researchConfidence,
+    contractScore: run.contractScore,
+    utilityScore: run.utilityScore,
+    credibilityScore: run.credibilityScore,
+    websiteScore: run.websiteScore,
+    liquidityUsd,
+  });
 
   if (!freshEval.eligible) {
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
-      project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence },
+      project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       reasons: freshEval.reasons,
     });
-    await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
+    await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     logger.info({ candidateId, reasons: freshEval.reasons }, "candidate rejected at planning (liquidity/quality moved since qualification)");
     return;
   }
@@ -75,6 +88,8 @@ export async function planCandidate(candidateId: string): Promise<void> {
         projectSummary: run.summary ?? "(no summary available)",
         qualityScore: candidate.qualityScore ?? 0,
         researchConfidence: candidate.researchConfidence ?? 0,
+        tradeLane: lane.tradeLane,
+        laneReasons: lane.reasons,
         marketText: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd, market.primaryPair?.priceUsd),
         technicalText: formatTechnicalFeaturesForPrompt(technical),
       }),
@@ -158,10 +173,11 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
+      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });
+  await db.tradeCandidate.update({ where: { id: candidateId }, data: { qualificationPath, tradeLane: lane.tradeLane } });
 
   await recordDecision(
     candidate.id,
@@ -171,7 +187,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
     strategy.id,
     {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
-      project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence },
+      project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       aiAnalysis: analysis,
       reasons: analysis.reasoning,
@@ -257,7 +273,7 @@ function clampPullbackTarget(
   currentMcap: number | undefined,
   min: number | null | undefined,
   max: number | null | undefined,
-  technical: { swingLowMcap?: number; confidence: string }
+  technical: { swingLowMcap?: number; confidence: string; supportResistanceSource?: string }
 ): { min: number | undefined; max: number | undefined; clamped: boolean; reason?: string } {
   if (!currentMcap || min === null || min === undefined || max === null || max === undefined) {
     return { min: min ?? undefined, max: max ?? undefined, clamped: false };
@@ -265,8 +281,8 @@ function clampPullbackTarget(
 
   const hasRealSupport =
     technical.swingLowMcap !== undefined &&
-    (technical.confidence === "MEDIUM" || technical.confidence === "HIGH") &&
-    technical.swingLowMcap < currentMcap;
+    technical.swingLowMcap < currentMcap &&
+    (technical.supportResistanceSource === "ONCHAIN_HISTORY" || technical.confidence === "MEDIUM" || technical.confidence === "HIGH");
   // A small buffer above the raw observed low — demanding the exact
   // historical bottom tick is its own kind of unrealistic.
   const supportBasedMax = hasRealSupport ? technical.swingLowMcap! * 1.03 : undefined;

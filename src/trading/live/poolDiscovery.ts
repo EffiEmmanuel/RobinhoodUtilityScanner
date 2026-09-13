@@ -13,6 +13,7 @@ export interface PoolKey {
 export interface DiscoveredPool {
   poolKey: PoolKey;
   poolId: `0x${string}`;
+  initializedAtBlock?: bigint;
   // In-range liquidity (StateView.getLiquidity) at selection time — carried
   // through to the quote layer purely for diagnostics: when a quote's price
   // impact is nonsensical, this is what tells us whether we landed on a real
@@ -62,7 +63,7 @@ function computePoolId(key: PoolKey): `0x${string}` {
 // event is necessarily recent — scan backward in bounded chunks instead of
 // the whole chain, and stop as soon as a match is found.
 const LOG_SCAN_CHUNK_BLOCKS = 400_000n;
-const LOG_SCAN_MAX_CHUNKS = 30; // ~12M blocks, ~14 days at 100ms/block
+export const LOG_SCAN_MAX_CHUNKS = 30; // ~12M blocks, ~14 days at 100ms/block
 
 /**
  * Finds the real, currently-initialized ETH/<token> v4 pool by reading
@@ -149,10 +150,15 @@ export async function discoverPool(
           hooks: log.args.hooks as `0x${string}`,
         },
         poolId: log.args.id as `0x${string}`,
+        initializedAtBlock: log.blockNumber,
       }));
       const withLiquidity = await pickPoolWithLiquidity(client, candidates, options);
       if (withLiquidity) {
-        poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), { poolKey: withLiquidity.poolKey, poolId: withLiquidity.poolId });
+        poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), {
+          poolKey: withLiquidity.poolKey,
+          poolId: withLiquidity.poolId,
+          initializedAtBlock: withLiquidity.initializedAtBlock,
+        });
         return withLiquidity;
       }
     }
@@ -170,11 +176,15 @@ export async function discoverPool(
       tickSpacing,
       hooks: "0x0000000000000000000000000000000000000000",
     };
-    return { poolKey, poolId: computePoolId(poolKey) };
+    return { poolKey, poolId: computePoolId(poolKey), initializedAtBlock: undefined };
   });
   const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates, options);
   if (fallbackResult) {
-    poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), { poolKey: fallbackResult.poolKey, poolId: fallbackResult.poolId });
+    poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), {
+      poolKey: fallbackResult.poolKey,
+      poolId: fallbackResult.poolId,
+      initializedAtBlock: fallbackResult.initializedAtBlock,
+    });
     return fallbackResult;
   }
 

@@ -15,6 +15,7 @@ import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./marketAnalysis";
 import { validateEntry, calculatePositionSize, type RiskBucket } from "./riskEngine";
+import { normalizeTradeLane, type TradeLane } from "./tradeLane";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
 import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, type FillResult } from "./executionFacade";
 import { getActiveStrategyVersion, type SizingRules } from "./strategy";
@@ -366,7 +367,8 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; liquidityUsd?: number; analysis?: { marketRegime?: string } };
+    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; tradeLane?: string; liquidityUsd?: number; analysis?: { marketRegime?: string } };
+    const tradeLane = normalizeTradeLane(planData.tradeLane ?? candidate.tradeLane);
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
     // Chase guard — every mode, not just conservative (user directive
@@ -441,6 +443,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       liquidityUsd: pair.liquidityUsd ?? 0,
       entryRiskScore: plan.riskScore,
       currentMcapUsd: mcap,
+      tradeLane,
     });
 
     if (!sizing.approved) {
@@ -548,6 +551,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       positionSizeUsd,
       plannedEntryMcap: plan.currentMarketCap ?? undefined,
       actualEntryMcap: mcap,
+      tradeLane,
       pair,
       reasons: conservative ? [...entryResult.reasons, "conservative mode: passed the high-conviction gate"] : entryResult.reasons,
     });
@@ -633,6 +637,7 @@ async function openTrade(input: {
   positionSizeUsd: number;
   plannedEntryMcap: number | undefined;
   actualEntryMcap: number | undefined;
+  tradeLane: TradeLane;
   pair: MarketPair;
   reasons: string[];
 }): Promise<void> {
@@ -670,6 +675,7 @@ async function openTrade(input: {
       actualEntryMcap: input.actualEntryMcap,
       entryPriceUsd: fill.priceUsd,
       entryLiquidityUsd: input.pair.liquidityUsd,
+      tradeLane: input.tradeLane,
       openedAt: new Date(),
     },
   });
@@ -732,10 +738,10 @@ async function openTrade(input: {
       stage: "entry_revalidation",
       strategyVersionId: input.strategyVersionId,
       marketState: { actualEntryMcap: input.actualEntryMcap },
-      projectState: {},
+      projectState: { tradeLane: input.tradeLane },
       technicalState: {},
       portfolioState: {},
-      deterministicRules: { reasons: input.reasons },
+      deterministicRules: { tradeLane: input.tradeLane, reasons: input.reasons },
       finalReasons: input.reasons,
     },
   });

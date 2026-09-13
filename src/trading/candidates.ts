@@ -3,6 +3,7 @@ import { logger } from "../logger";
 import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/prisma";
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
+import { classifyTradeLane } from "./tradeLane";
 
 /**
  * A token becomes a trade candidate once it clears the base research
@@ -77,6 +78,18 @@ export async function generateTradeCandidates(): Promise<number> {
       hourlyTxns: (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0),
       hardReject: run.hardReject,
     });
+    const qualificationPath = evaluation.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : "NORMAL";
+    const lane = classifyTradeLane({
+      evaluation,
+      qualificationPath,
+      qualityScore: run.finalScore,
+      researchConfidence: run.confidence,
+      contractScore: run.contractScore,
+      utilityScore: run.utilityScore,
+      credibilityScore: run.credibilityScore,
+      websiteScore: run.websiteScore,
+      liquidityUsd: primaryPair?.liquidityUsd ?? 0,
+    });
 
     const strategy = await getActiveStrategyVersion();
     await db.tradeDecisionSnapshot.create({
@@ -89,24 +102,23 @@ export async function generateTradeCandidates(): Promise<number> {
         projectState: { qualityScore: run.finalScore, researchConfidence: run.confidence, contractScore: run.contractScore },
         technicalState: {},
         portfolioState: {},
-        deterministicRules: { riskBucket: evaluation.riskBucket, reasons: evaluation.reasons },
-        finalReasons: evaluation.reasons,
+        deterministicRules: { riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane, laneReasons: lane.reasons, reasons: evaluation.reasons },
+        finalReasons: [...evaluation.reasons, ...lane.reasons],
       },
     });
 
     if (!evaluation.eligible) {
-      await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED } });
+      await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     } else {
       // "Learn which entry pathway actually pays" (user directive
       // 2026-09-11) — tag HOW this candidate cleared the gate so
       // learning.ts can later break outcome rates down by path instead of
       // only by raw quality/confidence numbers.
-      const qualificationPath = evaluation.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : "NORMAL";
-      await db.tradeCandidate.update({ where: { id: candidate.id }, data: { qualificationPath } });
+      await db.tradeCandidate.update({ where: { id: candidate.id }, data: { qualificationPath, tradeLane: lane.tradeLane } });
     }
 
     logger.info(
-      { tokenId: token.id, candidateId: candidate.id, eligible: evaluation.eligible, riskBucket: evaluation.riskBucket },
+      { tokenId: token.id, candidateId: candidate.id, eligible: evaluation.eligible, riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane },
       "trade candidate created"
     );
   }

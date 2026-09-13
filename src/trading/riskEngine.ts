@@ -2,6 +2,7 @@ import { config } from "../config";
 import { tradingConfig } from "./config";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
+import type { TradeLane } from "./tradeLane";
 
 export type RiskBucket = "LOW" | "MEDIUM" | "HIGH" | "REJECT";
 
@@ -126,6 +127,7 @@ export interface PositionSizingInput {
   // Current market cap at entry time — feeds the sweet-spot size boost
   // below. Undefined gets no boost (1x), never a penalty.
   currentMcapUsd?: number;
+  tradeLane?: TradeLane;
 }
 
 export interface PositionSizingResult {
@@ -181,8 +183,14 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
         )
       : 0;
   const marketCapMult = 1 + mcapBoostRatio * (tradingConfig.maxMcapSizeBoostMultiple - 1);
+  const laneMult =
+    input.tradeLane === "VERIFIED_PROJECT"
+      ? tradingConfig.verifiedLaneSizeMultiplier
+      : input.tradeLane === "MOMENTUM_TACTICAL"
+        ? tradingConfig.tacticalLaneSizeMultiplier
+        : 1;
 
-  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult;
+  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult * laneMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
   const maxBySinglePositionCap = portfolio.totalEquityUsd * (tradingConfig.maxSinglePositionPercent / 100);
@@ -234,7 +242,7 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   }
 
   reasons.push(
-    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)}`
+    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x lane=${laneMult.toFixed(2)}`
   );
   return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons };
 }

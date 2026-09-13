@@ -15,9 +15,12 @@ function timeContextLine(): string {
 // rules (src/trading/riskEngine.ts always runs after this, and can downgrade
 // or reject whatever this recommends).
 export const TRADE_ANALYSIS_SYSTEM = `You are the market-interpretation layer for a crypto trading system on Robinhood Chain. This
-token has ALREADY passed a separate research pipeline that checked utility, contract safety, and
-project credibility — you are not re-evaluating whether the project is legitimate. Your job is
-narrower and purely about market structure and timing:
+token has passed a separate research pipeline, but not every candidate is a verified project. The
+prompt includes a deterministic trade lane:
+- VERIFIED_PROJECT means research evidence is strong enough to manage for asymmetric upside.
+- MOMENTUM_TACTICAL means the token may still be tradeable, but should be treated as a fast,
+  speculative setup unless current evidence improves.
+Your job is narrower and mostly about market structure and timing:
 
 1. Classify the current market regime.
 2. Determine whether price is meaningfully extended above recent support/swing low right now.
@@ -57,6 +60,10 @@ Some inputs may show LOW confidence because we have only just started watching t
 invent precision the data doesn't support. A token can be a good project and still be a bad trade
 right now (already extended, thin liquidity, no real trading activity yet).
 
+For MOMENTUM_TACTICAL candidates, prefer cleaner entries, lower confidence, and faster de-risking
+language unless real market structure is exceptional. Do not call a tactical candidate a verified
+project just because price is moving.
+
 Never assume high volume or a large 24h percentage gain means the move is safe to chase — a huge
 gain can coexist with an imminent collapse. You are not deciding position size and you are not
 approving the final trade; a separate deterministic risk engine does that regardless of what you
@@ -69,6 +76,8 @@ export interface TradeAnalysisInputs {
   projectSummary: string;
   qualityScore: number;
   researchConfidence: number;
+  tradeLane: string;
+  laneReasons: string[];
   marketText: string;
   technicalText: string;
 }
@@ -84,6 +93,8 @@ PROJECT RESEARCH SUMMARY (already vetted by the research pipeline)
 ${inputs.projectSummary}
 Quality score: ${inputs.qualityScore}/100
 Research confidence: ${inputs.researchConfidence}/100
+Trade lane: ${inputs.tradeLane}
+Lane evidence: ${inputs.laneReasons.join("; ") || "(none recorded)"}
 
 CURRENT MARKET DATA
 ${inputs.marketText}

@@ -19,6 +19,16 @@ function num(name: string, fallback: number): number {
   return n;
 }
 
+function bigint(name: string, fallback: bigint): bigint {
+  const v = process.env[name];
+  if (v === undefined || v === "") return fallback;
+  try {
+    return BigInt(v);
+  } catch {
+    throw new Error(`Env var ${name} must be an integer, got "${v}"`);
+  }
+}
+
 function bool(name: string, fallback: boolean): boolean {
   const v = process.env[name];
   if (v === undefined || v === "") return fallback;
@@ -56,6 +66,19 @@ export const tradingConfig = {
   minTradeResearchConfidence: num("MIN_TRADE_RESEARCH_CONFIDENCE", 65),
   minTradeContractScore: num("MIN_TRADE_CONTRACT_SCORE", 75),
   minTradeLiquidityUsd: num("MIN_TRADE_LIQUIDITY_USD", 15000),
+  // "Verified project" is deliberately stricter than "tradeable." Momentum
+  // can make a token worth a tactical scalp, but it must not masquerade as a
+  // researched project worthy of larger sizing and runner exits.
+  verifiedProjectMinQualityScore: num("VERIFIED_PROJECT_MIN_QUALITY_SCORE", 88),
+  verifiedProjectMinResearchConfidence: num("VERIFIED_PROJECT_MIN_RESEARCH_CONFIDENCE", 75),
+  verifiedProjectMinContractScore: num("VERIFIED_PROJECT_MIN_CONTRACT_SCORE", 85),
+  verifiedProjectMinUtilityScore: num("VERIFIED_PROJECT_MIN_UTILITY_SCORE", 75),
+  verifiedProjectMinCredibilityScore: num("VERIFIED_PROJECT_MIN_CREDIBILITY_SCORE", 65),
+  verifiedProjectMinWebsiteScore: num("VERIFIED_PROJECT_MIN_WEBSITE_SCORE", 65),
+  verifiedProjectMinLiquidityMultiple: num("VERIFIED_PROJECT_MIN_LIQUIDITY_MULTIPLE", 1.5),
+  tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.45),
+  verifiedLaneSizeMultiplier: num("VERIFIED_LANE_SIZE_MULTIPLIER", 1.15),
+  moonbagRetainPercent: num("MOONBAG_RETAIN_PERCENT", 15),
   // User directive 2026-09-11: PEG ($51K detection mcap -> ~4x) and TFLY
   // ($195K -> 2x+) both delivered real, fast multiples tonight; RWA and
   // STONKBROKER, both already $20-30M at entry, did not — "tens of thousands
@@ -236,6 +259,10 @@ export const tradingConfig = {
 
   // Entry lifecycle.
   defaultEntryPlanTtlMinutes: num("DEFAULT_ENTRY_PLAN_TTL_MINUTES", 360),
+  // Swap logs can be much denser than Initialize logs, so keep each
+  // eth_getLogs range small enough to avoid provider response-size limits
+  // while still covering a fresh token's whole life in a handful of calls.
+  swapHistoryScanChunkBlocks: bigint("SWAP_HISTORY_SCAN_CHUNK_BLOCKS", 20_000n),
   // Hard cap on how deep a pullback the AI's WAIT_FOR_ENTRY plan is allowed to
   // demand before entering (planning.ts clamps targetEntryMcapMax to this).
   // Nothing deterministic previously bounded this — confirmed live: the AI

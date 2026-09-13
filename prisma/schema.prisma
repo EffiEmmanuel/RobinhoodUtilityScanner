@@ -342,6 +342,11 @@ model TradeCandidate {
   // answerable via learning.ts once there's enough outcome data per path.
   qualificationPath String?
 
+  // Deterministic trade lane, set from research + market evidence:
+  // VERIFIED_PROJECT can earn larger size and runner-style exits; everything
+  // else tradeable stays tactical and is managed for faster de-risking.
+  tradeLane String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -434,6 +439,7 @@ model Trade {
   initialQualityScore Float?
   initialRiskScore    Float?
   initialConfidence   Float?
+  tradeLane           String?
 
   realizedPnlUsd   Float?
   realizedMultiple Float?
@@ -647,10 +653,20 @@ model CandidateOutcome {
   hit150x Boolean?
   hit200x Boolean?
   hit250x Boolean?
+  hit500x Boolean?
+  hit1000x Boolean?
+  hit2500x Boolean?
+  hit5000x Boolean?
+  hit10000x Boolean?
 
   timeTo150xMinutes Int?
   timeTo200xMinutes Int?
   timeTo250xMinutes Int?
+  timeTo500xMinutes Int?
+  timeTo1000xMinutes Int?
+  timeTo2500xMinutes Int?
+  timeTo5000xMinutes Int?
+  timeTo10000xMinutes Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
