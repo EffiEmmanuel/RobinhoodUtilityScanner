@@ -45,6 +45,14 @@ export function recordSellSuccess(tokenAddress: string): void {
   sellFailures.delete(tokenAddress.toLowerCase());
 }
 
+/** How long (in minutes) a token's sell has been failing continuously, 0 if
+ * it isn't currently in a failure streak. Lets a caller decide when a stuck
+ * exit has gone on long enough to give up on rather than retry forever. */
+export function getSellFailureMinutes(tokenAddress: string): number {
+  const state = sellFailures.get(tokenAddress.toLowerCase());
+  return state ? (Date.now() - state.firstFailedAt) / 60_000 : 0;
+}
+
 /** Clears the global buy-failure window — call after any buy that goes through. */
 export function recordBuySuccess(): void {
   buyFailures.length = 0;

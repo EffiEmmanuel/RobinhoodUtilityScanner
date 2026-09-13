@@ -16,10 +16,10 @@ import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./marketAnalysis";
 import { validateEntry, calculatePositionSize, type RiskBucket } from "./riskEngine";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
-import { getBuyEstimate, executeBuyFill, isSellable, type FillResult } from "./executionFacade";
+import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, type FillResult } from "./executionFacade";
 import { getActiveStrategyVersion, type SizingRules } from "./strategy";
 import { tradingConfig } from "./config";
-import { sendTradeEntryEmail } from "./notifications";
+import { sendTradeEntryEmail, sendTradeClosedEmail } from "./notifications";
 import { planCandidate } from "./planning";
 import { recordBuyFailure, recordBuySuccess } from "./executionAlerts";
 import {
@@ -647,6 +647,35 @@ async function openTrade(input: {
 
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -input.positionSizeUsd, notes: `${fill.provider} buy${fill.txHash ? ` (${fill.txHash})` : ""}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+
+  // Confirmed live 2026-09-13 (SL/"Stonks Launch"): isSellable() above only
+  // proves the POOL's quoter works — pure curve math, no wallet involved —
+  // and SL's quoted fine every time while the wallet couldn't move a single
+  // wei of it, via any route, to any address. Undetectable before this buy
+  // (there was no balance to test transferring), but free to check the
+  // instant it confirms — one eth_call, no gas. Catching it here means one
+  // bad buy costs exactly what it cost and nothing more, instead of sitting
+  // OPEN and retrying a doomed sell forever (see positionManager.ts's own
+  // give-up path for a stuck position that only reveals itself after this
+  // check already passed).
+  if (fill.provider === "live" && !(await canWalletTransferToken(input.tokenAddress, fill.tokenAmount))) {
+    const closed = await db.trade.update({
+      where: { id: trade.id },
+      data: {
+        status: TradeStatus.CLOSED,
+        closedAt: new Date(),
+        realizedPnlUsd: -input.positionSizeUsd,
+        realizedMultiple: 0,
+        exitReason: "written off immediately — wallet cannot transfer this token at all (honeypot blocks real sells, only the quoter works)",
+      },
+    });
+    logger.error({ tradeId: trade.id, tokenAddress: input.tokenAddress, lossUsd: input.positionSizeUsd }, "bought into an unsellable token — written off immediately rather than left to retry forever");
+    const tokenRow = await db.token.findUnique({ where: { id: input.tokenId } });
+    void sendTradeClosedEmail({ token: tokenRow, trade: closed }).catch((err) =>
+      logger.error({ tradeId: trade.id, err: String(err) }, "failed to send honeypot write-off email")
+    );
+    return;
+  }
 
   await db.tradeDecisionSnapshot.create({
     data: {

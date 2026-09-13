@@ -13,7 +13,7 @@ import { generatePostmortem } from "./postmortem";
 import { checkPortfolioMilestones } from "./milestones";
 import { tradingConfig } from "./config";
 import { shouldRunStrategyReview, runPositionStrategyReview, applyReentryTarget, checkAndExecutePendingReentry } from "./positionStrategy";
-import { recordSellFailure, recordSellSuccess } from "./executionAlerts";
+import { recordSellFailure, recordSellSuccess, getSellFailureMinutes } from "./executionAlerts";
 import type { PositionStrategyDecision } from "../ai/schemas";
 
 // When an exit first started being refused by the slippage guard, per trade —
@@ -449,6 +449,18 @@ async function executeSell(
       positionValueUsd: remainingTokens * (pair.priceUsd ?? 0),
       unrealizedPnlPercent: trade.entryPriceUsd ? ((pair.priceUsd ?? 0) / trade.entryPriceUsd - 1) * 100 : undefined,
     });
+    // User directive 2026-09-13 (SL/"Stonks Launch"): openTrade's post-buy
+    // probe now catches most honeypots the instant a buy confirms, but a
+    // token can also get blacklisted/rug-pulled AFTER a genuinely sellable
+    // entry — that has no probe to catch it, only this same retry loop.
+    // Past sellGiveUpAfterMinutes of continuous failure, stop paying RPC
+    // calls to retry a sell that's had an hour to work and hasn't — write it
+    // off the same way the instant-probe case does, so it can't hold a
+    // position slot indefinitely.
+    if (tradingConfig.sellGiveUpAfterMinutes > 0 && getSellFailureMinutes(tokenAddress) >= tradingConfig.sellGiveUpAfterMinutes) {
+      await closeTrade(trade, `given up after failing to sell continuously for over ${tradingConfig.sellGiveUpAfterMinutes} minutes (last error: ${String(err)})`);
+      recordSellSuccess(tokenAddress); // clears the failure streak — nothing left retrying this token
+    }
     return;
   }
   recordSellSuccess(tokenAddress);

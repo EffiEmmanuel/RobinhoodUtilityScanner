@@ -344,6 +344,14 @@ export const tradingConfig = {
   // stuckExitEscalateAfterMinutes (5) gets its chance to rescue the exit
   // first, so an alert here means even escalation didn't work.
   sellFailureAlertAfterMinutes: num("SELL_FAILURE_ALERT_AFTER_MINUTES", 15),
+  // User directive 2026-09-13 (SL/"Stonks Launch"): openTrade's post-buy
+  // canWalletTransferToken probe catches most honeypots the instant a buy
+  // confirms, but a token can also be genuinely sellable at entry and get
+  // blacklisted/rug-pulled afterward — that still retries forever with no
+  // give-up path. Longer than the alert above on purpose: the alert exists
+  // so a human can look, this exists so the bot stops burning RPC calls and
+  // holding a position slot if nobody does. 0 disables (retry forever).
+  sellGiveUpAfterMinutes: num("SELL_GIVE_UP_AFTER_MINUTES", 60),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)

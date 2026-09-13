@@ -315,3 +315,43 @@ export async function isSellable(tokenAddress: string, pair: MarketPair | undefi
   const quote = await getLiveQuote(tokenAddress as `0x${string}`, false, amountToSimulate, { allowHighFeePools: true });
   return quote !== undefined;
 }
+
+// Any address works here — this never sends a transaction, just an eth_call
+// dry-run, so it costs nothing and moves nothing real.
+const TRANSFERABILITY_PROBE_RECIPIENT = "0x000000000000000000000000000000000000dEaD" as const;
+
+/**
+ * Confirmed live 2026-09-12 (SL/"Stonks Launch"): isSellable() above only
+ * proves the POOL can quote a swap — pure curve math, no wallet involved.
+ * SL's pool quoted fine every time; the wallet still couldn't move a single
+ * wei of it, via any route, to any address — a honeypot that blocks real
+ * holder transfers while leaving the quoter untouched. That can only be
+ * caught by asking the token itself "can THIS wallet actually send you,"
+ * which requires holding a real balance — undetectable before a buy, but
+ * checkable for free (an eth_call, no gas) the instant one confirms. Callers
+ * should treat a `false` here as grounds to write the position off
+ * immediately rather than let positionManager retry it forever.
+ */
+export async function canWalletTransferToken(tokenAddress: string, tokenAmount: number): Promise<boolean> {
+  if (!isLiveModeReady() || tokenAmount <= 0) return true;
+  let amountRaw: bigint;
+  try {
+    const decimals = await getTokenDecimals(getPublicClient(), tokenAddress as `0x${string}`);
+    amountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+  } catch {
+    amountRaw = 1n; // decimals lookup failed — dust-amount probe is still strictly better than no check
+  }
+  try {
+    await getPublicClient().simulateContract({
+      address: tokenAddress as `0x${string}`,
+      abi: [{ type: "function", name: "transfer", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] }] as const,
+      functionName: "transfer",
+      args: [TRANSFERABILITY_PROBE_RECIPIENT, amountRaw],
+      account: getWalletAddress(),
+    });
+    return true;
+  } catch (err) {
+    logger.warn({ tokenAddress, err: String(err) }, "wallet cannot transfer this token at all — likely a honeypot that blocks real holder sales");
+    return false;
+  }
+}
