@@ -2427,14 +2427,7 @@
                 token.symbol ||
                 token.name ||
                 fmtAddr(token.address).replace(/&hellip;/, "…");
-              if (token.submitAction === "ALREADY_EVALUATED") {
-                els.manualMsg.className = "err";
-                els.manualMsg.textContent =
-                  label +
-                  " was already fully evaluated — status: " +
-                  token.status +
-                  " (nothing new to do; it isn't re-queued automatically since it already has a result)";
-              } else if (token.submitAction === "ALREADY_IN_PROGRESS") {
+              if (token.submitAction === "ALREADY_IN_PROGRESS") {
                 els.manualMsg.className = "ok";
                 els.manualMsg.textContent =
                   label +

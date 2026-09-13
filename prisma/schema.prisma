@@ -63,6 +63,17 @@ model Token {
   // rejected" for the tokens that never even reached AI classification.
   cheapFilterReasons Json?
 
+  // User directive 2026-09-13: "tokens move at different times" — a human
+  // resubmitting a CA through the dashboard's manual-submit box should always
+  // be able to force a fresh look, even at a token that already reached
+  // WATCHLISTED/ALERTED/a settled TradeCandidate outcome, since a token can
+  // dip and regain momentum later. Set by manualSubmit.ts on every manual
+  // resubmission (never by the automated pipeline itself — that would defeat
+  // the one-candidate-per-token cost guard); candidates.ts's
+  // generateTradeCandidates reads it to allow exactly one more TradeCandidate
+  // for this token, then clears it back to null.
+  manualReevaluationRequestedAt DateTime?
+
   classifications Classification[]
   researchRuns    ResearchRun[]
   marketSnapshots MarketSnapshot[]

@@ -5,15 +5,24 @@ import { logger } from "../logger";
 import { getPublicClient } from "../trading/live/wallet";
 import { getTokenNameSymbol } from "../trading/live/tokenUtils";
 import { researchMarket } from "../research/market";
-import { TokenStatus } from "../generated/prisma";
+import { TokenStatus, TradeCandidateStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
 
 // A human pasting a CA in has already vouched for it, so a manual submission
-// re-queues even a token the automated pipeline previously gave up on (or is
-// still waiting on a DexScreener profile for — a human override skips that
-// wait entirely). Anything else (already mid-pipeline, or already scored) is
-// left alone.
-const REPROCESSABLE_STATUSES = new Set<TokenStatus>([TokenStatus.REJECTED, TokenStatus.FAILED, TokenStatus.AWAITING_DEX_PROFILE]);
+// re-queues even a token the automated pipeline already fully evaluated and
+// settled on (WATCHLISTED, ALERTED, REJECTED, ...) — user directive
+// 2026-09-13: "tokens move at different times," a token that dipped and got
+// passed over can regain momentum later, and there's no reason a human
+// deliberately asking to re-check one specific address should ever be turned
+// away just because it already has a result. Only genuinely in-flight work
+// is left alone (the two sets below) — re-queuing something mid-evaluation
+// right now would race with itself.
+const IN_FLIGHT_TOKEN_STATUSES = new Set<TokenStatus>([TokenStatus.CLASSIFYING, TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING]);
+// A settled Token status (WATCHLISTED/ALERTED) can still have an in-flight
+// TradeCandidate underneath it — QUALIFIED/PLANNING/WAITING all mean the
+// candidate hasn't resolved yet — so this checks that too, not just the
+// token's own status.
+const IN_FLIGHT_CANDIDATE_STATUSES = new Set<TradeCandidateStatus>([TradeCandidateStatus.QUALIFIED, TradeCandidateStatus.PLANNING, TradeCandidateStatus.WAITING]);
 
 /** Pulls a 0x address out of raw input — accepts a bare address or something
  * like a pasted DexScreener/explorer URL with the address in the path.
@@ -45,11 +54,10 @@ function extractAddress(input: string): `0x${string}` {
 export interface ManualSubmitResult {
   token: Token;
   // Tells the caller (the dashboard) whether this submission actually
-  // triggered new work or just handed back a token that's already mid-flight
-  // or already fully evaluated — without this, "already ALERTED" and "freshly
-  // queued" render identically as "Queued X — status: Y" and a re-submission
-  // of an already-processed token looks indistinguishable from a no-op bug.
-  action: "CREATED" | "REQUEUED" | "ALREADY_IN_PROGRESS" | "ALREADY_EVALUATED";
+  // triggered new work or just handed back a token that's genuinely
+  // in-flight right now — without this, "mid-evaluation" and "freshly
+  // queued" would render identically as "Queued X — status: Y".
+  action: "CREATED" | "REQUEUED" | "ALREADY_IN_PROGRESS";
 }
 
 export async function submitManualToken(rawAddress: string): Promise<ManualSubmitResult> {
@@ -57,18 +65,20 @@ export async function submitManualToken(rawAddress: string): Promise<ManualSubmi
 
   const existing = await db.token.findUnique({
     where: { chain_address: { chain: config.targetChainId, address } },
+    include: { tradeCandidates: { orderBy: { createdAt: "desc" }, take: 1 } },
   });
 
   if (existing) {
-    if (!REPROCESSABLE_STATUSES.has(existing.status)) {
-      const inProgressStatuses = new Set<TokenStatus>([TokenStatus.CLASSIFYING, TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING]);
-      return { token: existing, action: inProgressStatuses.has(existing.status) ? "ALREADY_IN_PROGRESS" : "ALREADY_EVALUATED" };
+    const latestCandidate = existing.tradeCandidates[0];
+    const candidateInFlight = latestCandidate !== undefined && IN_FLIGHT_CANDIDATE_STATUSES.has(latestCandidate.status);
+    if (IN_FLIGHT_TOKEN_STATUSES.has(existing.status) || candidateInFlight) {
+      return { token: existing, action: "ALREADY_IN_PROGRESS" };
     }
     const reset = await db.token.update({
       where: { id: existing.id },
-      data: { status: TokenStatus.DETECTED, lastSeenAt: new Date() },
+      data: { status: TokenStatus.DETECTED, lastSeenAt: new Date(), manualReevaluationRequestedAt: new Date() },
     });
-    logger.info({ tokenId: reset.id, address }, "manual submission: re-queued a previously rejected/failed token");
+    logger.info({ tokenId: reset.id, address, previousStatus: existing.status }, "manual submission: re-queued a token for a fresh look");
     return { token: reset, action: "REQUEUED" };
   }
 
