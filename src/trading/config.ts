@@ -194,6 +194,32 @@ export const tradingConfig = {
   // day's best trade, +$4.87) filled 25% below DexScreener's displayed price
   // during a genuine dip and shouldn't be blocked outside conservative mode.
   normalMaxQuoteDiscountPercent: num("NORMAL_MAX_QUOTE_DISCOUNT_PERCENT", 30),
+  // User directive 2026-09-13: "the narrative has to be good AND we have to
+  // leverage the volume — nobody is your friend in this market." Before this,
+  // only conservative mode's evaluateHighConvictionSetup ever checked real
+  // buy-side activity (conservativeMin/MaxBuyRatio1h etc, tuned against the
+  // 2026-09-11/12 loss reviews) — normal mode bought on narrative/quality/
+  // confidence alone regardless of whether real trading demand backed it.
+  // conservativeMode.ts's evaluateRealDemand now runs this loosened version
+  // in EVERY mode. These are a starting heuristic with no trade data of their
+  // own yet (deliberately wider than the tuned conservative numbers so this
+  // doesn't just re-implement conservative mode everywhere) — revisit once
+  // outcomes accrue at this bar, same as every other threshold in this file.
+  normalMinHourlyTxns: num("NORMAL_MIN_HOURLY_TXNS", 15),
+  normalMinBuyRatio1h: num("NORMAL_MIN_BUY_RATIO_1H", 0.5),
+  normalMaxBuyRatio1h: num("NORMAL_MAX_BUY_RATIO_1H", 0.85),
+  normalMaxVolumeToLiquidity1h: num("NORMAL_MAX_VOLUME_TO_LIQUIDITY_1H", 8),
+  // User directive 2026-09-13: "how do we know if someone is going to rug the
+  // project with a few sells" — holderScoreStub in scoring/index.ts has never
+  // actually measured this (no holder-distribution data source existed; it
+  // always returns a fixed neutral 50). holderConcentration.ts now reads real
+  // Transfer-log history via RPC at entry time and blocks a buy when a
+  // handful of wallets hold enough of supply to tank price on their own. No
+  // trade data backs these starting numbers yet — revisit as outcomes come in.
+  holderCheckEnabled: bool("HOLDER_CHECK_ENABLED", true),
+  maxTop1HolderPercent: num("MAX_TOP1_HOLDER_PERCENT", 15),
+  maxTop10HolderPercent: num("MAX_TOP10_HOLDER_PERCENT", 50),
+  minHolderCountForEntry: num("MIN_HOLDER_COUNT_FOR_ENTRY", 15),
   // User directive 2026-09-12: riskEngine.ts's validatePosition no longer
   // fires "extreme sell pressure" below this many total 5m buys+sells.
   // Confirmed live 2026-09-11: PERPSHOOD was sold on "extreme sell pressure

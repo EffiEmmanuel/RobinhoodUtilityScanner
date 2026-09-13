@@ -159,6 +159,62 @@ export function evaluateChaseGuard(recent: RecentPriceRange | undefined, opts: C
   return { passed: true, failedChecks: [], reasons: [] };
 }
 
+export interface RealDemandInput {
+  buys1h: number | undefined;
+  sells1h: number | undefined;
+  volume1hUsd: number | undefined;
+  liquidityUsd: number | undefined;
+}
+
+export interface RealDemandThresholds {
+  minHourlyTxns: number;
+  minBuyRatio1h: number;
+  maxBuyRatio1h: number;
+  maxVolumeToLiquidity1h: number;
+}
+
+/**
+ * Real trading demand, not narrative alone — user directive 2026-09-13: "not
+ * only does the narrative have to be good, we have to leverage the volume...
+ * nobody is your friend in this market." Added to EVERY mode, called from
+ * entryMonitor.ts with tradingConfig's normalMin/Max* thresholds outside
+ * conservative mode and the tighter, already-tuned conservativeMin/Max*
+ * thresholds inside it (evaluateHighConvictionSetup below still runs its own
+ * copy of the same checks with those same conservative thresholds — cheap
+ * and harmless when conservative, since normal mode's looser bar is a strict
+ * subset; the point of a separate function is letting normal mode run this
+ * at all).
+ */
+export function evaluateRealDemand(input: RealDemandInput, thresholds: RealDemandThresholds): ConvictionResult {
+  const failedChecks: string[] = [];
+  const reasons: string[] = [];
+
+  const hourlyTxns = (input.buys1h ?? 0) + (input.sells1h ?? 0);
+  if (hourlyTxns < thresholds.minHourlyTxns) {
+    failedChecks.push("hourlyTxns");
+    reasons.push(`${hourlyTxns} txns in the last hour (< ${thresholds.minHourlyTxns}) — not enough real trading to trust`);
+  }
+  if (hourlyTxns > 0) {
+    const buyRatio = (input.buys1h ?? 0) / hourlyTxns;
+    if (buyRatio < thresholds.minBuyRatio1h || buyRatio > thresholds.maxBuyRatio1h) {
+      failedChecks.push("buyRatio");
+      reasons.push(
+        `1h buy ratio ${(buyRatio * 100).toFixed(0)}% outside ${(thresholds.minBuyRatio1h * 100).toFixed(0)}-${(thresholds.maxBuyRatio1h * 100).toFixed(0)}%`
+      );
+    }
+  }
+
+  const liquidityUsd = input.liquidityUsd ?? 0;
+  if (input.volume1hUsd !== undefined && liquidityUsd > 0 && input.volume1hUsd / liquidityUsd > thresholds.maxVolumeToLiquidity1h) {
+    failedChecks.push("volumeToLiquidity");
+    reasons.push(
+      `1h volume is ${(input.volume1hUsd / liquidityUsd).toFixed(1)}x liquidity (> ${thresholds.maxVolumeToLiquidity1h}x) — looks like wash trading, not real demand`
+    );
+  }
+
+  return { passed: failedChecks.length === 0, failedChecks, reasons };
+}
+
 export function evaluateHighConvictionSetup(input: HighConvictionInput): ConvictionResult {
   const c = tradingConfig;
   const failedChecks: string[] = [];

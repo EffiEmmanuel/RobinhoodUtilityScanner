@@ -27,9 +27,12 @@ import {
   evaluateChaseGuard,
   evaluateHighConvictionSetup,
   evaluateQuoteAgreement,
+  evaluateRealDemand,
   hasPriceStabilized,
   type ConvictionResult,
 } from "./conservativeMode";
+import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
+import { getPublicClient } from "./live/wallet";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -382,6 +385,30 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
+    // Real trading demand — every mode, not just conservative (user
+    // directive 2026-09-13). Looser outside conservative mode; see
+    // conservativeMode.ts's evaluateRealDemand.
+    const demand = evaluateRealDemand(
+      { buys1h: pair.buys1h, sells1h: pair.sells1h, volume1hUsd: pair.volume1h, liquidityUsd: pair.liquidityUsd },
+      conservative
+        ? {
+            minHourlyTxns: tradingConfig.conservativeMinHourlyTxns,
+            minBuyRatio1h: tradingConfig.conservativeMinBuyRatio1h,
+            maxBuyRatio1h: tradingConfig.conservativeMaxBuyRatio1h,
+            maxVolumeToLiquidity1h: tradingConfig.conservativeMaxVolumeToLiquidity1h,
+          }
+        : {
+            minHourlyTxns: tradingConfig.normalMinHourlyTxns,
+            minBuyRatio1h: tradingConfig.normalMinBuyRatio1h,
+            maxBuyRatio1h: tradingConfig.normalMaxBuyRatio1h,
+            maxVolumeToLiquidity1h: tradingConfig.normalMaxVolumeToLiquidity1h,
+          }
+    );
+    if (!demand.passed) {
+      await deferForConviction(entry, candidate.id, demand, conservative);
+      return;
+    }
+
     // Conservative mode: a loss breaker tripped, so this entry only goes ahead
     // on a high-conviction setup on top of the chase guard above.
     if (conservative) {
@@ -489,6 +516,26 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     if (!agreement.passed) {
       await deferForConviction(entry, candidate.id, agreement, conservative);
       return;
+    }
+
+    // Holder concentration — every mode (user directive 2026-09-13: "how do
+    // we know if someone is going to rug the project with a few sells").
+    // Checked last, right before commit: it's a real RPC log scan, not a
+    // cheap in-memory check like the others above.
+    if (tradingConfig.holderCheckEnabled) {
+      const holderSnapshot = await getHolderSnapshot(getPublicClient(), candidate.token.address as `0x${string}`).catch((err) => {
+        logger.warn({ pendingEntryId: entry.id, candidateId: candidate.id, err: String(err) }, "holder concentration check failed to read on-chain data");
+        return undefined;
+      });
+      const holders = evaluateHolderConcentration(holderSnapshot, {
+        maxTop1HolderPercent: tradingConfig.maxTop1HolderPercent,
+        maxTop10HolderPercent: tradingConfig.maxTop10HolderPercent,
+        minHolderCount: tradingConfig.minHolderCountForEntry,
+      });
+      if (!holders.passed) {
+        await deferForConviction(entry, candidate.id, holders, conservative);
+        return;
+      }
     }
     lastConvictionFailures.delete(entry.id);
 

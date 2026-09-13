@@ -5,8 +5,10 @@ import {
   evaluateChaseGuard,
   evaluateHighConvictionSetup,
   evaluateQuoteAgreement,
+  evaluateRealDemand,
   hasPriceStabilized,
   type HighConvictionInput,
+  type RealDemandThresholds,
 } from "./conservativeMode";
 import { tradingConfig } from "./config";
 
@@ -261,6 +263,39 @@ describe("evaluateChaseGuard", () => {
 
   it("holds back with no recent-range data at all", () => {
     expect(evaluateChaseGuard(undefined, opts).passed).toBe(false);
+  });
+});
+
+describe("evaluateRealDemand", () => {
+  const thresholds: RealDemandThresholds = { minHourlyTxns: 15, minBuyRatio1h: 0.5, maxBuyRatio1h: 0.85, maxVolumeToLiquidity1h: 8 };
+
+  it("passes real, balanced trading activity", () => {
+    const result = evaluateRealDemand({ buys1h: 40, sells1h: 30, volume1hUsd: 50_000, liquidityUsd: 20_000 }, thresholds);
+    expect(result.passed).toBe(true);
+  });
+
+  it("blocks a near-dead pool", () => {
+    const result = evaluateRealDemand({ buys1h: 3, sells1h: 2, volume1hUsd: 1_000, liquidityUsd: 20_000 }, thresholds);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("hourlyTxns");
+  });
+
+  it("blocks net-selling pressure (buy ratio below the floor)", () => {
+    const result = evaluateRealDemand({ buys1h: 10, sells1h: 30, volume1hUsd: 50_000, liquidityUsd: 20_000 }, thresholds);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("buyRatio");
+  });
+
+  it("blocks bots-ahead-of-a-dump buy ratio above the ceiling", () => {
+    const result = evaluateRealDemand({ buys1h: 38, sells1h: 2, volume1hUsd: 50_000, liquidityUsd: 20_000 }, thresholds);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("buyRatio");
+  });
+
+  it("blocks wash trading (volume far above liquidity, PONSFLY/OPAI-shaped)", () => {
+    const result = evaluateRealDemand({ buys1h: 40, sells1h: 30, volume1hUsd: 540_000, liquidityUsd: 20_000 }, thresholds);
+    expect(result.passed).toBe(false);
+    expect(result.failedChecks).toContain("volumeToLiquidity");
   });
 });
 
