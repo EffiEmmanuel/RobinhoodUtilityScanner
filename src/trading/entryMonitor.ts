@@ -376,19 +376,22 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     }
 
     const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; tradeLane?: string; liquidityUsd?: number; analysis?: { marketRegime?: string }; manualBuyAndHold?: boolean };
+    const manualEntryOverride = planData.manualBuyAndHold === true;
     const tradeLane = normalizeTradeLane(planData.tradeLane ?? candidate.tradeLane);
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
-    const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address);
-    if (!executionQuality.passed) {
-      await rejectEntry(entry, candidate.id, executionQuality.reasons);
-      return;
-    }
+    if (!manualEntryOverride) {
+      const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address);
+      if (!executionQuality.passed) {
+        await rejectEntry(entry, candidate.id, executionQuality.reasons);
+        return;
+      }
 
-    const honeypotRisk = await evaluateHoneypotRisk(candidate.token.address);
-    if (!honeypotRisk.passed) {
-      await rejectEntry(entry, candidate.id, honeypotRisk.reasons);
-      return;
+      const honeypotRisk = await evaluateHoneypotRisk(candidate.token.address);
+      if (!honeypotRisk.passed) {
+        await rejectEntry(entry, candidate.id, honeypotRisk.reasons);
+        return;
+      }
     }
 
     // Chase guard — every mode, not just conservative (user directive
@@ -402,7 +405,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       minSnapshots: tradingConfig.conservativeMinRecentSnapshots,
       maxRunUpPercent: tradingConfig.conservativeMaxRecentRunUpPercent,
     });
-    if (!chase.passed) {
+    if (!manualEntryOverride && !chase.passed) {
       await deferForConviction(entry, candidate.id, chase, conservative);
       return;
     }
@@ -426,14 +429,14 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
             maxVolumeToLiquidity1h: tradingConfig.normalMaxVolumeToLiquidity1h,
           }
     );
-    if (!demand.passed) {
+    if (!manualEntryOverride && !demand.passed) {
       await deferForConviction(entry, candidate.id, demand, conservative);
       return;
     }
 
     // Conservative mode: a loss breaker tripped, so this entry only goes ahead
     // on a high-conviction setup on top of the chase guard above.
-    if (conservative) {
+    if (!manualEntryOverride && conservative) {
       const conviction = evaluateHighConvictionSetup({
         tokenAgeMinutes: estimateTokenAgeMinutes(candidate.token.firstSeenAt, pair.pairCreatedAt),
         liquidityUsd: pair.liquidityUsd,
@@ -500,21 +503,40 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       );
     }
 
-    const entryResult = validateEntry({
-      circuitBreakersPaused: circuitBreakers.paused,
-      circuitBreakerReasons: circuitBreakers.reasons,
-      currentLiquidityUsd: pair.liquidityUsd ?? 0,
-      liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,
-      sellQuoteAvailable: await isSellable(candidate.token.address, pair, quote.tokenAmount),
-      buySellRatio1h: pair.buys1h !== undefined || pair.sells1h !== undefined
-        ? (pair.buys1h ?? 0) / Math.max((pair.buys1h ?? 0) + (pair.sells1h ?? 0), 1)
-        : undefined,
-      priceChange5mPercent: pair.priceChange5m,
-      estimatedSlippageBps: quote.estimatedSlippageBps,
-      estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
-      positionSizeUsd,
-      availableToDeployUsd: portfolio.availableToDeployUsd,
-    });
+    const sellQuoteAvailable = await isSellable(candidate.token.address, pair, quote.tokenAmount);
+    const entryResult = manualEntryOverride
+      ? {
+          decision: circuitBreakers.paused
+            ? ("DEFER" as const)
+            : !sellQuoteAvailable || positionSizeUsd > portfolio.availableToDeployUsd
+              ? ("DEFER" as const)
+              : ("APPROVED" as const),
+          reasons: circuitBreakers.paused
+            ? circuitBreakers.reasons
+            : !sellQuoteAvailable
+              ? ["manual buy-and-hold waiting: no sell path available yet, so normal exits could not work"]
+              : positionSizeUsd > portfolio.availableToDeployUsd
+                ? ["manual buy-and-hold waiting: position size does not currently fit within available deployable capital"]
+                : [
+                    "manual buy-and-hold override: bypassed research/market rejection gates",
+                    "executable market and sell-path checks passed",
+                  ],
+        }
+      : validateEntry({
+          circuitBreakersPaused: circuitBreakers.paused,
+          circuitBreakerReasons: circuitBreakers.reasons,
+          currentLiquidityUsd: pair.liquidityUsd ?? 0,
+          liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,
+          sellQuoteAvailable,
+          buySellRatio1h: pair.buys1h !== undefined || pair.sells1h !== undefined
+            ? (pair.buys1h ?? 0) / Math.max((pair.buys1h ?? 0) + (pair.sells1h ?? 0), 1)
+            : undefined,
+          priceChange5mPercent: pair.priceChange5m,
+          estimatedSlippageBps: quote.estimatedSlippageBps,
+          estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
+          positionSizeUsd,
+          availableToDeployUsd: portfolio.availableToDeployUsd,
+        });
 
     if (entryResult.decision === "DEFER") {
       await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
@@ -536,7 +558,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       { spotPriceUsd: pair.priceUsd, positionSizeUsd, quotedTokenAmount: quote.tokenAmount },
       maxQuoteDiscountPercent
     );
-    if (!agreement.passed) {
+    if (!manualEntryOverride && !agreement.passed) {
       await deferForConviction(entry, candidate.id, agreement, conservative);
       return;
     }
@@ -545,7 +567,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // we know if someone is going to rug the project with a few sells").
     // Checked last, right before commit: it's a real RPC log scan, not a
     // cheap in-memory check like the others above.
-    if (tradingConfig.holderCheckEnabled) {
+    if (!manualEntryOverride && tradingConfig.holderCheckEnabled) {
       const holderSnapshot = await getHolderSnapshot(getPublicClient(), candidate.token.address as `0x${string}`).catch((err) => {
         logger.warn({ pendingEntryId: entry.id, candidateId: candidate.id, err: String(err) }, "holder concentration check failed to read on-chain data");
         return undefined;
@@ -573,7 +595,11 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       actualEntryMcap: mcap,
       tradeLane,
       pair,
-      reasons: conservative ? [...entryResult.reasons, "conservative mode: passed the high-conviction gate"] : entryResult.reasons,
+      reasons: manualEntryOverride
+        ? entryResult.reasons
+        : conservative
+          ? [...entryResult.reasons, "conservative mode: passed the high-conviction gate"]
+          : entryResult.reasons,
     });
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.APPROVED } });
     await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.TRADED } });
