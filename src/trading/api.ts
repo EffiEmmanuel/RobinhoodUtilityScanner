@@ -11,7 +11,8 @@ import { getAllowedRouterAddresses } from "./live/contracts";
 import { runBacktest, runEntryBacktest } from "./backtest";
 import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
-import { PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
+import { resolveEntryMode } from "./conservativeMode";
+import { LedgerEntryType, PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
 
 function startOfLocalDay(): Date {
   const d = new Date();
@@ -36,6 +37,39 @@ function classifyNoTradeReason(text: string): string {
   if (/circuit|deployable|capital|gas|open positions|kill switch/.test(r)) return "portfolio/circuit breaker";
   if (/watch|wait|risk|skip|ai strategy|planning/.test(r)) return "planning/risk";
   return "other";
+}
+
+async function getCheapCircuitBreakerSnapshot(): Promise<{
+  openPositions: number;
+  circuitBreakers: { paused: boolean; mode: "NORMAL" | "CONSERVATIVE" | "PAUSED"; reasons: string[] };
+}> {
+  const hardPauseReasons: string[] = [];
+  const openPositions = await db.trade.count({ where: { status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] } } });
+  if (!isTradingEnabled()) hardPauseReasons.push("global kill switch is engaged");
+  if (tradingConfig.maxOpenPositions > 0 && openPositions >= tradingConfig.maxOpenPositions) {
+    hardPauseReasons.push(`max open positions reached (${openPositions}/${tradingConfig.maxOpenPositions})`);
+  }
+
+  const startOfDay = startOfLocalDay();
+  const lastReset = await db.circuitBreakerReset.findFirst({ orderBy: { resetAt: "desc" }, select: { resetAt: true } });
+  const countingSince = lastReset && lastReset.resetAt > startOfDay ? lastReset.resetAt : startOfDay;
+  const [todaysPnlEntries, recentClosed, latestSnapshot] = await Promise.all([
+    db.ledgerEntry.findMany({ where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: countingSince } }, select: { amountUsd: true } }),
+    db.trade.findMany({
+      where: { status: TradeStatus.CLOSED, closedAt: { gte: countingSince } },
+      orderBy: { closedAt: "desc" },
+      take: Math.max(tradingConfig.maxConsecutiveLosses, tradingConfig.conservativeHardStopConsecutiveLosses),
+      select: { realizedPnlUsd: true },
+    }),
+    db.portfolioSnapshot.findFirst({ orderBy: { capturedAt: "desc" }, select: { totalEquityUsd: true } }),
+  ]);
+  const todaysRealizedPnl = todaysPnlEntries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
+  const equity = latestSnapshot?.totalEquityUsd ?? tradingConfig.paperStartingBalanceUsd;
+  const dailyRealizedLossPercent = todaysRealizedPnl < 0 && equity > 0 ? (Math.abs(todaysRealizedPnl) / equity) * 100 : 0;
+  const firstNonLoss = recentClosed.findIndex((t) => (t.realizedPnlUsd ?? 0) >= 0);
+  const consecutiveLosses = firstNonLoss === -1 ? recentClosed.length : firstNonLoss;
+  const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
+  return { openPositions, circuitBreakers: { paused: mode === "PAUSED", mode, reasons } };
 }
 
 /** Registers the trading extension's read/control endpoints onto the
@@ -124,7 +158,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
       decisionCreatedAt: Date | null;
     };
 
-    const [candidateGroups, recentCandidates, activePendingEntries, openPositions, tradesToday, latestTrade, circuitBreakers, activeStrategy] =
+    const [candidateGroups, recentCandidates, activePendingEntries, breakerSnapshot, tradesToday, latestTrade, activeStrategy] =
       await Promise.all([
         rawQuery<CandidateGroupRow>(
           `
@@ -133,10 +167,9 @@ export function registerTradingRoutes(app: FastifyInstance): void {
                  "qualificationPath",
                  COUNT(*)::int AS count
           FROM "TradeCandidate"
-          WHERE "createdAt" >= $1
+          WHERE "createdAt" >= now() - interval '${lookbackHours} hours'
           GROUP BY status, "tradeLane", "qualificationPath"
-        `,
-          [since]
+        `
         ),
         rawQuery<RecentCandidateRow>(
           `
@@ -161,14 +194,13 @@ export function registerTradingRoutes(app: FastifyInstance): void {
             ORDER BY d."createdAt" DESC
             LIMIT 1
           ) d ON true
-          WHERE tc."createdAt" >= $1
+          WHERE tc."createdAt" >= now() - interval '${lookbackHours} hours'
           ORDER BY tc."createdAt" DESC
-          LIMIT $2
-        `,
-          [since, take]
+          LIMIT ${take}
+        `
         ),
         db.pendingEntry.count({ where: { status: PendingEntryStatus.ACTIVE } }),
-        db.trade.count({ where: { status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] } } }),
+        getCheapCircuitBreakerSnapshot(),
         db.trade.findMany({
           where: { OR: [{ createdAt: { gte: today } }, { openedAt: { gte: today } }, { closedAt: { gte: today } }] },
           orderBy: { createdAt: "desc" },
@@ -197,9 +229,9 @@ export function registerTradingRoutes(app: FastifyInstance): void {
             token: { select: { symbol: true, name: true, address: true } },
           },
         }),
-        checkCircuitBreakers(),
         getActiveStrategyVersion(),
       ]);
+    const { openPositions, circuitBreakers } = breakerSnapshot;
 
     const reasonBuckets = new Map<string, { count: number; examples: string[] }>();
     const recent = recentCandidates.map((candidate) => {

@@ -750,6 +750,10 @@
         background: var(--bad-soft);
         color: var(--bad);
       }
+      .modal-flag.good {
+        background: var(--good-soft);
+        color: var(--good);
+      }
       .reason-list {
         margin: 6px 0 0;
         padding-left: 18px;
@@ -2686,6 +2690,14 @@
             "</ul>"
           );
         }
+        function isManualBuyHoldPlan(plan) {
+          return !!(
+            plan &&
+            plan.planData &&
+            typeof plan.planData === "object" &&
+            plan.planData.manualBuyAndHold === true
+          );
+        }
 
         function renderTokenModal(token) {
           els.tokenModalTitle.textContent =
@@ -2875,7 +2887,14 @@
           var trade = (token.trades && token.trades[0]) || null;
           if (plan || trade) {
             var planRows = [];
+            var manualBuyHoldPlan = isManualBuyHoldPlan(plan);
             if (plan) {
+              if (manualBuyHoldPlan) {
+                planRows.push([
+                  "Entry mode",
+                  '<span class="modal-flag good" style="margin:0;">Buy &amp; Hold override</span>',
+                ]);
+              }
               planRows.push([
                 "Planned action",
                 esc(plan.action) +
@@ -2993,7 +3012,10 @@
             }
             sections.push(
               '<div class="modal-section"><h4>Trade plan &amp; position</h4>' +
-                '<p class="modal-note">Exit strategy (profit-taking steps, trailing stop) is governed by the active strategy version, applied once a position opens.</p>' +
+                (manualBuyHoldPlan
+                  ? '<p class="modal-flag good">Buy &amp; Hold override: research rejection was bypassed; normal entry checks and normal exits still apply.</p>'
+                  : "") +
+                '<p class="modal-note">Exit strategy (profit-taking steps, trailing stop, risk exits, invalidation, and time exits) is governed by the active strategy version, applied once a position opens.</p>' +
                 kvTable(planRows) +
                 (plan &&
                 plan.pendingEntry &&

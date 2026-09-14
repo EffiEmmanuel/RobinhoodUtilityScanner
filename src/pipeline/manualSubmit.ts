@@ -99,7 +99,6 @@ async function queueManualBuyAndHold(token: Token): Promise<void> {
       confidence: 50,
       planData: {
         manualBuyAndHold: true,
-        lossStopsDisabled: true,
         submittedAt: now.toISOString(),
         freshEval: { eligible: true, riskBucket: "HIGH", reasons: ["manual buy-and-hold override requested by the user"] },
         tradeLane: "MOMENTUM_TACTICAL",
@@ -133,10 +132,10 @@ async function queueManualBuyAndHold(token: Token): Promise<void> {
       projectState: { tokenAddress: token.address },
       technicalState: {},
       portfolioState: {},
-      deterministicRules: { manualBuyAndHold: true, lossStopsDisabled: true },
+      deterministicRules: { manualBuyAndHold: true, forcedIntoWaiting: true },
       finalReasons: [
         "User requested manual buy-and-hold before evaluation.",
-        "Queued directly as a pending entry; entry monitor still runs the normal pre-buy checks.",
+        "Queued directly as a pending entry; once opened, normal exit rules apply.",
       ],
     },
   });
