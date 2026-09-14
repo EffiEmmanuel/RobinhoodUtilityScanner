@@ -905,7 +905,7 @@
         border-radius: 10px;
         padding: 14px 16px;
       }
-      #manual-submit input {
+      #manual-submit input[type="text"] {
         flex: 1;
         min-width: 0;
         font-family: var(--font-mono);
@@ -915,6 +915,20 @@
         border: 1px solid var(--border);
         background: var(--surface-2);
         color: var(--text);
+      }
+      .manual-options {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .manual-options input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+        margin: 0;
       }
       #manual-submit input:focus {
         outline: 2px solid var(--accent);
@@ -1121,6 +1135,10 @@
               placeholder="Paste a contract address (0x…) to queue it for AI evaluation"
             />
           </div>
+          <label class="manual-options" for="manual-buy-hold-input">
+            <input id="manual-buy-hold-input" type="checkbox" />
+            Buy and hold
+          </label>
           <button
             class="btn-primary"
             id="manual-submit-btn"
@@ -1272,6 +1290,13 @@
           </div>
 
           <div class="col">
+            <div class="card">
+              <div class="card-head">
+                <h2>Entry Diagnostics</h2>
+                <span class="count-chip" id="no-trade-window">24h</span>
+              </div>
+              <div class="feed" id="no-trade-feed"></div>
+            </div>
             <div class="card">
               <div class="card-head">
                 <h2>Candidate Pipeline</h2>
@@ -1512,6 +1537,8 @@
           positionsCount: document.getElementById("positions-count"),
           closedBody: document.getElementById("closed-body"),
           closedCount: document.getElementById("closed-count"),
+          noTradeFeed: document.getElementById("no-trade-feed"),
+          noTradeWindow: document.getElementById("no-trade-window"),
           candidatesFeed: document.getElementById("candidates-feed"),
           candidatesCount: document.getElementById("candidates-count"),
           candidatesPrev: document.getElementById("candidates-prev"),
@@ -1545,6 +1572,7 @@
           copyAddrBtn: document.getElementById("copy-addr-btn"),
           gasPill: document.getElementById("gas-pill"),
           manualInput: document.getElementById("manual-address-input"),
+          manualBuyHold: document.getElementById("manual-buy-hold-input"),
           manualBtn: document.getElementById("manual-submit-btn"),
           manualMsg: document.getElementById("manual-submit-msg"),
           tokenModalOverlay: document.getElementById("token-modal-overlay"),
@@ -1778,6 +1806,7 @@
                   : "")
             ),
             fetchJson("/learning/summary"),
+            fetchJson("/trading/no-trade-diagnostics?hours=24&limit=60"),
           ])
             .then(function (results) {
               state.connected = true;
@@ -1791,6 +1820,7 @@
                 profileUpdates: results[5],
                 tokens: results[6],
                 learning: results[7],
+                noTradeDiagnostics: results[8],
               });
             })
             .catch(function (err) {
@@ -1899,19 +1929,20 @@
           ];
           var learning = data.learning || {};
           if (learning.outlierCounts) {
+            var feasible = learning.feasibleOutlierCounts || {};
             tiles.push({
-              label: "10x / 100x Candidates",
+              label: "Feasible 10x / 100x",
               value:
-                (learning.outlierCounts.hit10x || 0) +
+                (feasible.hit10x || 0) +
                 " / " +
-                (learning.outlierCounts.hit100x || 0),
+                (feasible.hit100x || 0),
               sub:
-                "5x " +
-                (learning.outlierCounts.hit5x || 0) +
-                " &middot; 25x " +
-                (learning.outlierCounts.hit25x || 0) +
-                " &middot; 50x " +
-                (learning.outlierCounts.hit50x || 0),
+                "raw 10x " +
+                (learning.outlierCounts.hit10x || 0) +
+                " &middot; raw 100x " +
+                (learning.outlierCounts.hit100x || 0) +
+                " &middot; feasible 5x " +
+                (feasible.hit5x || 0),
             });
           }
           els.tiles.innerHTML = tiles
@@ -1952,6 +1983,7 @@
           }
 
           renderActivity(data.tokens || []);
+          renderNoTradeDiagnostics(data.noTradeDiagnostics || null);
           renderPositions(data.positions || []);
           renderClosedTrades(data.closedTrades || []);
           renderCandidates(
@@ -2150,6 +2182,83 @@
             .join("");
         }
 
+        function renderNoTradeDiagnostics(d) {
+          if (!d) {
+            els.noTradeWindow.textContent = "—";
+            els.noTradeFeed.innerHTML =
+              '<div class="empty-feed">No entry diagnostics available.</div>';
+            return;
+          }
+          var counts = d.counts || {};
+          els.noTradeWindow.textContent = "24h";
+          var status = counts.byStatus || {};
+          var topReasons = (d.reasonSummary || []).slice(0, 4);
+          var rows = [
+            '<div class="feed-row">' +
+              '<div class="line1"><span class="name">' +
+              esc(d.headline || "No active entry is queued.") +
+              '</span><span class="badge ' +
+              ((d.circuitBreakers && d.circuitBreakers.paused) ? "REJECTED" : "WATCH_ONLY") +
+              '">' +
+              esc((d.circuitBreakers && d.circuitBreakers.mode) || "NORMAL") +
+              "</span></div>" +
+              '<div class="line1"><span class="meta">' +
+              (counts.candidates || 0) +
+              " candidates · " +
+              (status.REJECTED || 0) +
+              " rejected · " +
+              (status.WATCH_ONLY || 0) +
+              " watch · " +
+              (counts.activePendingEntries || 0) +
+              " pending · strategy " +
+              esc(d.activeStrategy ? d.activeStrategy.version : "—") +
+              '</span><span class="time">' +
+              fmtAgo(d.since) +
+              "</span></div></div>",
+          ];
+          if (topReasons.length) {
+            topReasons.forEach(function (r) {
+              rows.push(
+                '<div class="feed-row">' +
+                  '<div class="line1"><span class="name" style="font-size:12.5px;">' +
+                  esc(r.category) +
+                  '</span><span class="count-chip">' +
+                  esc(r.count) +
+                  "</span></div>" +
+                  '<div class="line1"><span class="meta" style="text-transform:none;letter-spacing:0;">' +
+                  esc((r.examples && r.examples[0]) || "—") +
+                  "</span></div></div>"
+              );
+            });
+          }
+          if (d.latestTrade) {
+            rows.push(
+              '<div class="feed-row">' +
+                '<div class="line1"><span class="name">Latest trade: ' +
+                esc(d.latestTrade.token) +
+                '</span><span class="badge ' +
+                esc(d.latestTrade.status) +
+                '">' +
+                esc(d.latestTrade.status) +
+                "</span></div>" +
+                '<div class="line1"><span class="meta">' +
+                fmtUsdSpan(d.latestTrade.realizedPnlUsd) +
+                " · " +
+                fmtMultiple(d.latestTrade.realizedMultiple) +
+                " · " +
+                esc(d.latestTrade.exitReason || "open/no exit yet") +
+                '</span><span class="time">' +
+                fmtAgo(
+                  d.latestTrade.closedAt ||
+                    d.latestTrade.openedAt ||
+                    d.latestTrade.createdAt
+                ) +
+                "</span></div></div>"
+            );
+          }
+          els.noTradeFeed.innerHTML = rows.join("");
+        }
+
         function renderCandidates(rows, hasMore) {
           els.candidatesCount.textContent = rows.length;
 
@@ -2187,11 +2296,16 @@
                   : "—";
               var lane = c.tradeLane || c.qualificationPath || "—";
               var outcomeBits = [];
-              if (c.outcome && c.outcome.hit10000x) outcomeBits.push("100x");
-              else if (c.outcome && c.outcome.hit5000x) outcomeBits.push("50x");
-              else if (c.outcome && c.outcome.hit2500x) outcomeBits.push("25x");
-              else if (c.outcome && c.outcome.hit1000x) outcomeBits.push("10x");
-              else if (c.outcome && c.outcome.hit500x) outcomeBits.push("5x");
+              if (c.outcome && c.outcome.feasibleHit10000x) outcomeBits.push("feasible 100x");
+              else if (c.outcome && c.outcome.feasibleHit5000x) outcomeBits.push("feasible 50x");
+              else if (c.outcome && c.outcome.feasibleHit2500x) outcomeBits.push("feasible 25x");
+              else if (c.outcome && c.outcome.feasibleHit1000x) outcomeBits.push("feasible 10x");
+              else if (c.outcome && c.outcome.feasibleHit500x) outcomeBits.push("feasible 5x");
+              else if (c.outcome && c.outcome.hit10000x) outcomeBits.push("raw 100x");
+              else if (c.outcome && c.outcome.hit5000x) outcomeBits.push("raw 50x");
+              else if (c.outcome && c.outcome.hit2500x) outcomeBits.push("raw 25x");
+              else if (c.outcome && c.outcome.hit1000x) outcomeBits.push("raw 10x");
+              else if (c.outcome && c.outcome.hit500x) outcomeBits.push("raw 5x");
               return (
                 '<div class="feed-row clickable" data-token-id="' +
                 esc(c.token && c.token.id) +
@@ -2447,10 +2561,16 @@
         function submitManualAddress() {
           var address = els.manualInput.value.trim();
           if (!address) return;
+          var buyAndHold = !!els.manualBuyHold.checked;
           els.manualBtn.disabled = true;
           els.manualMsg.className = "";
-          els.manualMsg.textContent = "Queuing…";
-          postJson("/tokens/submit", { address: address })
+          els.manualMsg.textContent = buyAndHold
+            ? "Queuing buy-and-hold…"
+            : "Queuing…";
+          postJson("/tokens/submit", {
+            address: address,
+            buyAndHold: buyAndHold,
+          })
             .then(function (token) {
               var label =
                 token.symbol ||
@@ -2462,6 +2582,12 @@
                   label +
                   " is already being evaluated — status: " +
                   token.status;
+              } else if (token.submitAction === "BUY_AND_HOLD_WAITING") {
+                els.manualMsg.className = "ok";
+                els.manualMsg.textContent =
+                  "Queued buy-and-hold for " +
+                  label +
+                  " — waiting for entry checks.";
               } else {
                 els.manualMsg.className = "ok";
                 els.manualMsg.textContent =
@@ -2473,6 +2599,7 @@
                   token.status;
               }
               els.manualInput.value = "";
+              els.manualBuyHold.checked = false;
               refreshAll();
             })
             .catch(function (err) {

@@ -356,6 +356,8 @@ model TradeCandidate {
   trades    Trade[]
 
   @@index([status])
+  @@index([createdAt])
+  @@index([status, createdAt])
 }
 
 model TradePlan {
@@ -511,6 +513,7 @@ model TradeExecution {
   createdAt DateTime @default(now())
 
   @@index([tradeId])
+  @@index([createdAt])
 }
 
 model PositionSnapshot {
@@ -574,6 +577,9 @@ model TradeDecisionSnapshot {
 
   @@index([candidateId])
   @@index([tradeId])
+  @@index([candidateId, createdAt])
+  @@index([tradeId, createdAt])
+  @@index([createdAt])
 }
 
 model ExitSignal {
@@ -650,6 +656,15 @@ model CandidateOutcome {
   maxMultiple48h Float?
   maxDrawdown24h Float?
 
+  // Raw max multiples can be nonsense in this market: a token can print a
+  // huge DexScreener wick with no realistic exit path, microscopic depth, or
+  // an immediate rug to zero. Feasible labels only advance when the observed
+  // peak also clears a sellability/depth check in outcomes.ts, so learning can
+  // distinguish "would have looked huge on a chart" from "could plausibly
+  // have been traded by this bot."
+  feasibleMaxMultiple24h Float?
+  feasibleMaxMultiple48h Float?
+
   hit125x Boolean?
   hit150x Boolean?
   hit200x Boolean?
@@ -660,6 +675,16 @@ model CandidateOutcome {
   hit5000x Boolean?
   hit10000x Boolean?
 
+  feasibleHit125x Boolean?
+  feasibleHit150x Boolean?
+  feasibleHit200x Boolean?
+  feasibleHit250x Boolean?
+  feasibleHit500x Boolean?
+  feasibleHit1000x Boolean?
+  feasibleHit2500x Boolean?
+  feasibleHit5000x Boolean?
+  feasibleHit10000x Boolean?
+
   timeTo150xMinutes Int?
   timeTo200xMinutes Int?
   timeTo250xMinutes Int?
@@ -669,8 +694,12 @@ model CandidateOutcome {
   timeTo5000xMinutes Int?
   timeTo10000xMinutes Int?
 
+  feasibleOutcomeReason Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([updatedAt])
 }
 
 // Every trade/plan/decision references a strategyVersionId — rules never

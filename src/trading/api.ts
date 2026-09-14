@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db";
+import { rawQuery } from "../rawDb";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
 import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd } from "./portfolio";
@@ -10,7 +11,32 @@ import { getAllowedRouterAddresses } from "./live/contracts";
 import { runBacktest, runEntryBacktest } from "./backtest";
 import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
-import { PendingEntryStatus, StrategyStatus, TradeStatus } from "../generated/prisma";
+import { PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
+
+function startOfLocalDay(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function reasonText(value: unknown): string {
+  if (Array.isArray(value)) return value.map((v) => String(v)).join("; ");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value ?? "");
+}
+
+function classifyNoTradeReason(text: string): string {
+  const r = text.toLowerCase();
+  if (/honeypot|wallet cannot transfer|no sell path|sell quote|blacklist|bot-control|transfer.*blocked/.test(r)) return "honeypot/transfer safety";
+  if (/utility|product|meme|unknown tokens|website|credibility|token-first/.test(r)) return "utility/product gate";
+  if (/contractscore|contract score|contract safety|owner|tax|trading control|transfer limit/.test(r)) return "contract safety";
+  if (/liquidity|mcap|market cap/.test(r)) return "liquidity/market-cap";
+  if (/qualityscore|researchconfidence|confidence/.test(r)) return "quality/confidence";
+  if (/parabolic|chase|run-up|price velocity|buy ratio|sell pressure|volume/.test(r)) return "market timing";
+  if (/circuit|deployable|capital|gas|open positions|kill switch/.test(r)) return "portfolio/circuit breaker";
+  if (/watch|wait|risk|skip|ai strategy|planning/.test(r)) return "planning/risk";
+  return "other";
+}
 
 /** Registers the trading extension's read/control endpoints onto the
  * existing API server (§78). No execution-trigger endpoints exist here —
@@ -68,6 +94,203 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     const { reason } = (req.body as { reason?: string } | undefined) ?? {};
     await resetCircuitBreakerCounters(reason);
     return checkCircuitBreakers();
+  });
+
+  app.get("/trading/no-trade-diagnostics", async (req) => {
+    const { hours, limit } = req.query as { hours?: string; limit?: string };
+    const lookbackHours = Math.min(Math.max(Number(hours) || 24, 1), 168);
+    const take = Math.min(Number(limit) || 60, 150);
+    const since = new Date(Date.now() - lookbackHours * 3_600_000);
+    const today = startOfLocalDay();
+
+    type CandidateGroupRow = {
+      status: TradeCandidateStatus;
+      tradeLane: string | null;
+      qualificationPath: string | null;
+      count: number;
+    };
+    type RecentCandidateRow = {
+      id: string;
+      status: TradeCandidateStatus;
+      tradeLane: string | null;
+      qualificationPath: string | null;
+      qualityScore: number | null;
+      researchConfidence: number | null;
+      createdAt: Date;
+      token: string;
+      stage: string | null;
+      decision: TradeDecision | null;
+      finalReasons: unknown;
+      decisionCreatedAt: Date | null;
+    };
+
+    const [candidateGroups, recentCandidates, activePendingEntries, openPositions, tradesToday, latestTrade, circuitBreakers, activeStrategy] =
+      await Promise.all([
+        rawQuery<CandidateGroupRow>(
+          `
+          SELECT status,
+                 "tradeLane",
+                 "qualificationPath",
+                 COUNT(*)::int AS count
+          FROM "TradeCandidate"
+          WHERE "createdAt" >= $1
+          GROUP BY status, "tradeLane", "qualificationPath"
+        `,
+          [since]
+        ),
+        rawQuery<RecentCandidateRow>(
+          `
+          SELECT tc.id,
+                 tc.status,
+                 tc."tradeLane",
+                 tc."qualificationPath",
+                 tc."qualityScore",
+                 tc."researchConfidence",
+                 tc."createdAt",
+                 COALESCE(t.symbol, t.name, SUBSTRING(t.address, 1, 8)) AS token,
+                 d.stage,
+                 d.decision,
+                 d."finalReasons",
+                 d."createdAt" AS "decisionCreatedAt"
+          FROM "TradeCandidate" tc
+          JOIN "Token" t ON t.id = tc."tokenId"
+          LEFT JOIN LATERAL (
+            SELECT stage, decision, "finalReasons", "createdAt"
+            FROM "TradeDecisionSnapshot" d
+            WHERE d."candidateId" = tc.id
+            ORDER BY d."createdAt" DESC
+            LIMIT 1
+          ) d ON true
+          WHERE tc."createdAt" >= $1
+          ORDER BY tc."createdAt" DESC
+          LIMIT $2
+        `,
+          [since, take]
+        ),
+        db.pendingEntry.count({ where: { status: PendingEntryStatus.ACTIVE } }),
+        db.trade.count({ where: { status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] } } }),
+        db.trade.findMany({
+          where: { OR: [{ createdAt: { gte: today } }, { openedAt: { gte: today } }, { closedAt: { gte: today } }] },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+          select: {
+            status: true,
+            createdAt: true,
+            openedAt: true,
+            closedAt: true,
+            realizedPnlUsd: true,
+            realizedMultiple: true,
+            exitReason: true,
+            token: { select: { symbol: true, name: true, address: true } },
+          },
+        }),
+        db.trade.findFirst({
+          orderBy: { createdAt: "desc" },
+          select: {
+            status: true,
+            createdAt: true,
+            openedAt: true,
+            closedAt: true,
+            realizedPnlUsd: true,
+            realizedMultiple: true,
+            exitReason: true,
+            token: { select: { symbol: true, name: true, address: true } },
+          },
+        }),
+        checkCircuitBreakers(),
+        getActiveStrategyVersion(),
+      ]);
+
+    const reasonBuckets = new Map<string, { count: number; examples: string[] }>();
+    const recent = recentCandidates.map((candidate) => {
+      const text = reasonText(candidate.finalReasons);
+      const category = classifyNoTradeReason(text);
+      if (text) {
+        const bucket = reasonBuckets.get(category) ?? { count: 0, examples: [] };
+        bucket.count++;
+        if (bucket.examples.length < 4) bucket.examples.push(text.slice(0, 220));
+        reasonBuckets.set(category, bucket);
+      }
+      return {
+        id: candidate.id,
+        token: candidate.token,
+        status: candidate.status,
+        tradeLane: candidate.tradeLane,
+        qualificationPath: candidate.qualificationPath,
+        qualityScore: candidate.qualityScore,
+        researchConfidence: candidate.researchConfidence,
+        createdAt: candidate.createdAt,
+        latestDecision: candidate.stage && candidate.decision
+          ? {
+              stage: candidate.stage,
+              decision: candidate.decision,
+              category,
+              reasons: text,
+              createdAt: candidate.decisionCreatedAt,
+            }
+          : null,
+      };
+    });
+
+    const byStatus = Object.fromEntries(
+      Object.values(TradeCandidateStatus).map((status) => [
+        status,
+        candidateGroups.filter((g) => g.status === status).reduce((sum, g) => sum + Number(g.count), 0),
+      ])
+    );
+    const byLane = candidateGroups.reduce<Record<string, number>>((acc, group) => {
+      const key = group.tradeLane ?? "UNKNOWN";
+      acc[key] = (acc[key] ?? 0) + Number(group.count);
+      return acc;
+    }, {});
+    const byQualificationPath = candidateGroups.reduce<Record<string, number>>((acc, group) => {
+      const key = group.qualificationPath ?? "UNKNOWN";
+      acc[key] = (acc[key] ?? 0) + Number(group.count);
+      return acc;
+    }, {});
+    const reasonSummary = Array.from(reasonBuckets.entries())
+      .map(([category, bucket]) => ({ category, count: bucket.count, examples: bucket.examples }))
+      .sort((a, b) => b.count - a.count);
+
+    let headline = "No active entry is queued.";
+    if (openPositions > 0) headline = "Capital is currently in open positions.";
+    else if (activePendingEntries > 0) headline = "The bot has active pending entries waiting for price triggers.";
+    else if (circuitBreakers.paused) headline = "New entries are paused by a circuit breaker.";
+    else if (circuitBreakers.mode === "CONSERVATIVE") headline = "Loss controls are active; only high-conviction entries can pass.";
+    else if ((byStatus.WAITING ?? 0) === 0 && (byStatus.QUALIFIED ?? 0) === 0) headline = "No recent candidate currently clears the trade bar.";
+
+    const labelTrade = (trade: typeof latestTrade) =>
+      trade && {
+        token: trade.token.symbol || trade.token.name || trade.token.address.slice(0, 8),
+        status: trade.status,
+        createdAt: trade.createdAt,
+        openedAt: trade.openedAt,
+        closedAt: trade.closedAt,
+        realizedPnlUsd: trade.realizedPnlUsd,
+        realizedMultiple: trade.realizedMultiple,
+        exitReason: trade.exitReason,
+      };
+
+    return {
+      since,
+      today,
+      headline,
+      circuitBreakers,
+      activeStrategy: { id: activeStrategy.id, name: activeStrategy.name, version: activeStrategy.version, status: activeStrategy.status },
+      counts: {
+        candidates: candidateGroups.reduce((sum, g) => sum + Number(g.count), 0),
+        byStatus,
+        byLane,
+        byQualificationPath,
+        activePendingEntries,
+        openPositions,
+        tradesToday: tradesToday.length,
+      },
+      reasonSummary,
+      recentCandidates: recent,
+      tradesToday: tradesToday.map(labelTrade),
+      latestTrade: labelTrade(latestTrade),
+    };
   });
 
   app.get("/trade-candidates", async (req) => {
@@ -360,10 +583,36 @@ export function registerTradingRoutes(app: FastifyInstance): void {
         hit50x: rows.filter((r) => r.hit5000x).length,
         hit100x: rows.filter((r) => r.hit10000x).length,
       },
+      feasibleOutlierCounts: {
+        hit5x: rows.filter((r) => r.feasibleHit500x).length,
+        hit10x: rows.filter((r) => r.feasibleHit1000x).length,
+        hit25x: rows.filter((r) => r.feasibleHit2500x).length,
+        hit50x: rows.filter((r) => r.feasibleHit5000x).length,
+        hit100x: rows.filter((r) => r.feasibleHit10000x).length,
+      },
     };
   });
 
-  const VALID_LABELS: OutcomeLabel[] = ["hit125x", "hit150x", "hit200x", "hit250x", "hit500x", "hit1000x", "hit2500x", "hit5000x", "hit10000x"];
+  const VALID_LABELS: OutcomeLabel[] = [
+    "hit125x",
+    "hit150x",
+    "hit200x",
+    "hit250x",
+    "hit500x",
+    "hit1000x",
+    "hit2500x",
+    "hit5000x",
+    "hit10000x",
+    "feasibleHit125x",
+    "feasibleHit150x",
+    "feasibleHit200x",
+    "feasibleHit250x",
+    "feasibleHit500x",
+    "feasibleHit1000x",
+    "feasibleHit2500x",
+    "feasibleHit5000x",
+    "feasibleHit10000x",
+  ];
 
   app.post("/learning/train", async (req, reply) => {
     const { targetLabel } = req.body as { targetLabel?: string };

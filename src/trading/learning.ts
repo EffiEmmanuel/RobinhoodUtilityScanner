@@ -13,7 +13,25 @@ import { logger } from "../logger";
  * directly alter production strategy").
  */
 
-export type OutcomeLabel = "hit125x" | "hit150x" | "hit200x" | "hit250x" | "hit500x" | "hit1000x" | "hit2500x" | "hit5000x" | "hit10000x";
+export type OutcomeLabel =
+  | "hit125x"
+  | "hit150x"
+  | "hit200x"
+  | "hit250x"
+  | "hit500x"
+  | "hit1000x"
+  | "hit2500x"
+  | "hit5000x"
+  | "hit10000x"
+  | "feasibleHit125x"
+  | "feasibleHit150x"
+  | "feasibleHit200x"
+  | "feasibleHit250x"
+  | "feasibleHit500x"
+  | "feasibleHit1000x"
+  | "feasibleHit2500x"
+  | "feasibleHit5000x"
+  | "feasibleHit10000x";
 
 const FEATURE_NAMES = [
   "qualityScore",
@@ -79,6 +97,15 @@ export interface FeatureRow {
   hit2500x: boolean;
   hit5000x: boolean;
   hit10000x: boolean;
+  feasibleHit125x: boolean;
+  feasibleHit150x: boolean;
+  feasibleHit200x: boolean;
+  feasibleHit250x: boolean;
+  feasibleHit500x: boolean;
+  feasibleHit1000x: boolean;
+  feasibleHit2500x: boolean;
+  feasibleHit5000x: boolean;
+  feasibleHit10000x: boolean;
   maxDrawdown24h?: number;
 }
 
@@ -155,6 +182,15 @@ export async function exportFeatureDataset(): Promise<FeatureRow[]> {
         hit2500x: c.outcome!.hit2500x ?? false,
         hit5000x: c.outcome!.hit5000x ?? false,
         hit10000x: c.outcome!.hit10000x ?? false,
+        feasibleHit125x: c.outcome!.feasibleHit125x ?? false,
+        feasibleHit150x: c.outcome!.feasibleHit150x ?? false,
+        feasibleHit200x: c.outcome!.feasibleHit200x ?? false,
+        feasibleHit250x: c.outcome!.feasibleHit250x ?? false,
+        feasibleHit500x: c.outcome!.feasibleHit500x ?? false,
+        feasibleHit1000x: c.outcome!.feasibleHit1000x ?? false,
+        feasibleHit2500x: c.outcome!.feasibleHit2500x ?? false,
+        feasibleHit5000x: c.outcome!.feasibleHit5000x ?? false,
+        feasibleHit10000x: c.outcome!.feasibleHit10000x ?? false,
         maxDrawdown24h: c.outcome!.maxDrawdown24h ?? undefined,
       };
     });

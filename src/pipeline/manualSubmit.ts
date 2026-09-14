@@ -5,8 +5,9 @@ import { logger } from "../logger";
 import { getPublicClient } from "../trading/live/wallet";
 import { getTokenNameSymbol } from "../trading/live/tokenUtils";
 import { researchMarket } from "../research/market";
-import { TokenStatus, TradeCandidateStatus } from "../generated/prisma";
+import { TokenStatus, TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision, TradeStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
+import { getActiveStrategyVersion } from "../trading/strategy";
 
 // A human pasting a CA in has already vouched for it, so a manual submission
 // re-queues even a token the automated pipeline already fully evaluated and
@@ -23,6 +24,14 @@ const IN_FLIGHT_TOKEN_STATUSES = new Set<TokenStatus>([TokenStatus.CLASSIFYING, 
 // candidate hasn't resolved yet — so this checks that too, not just the
 // token's own status.
 const IN_FLIGHT_CANDIDATE_STATUSES = new Set<TradeCandidateStatus>([TradeCandidateStatus.QUALIFIED, TradeCandidateStatus.PLANNING, TradeCandidateStatus.WAITING]);
+const ACTIVE_TRADE_STATUSES = new Set<TradeStatus>([
+  TradeStatus.ENTRY_PENDING,
+  TradeStatus.ENTRY_SUBMITTED,
+  TradeStatus.OPEN,
+  TradeStatus.PARTIALLY_EXITED,
+  TradeStatus.EXIT_PENDING,
+  TradeStatus.EXIT_SUBMITTED,
+]);
 
 /** Pulls a 0x address out of raw input — accepts a bare address or something
  * like a pasted DexScreener/explorer URL with the address in the path.
@@ -57,27 +66,115 @@ export interface ManualSubmitResult {
   // triggered new work or just handed back a token that's genuinely
   // in-flight right now — without this, "mid-evaluation" and "freshly
   // queued" would render identically as "Queued X — status: Y".
-  action: "CREATED" | "REQUEUED" | "ALREADY_IN_PROGRESS";
+  action: "CREATED" | "REQUEUED" | "ALREADY_IN_PROGRESS" | "BUY_AND_HOLD_WAITING";
 }
 
-export async function submitManualToken(rawAddress: string): Promise<ManualSubmitResult> {
+function mergeManualProfile(rawProfile: unknown, submittedAt: string, buyAndHold: boolean): object {
+  const base = rawProfile && typeof rawProfile === "object" && !Array.isArray(rawProfile) ? rawProfile as Record<string, unknown> : {};
+  return { ...base, manual: true, submittedAt, manualBuyAndHold: buyAndHold || base.manualBuyAndHold === true };
+}
+
+async function queueManualBuyAndHold(token: Token): Promise<void> {
+  const strategy = await getActiveStrategyVersion();
+  const now = new Date();
+  const candidate = await db.tradeCandidate.create({
+    data: {
+      tokenId: token.id,
+      status: TradeCandidateStatus.WAITING,
+      qualityScore: 50,
+      researchConfidence: 50,
+      qualificationPath: "MANUAL_BUY_AND_HOLD",
+      tradeLane: "MOMENTUM_TACTICAL",
+    },
+  });
+  const plan = await db.tradePlan.create({
+    data: {
+      candidateId: candidate.id,
+      strategyVersionId: strategy.id,
+      action: TradePlanAction.BUY_NOW,
+      entryStyle: "MARKET_ENTRY",
+      targetEntryMcapMin: 0,
+      targetEntryMcapMax: Number.MAX_SAFE_INTEGER,
+      riskScore: 100,
+      confidence: 50,
+      planData: {
+        manualBuyAndHold: true,
+        lossStopsDisabled: true,
+        submittedAt: now.toISOString(),
+        freshEval: { eligible: true, riskBucket: "HIGH", reasons: ["manual buy-and-hold override requested by the user"] },
+        tradeLane: "MOMENTUM_TACTICAL",
+        analysis: {
+          marketRegime: "UNKNOWN",
+          isExtended: false,
+          recommendedAction: "BUY_NOW",
+          entryStyle: "MARKET_ENTRY",
+          riskScore: 100,
+          confidence: 50,
+          reasoning: ["Manual buy-and-hold override: wait for the normal entry monitor to validate and open the position."],
+        },
+      } as unknown as object,
+    },
+  });
+  await db.pendingEntry.create({
+    data: {
+      tradePlanId: plan.id,
+      status: PendingEntryStatus.ACTIVE,
+      targetMcapMin: 0,
+      targetMcapMax: Number.MAX_SAFE_INTEGER,
+    },
+  });
+  await db.tradeDecisionSnapshot.create({
+    data: {
+      candidateId: candidate.id,
+      decision: TradeDecision.WAIT,
+      stage: "manual_buy_and_hold",
+      strategyVersionId: strategy.id,
+      marketState: {},
+      projectState: { tokenAddress: token.address },
+      technicalState: {},
+      portfolioState: {},
+      deterministicRules: { manualBuyAndHold: true, lossStopsDisabled: true },
+      finalReasons: [
+        "User requested manual buy-and-hold before evaluation.",
+        "Queued directly as a pending entry; entry monitor still runs the normal pre-buy checks.",
+      ],
+    },
+  });
+}
+
+export async function submitManualToken(rawAddress: string, options: { buyAndHold?: boolean } = {}): Promise<ManualSubmitResult> {
   const address = extractAddress(rawAddress);
+  const buyAndHold = options.buyAndHold === true;
 
   const existing = await db.token.findUnique({
     where: { chain_address: { chain: config.targetChainId, address } },
-    include: { tradeCandidates: { orderBy: { createdAt: "desc" }, take: 1 } },
+    include: {
+      tradeCandidates: { orderBy: { createdAt: "desc" }, take: 1 },
+      trades: { where: { status: { in: Array.from(ACTIVE_TRADE_STATUSES) } }, orderBy: { createdAt: "desc" }, take: 1 },
+    },
   });
 
   if (existing) {
     const latestCandidate = existing.tradeCandidates[0];
     const candidateInFlight = latestCandidate !== undefined && IN_FLIGHT_CANDIDATE_STATUSES.has(latestCandidate.status);
-    if (IN_FLIGHT_TOKEN_STATUSES.has(existing.status) || candidateInFlight) {
+    const activeTrade = existing.trades[0] !== undefined;
+    if (candidateInFlight || activeTrade || (!buyAndHold && IN_FLIGHT_TOKEN_STATUSES.has(existing.status))) {
       return { token: existing, action: "ALREADY_IN_PROGRESS" };
     }
     const reset = await db.token.update({
       where: { id: existing.id },
-      data: { status: TokenStatus.DETECTED, lastSeenAt: new Date(), manualReevaluationRequestedAt: new Date() },
+      data: {
+        status: buyAndHold ? existing.status : TokenStatus.DETECTED,
+        lastSeenAt: new Date(),
+        manualReevaluationRequestedAt: buyAndHold ? null : new Date(),
+        rawProfile: mergeManualProfile(existing.rawProfile, new Date().toISOString(), buyAndHold),
+      },
     });
+    if (buyAndHold) {
+      await queueManualBuyAndHold(reset);
+      logger.warn({ tokenId: reset.id, address }, "manual buy-and-hold submission queued directly as a pending entry");
+      return { token: reset, action: "BUY_AND_HOLD_WAITING" };
+    }
     logger.info({ tokenId: reset.id, address, previousStatus: existing.status }, "manual submission: re-queued a token for a fresh look");
     return { token: reset, action: "REQUEUED" };
   }
@@ -106,9 +203,15 @@ export async function submitManualToken(rawAddress: string): Promise<ManualSubmi
       iconUrl: market.primaryPair?.imageUrl,
       headerUrl: market.primaryPair?.headerUrl,
       status: TokenStatus.DETECTED,
-      rawProfile: { manual: true, submittedAt: new Date().toISOString() },
+      rawProfile: mergeManualProfile(null, new Date().toISOString(), buyAndHold),
     },
   });
+
+  if (buyAndHold) {
+    await queueManualBuyAndHold(created);
+    logger.warn({ tokenId: created.id, address }, "manual buy-and-hold submission queued directly as a pending entry");
+    return { token: created, action: "BUY_AND_HOLD_WAITING" };
+  }
 
   logger.info({ tokenId: created.id, address }, "manually submitted token queued for AI evaluation");
   return { token: created, action: "CREATED" };

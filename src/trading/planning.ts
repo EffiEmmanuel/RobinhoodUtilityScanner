@@ -9,6 +9,7 @@ import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
+import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
@@ -53,9 +54,16 @@ export async function planCandidate(candidateId: string): Promise<void> {
     hourlyTxns,
     hardReject: run.hardReject,
   });
+  const utilityGate = evaluateUtilityOnlyGate(
+    utilityGateInputFromRawResearch(run.rawResearch, {
+      utilityScore: run.utilityScore,
+      credibilityScore: run.credibilityScore,
+      websiteScore: run.websiteScore,
+    })
+  );
   const qualificationPath = freshEval.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : (candidate.qualificationPath ?? "NORMAL");
   const lane = classifyTradeLane({
-    evaluation: freshEval,
+    evaluation: utilityGate.passed ? freshEval : { eligible: false, riskBucket: "REJECT", reasons: utilityGate.reasons },
     qualificationPath,
     qualityScore: candidate.qualityScore,
     researchConfidence: candidate.researchConfidence,
@@ -66,15 +74,15 @@ export async function planCandidate(candidateId: string): Promise<void> {
     liquidityUsd,
   });
 
-  if (!freshEval.eligible) {
+  if (!freshEval.eligible || !utilityGate.passed) {
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
-      reasons: freshEval.reasons,
+      reasons: [...freshEval.reasons, ...utilityGate.reasons],
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
-    logger.info({ candidateId, reasons: freshEval.reasons }, "candidate rejected at planning (liquidity/quality moved since qualification)");
+    logger.info({ candidateId, reasons: [...freshEval.reasons, ...utilityGate.reasons] }, "candidate rejected at planning (eligibility/utility moved since qualification)");
     return;
   }
 
@@ -173,7 +181,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
+      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });

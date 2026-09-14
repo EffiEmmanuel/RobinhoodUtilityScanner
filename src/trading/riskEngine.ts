@@ -202,6 +202,15 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
     positionSizeUsd = portfolio.availableToDeployUsd;
     reasons.push("capped at remaining deployable capital");
   }
+  if (
+    tradingConfig.mode === "LIVE" &&
+    input.tradeLane === "MOMENTUM_TACTICAL" &&
+    tradingConfig.tacticalLiveMaxPositionUsd > 0 &&
+    positionSizeUsd > tradingConfig.tacticalLiveMaxPositionUsd
+  ) {
+    positionSizeUsd = tradingConfig.tacticalLiveMaxPositionUsd;
+    reasons.push(`capped tactical LIVE probe at $${tradingConfig.tacticalLiveMaxPositionUsd.toFixed(2)} until this lane proves positive expectancy`);
+  }
 
   // Small-account gas check (§23). Below this size, gas alone exceeds
   // maxGasCostPercentOfPosition no matter what the formula above computed.
@@ -242,7 +251,7 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   }
 
   reasons.push(
-    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x lane=${laneMult.toFixed(2)}`
+    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x mcap=${marketCapMult.toFixed(2)} x lane=${laneMult.toFixed(2)}`
   );
   return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons };
 }

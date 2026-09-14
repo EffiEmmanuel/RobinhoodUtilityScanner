@@ -1,7 +1,7 @@
 import { db } from "../db";
 import { logger } from "../logger";
 import { TradeStatus, LedgerEntryType } from "../generated/prisma";
-import type { Trade } from "../generated/prisma";
+import type { Trade, TradePlan } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis";
 import { validatePosition, validateExit } from "./riskEngine";
@@ -38,6 +38,11 @@ function blockedExitAgeMinutes(tradeId: string): number {
   return since === undefined ? 0 : (Date.now() - since) / 60_000;
 }
 
+function isManualBuyAndHoldPlan(plan: TradePlan | null): boolean {
+  const planData = plan?.planData;
+  return !!(planData && typeof planData === "object" && (planData as { manualBuyAndHold?: unknown }).manualBuyAndHold === true);
+}
+
 interface ExitDecision {
   type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
@@ -69,6 +74,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const plan = trade.tradePlanId ? await db.tradePlan.findUnique({ where: { id: trade.tradePlanId } }) : null;
   const strategy = await getActiveStrategyVersion();
   const exitRules = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
+  const manualBuyAndHold = isManualBuyAndHoldPlan(plan);
 
   const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
   const pair = market.primaryPair;
@@ -161,7 +167,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // what actually executes anything; a HOLD or a review failure just falls
   // through to the same profit-step/trailing/time exits as before this
   // feature existed.
-  if (shouldRunStrategyReview(trade)) {
+  if (!manualBuyAndHold && shouldRunStrategyReview(trade)) {
     let aiDecision: PositionStrategyDecision | null = null;
     try {
       aiDecision = await runPositionStrategyReview({
@@ -197,6 +203,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     profitStepsTaken,
     remainingTokens,
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
+    manualBuyAndHold,
   });
 
   if (!decision) return;
@@ -278,14 +285,26 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
     trade.actualEntryMcap > fastFlip.largeMcapUsd &&
     (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
 
-  if (!isSpeculative && !isLargeEntryNotYetProven) return baseExitRules;
+  const resolved =
+    !isSpeculative && !isLargeEntryNotYetProven
+      ? baseExitRules
+      : {
+          ...baseExitRules,
+          profitSteps: fastFlip.profitSteps,
+          trailingActivationMultiple: fastFlip.trailingActivationMultiple,
+          trailingPercent: fastFlip.trailingPercent,
+          maxHoldMinutes: fastFlip.maxHoldMinutes,
+        };
+
+  if (tradeLane !== "MOMENTUM_TACTICAL") return resolved;
 
   return {
-    ...baseExitRules,
-    profitSteps: fastFlip.profitSteps,
-    trailingActivationMultiple: fastFlip.trailingActivationMultiple,
-    trailingPercent: fastFlip.trailingPercent,
-    maxHoldMinutes: fastFlip.maxHoldMinutes,
+    ...resolved,
+    maxLossPercent: Math.min(resolved.maxLossPercent, tradingConfig.tacticalMaxLossPercent),
+    catastrophicLossPercent: Math.min(resolved.catastrophicLossPercent, tradingConfig.tacticalCatastrophicLossPercent),
+    trailingActivationMultiple: Math.min(resolved.trailingActivationMultiple, tradingConfig.tacticalTrailingActivationMultiple),
+    trailingPercent: Math.min(resolved.trailingPercent, tradingConfig.tacticalTrailingPercent),
+    maxHoldMinutes: Math.min(resolved.maxHoldMinutes, tradingConfig.tacticalMaxHoldMinutes),
   };
 }
 
@@ -318,21 +337,24 @@ function evaluateExits(ctx: {
   profitStepsTaken: number;
   remainingTokens: number;
   totalBoughtTokens: number;
+  manualBuyAndHold: boolean;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
 
   // Priority 1: emergency/risk exit (§75).
-  const positionRisk = validatePosition({
-    liquidityUsd: ctx.liquidityUsd,
-    liquidityAtEntryUsd: trade.entryLiquidityUsd ?? ctx.liquidityUsd, // falls back to current (no-op check) only for trades opened before entryLiquidityUsd existed
-    unrealizedPnlPercent: ctx.unrealizedPnlPercent,
-    maxLossPercent: exitRules.maxLossPercent,
-    catastrophicLossPercent: exitRules.catastrophicLossPercent,
-    buySellRatio5m: ctx.buySellRatio5m,
-    totalTxns5m: ctx.totalTxns5m,
-    sellQuoteAvailable: ctx.sellQuoteAvailable,
-  });
-  if (positionRisk.riskExitTriggered && positionRisk.severity === "CRITICAL") {
+  const positionRisk = ctx.manualBuyAndHold
+    ? null
+    : validatePosition({
+        liquidityUsd: ctx.liquidityUsd,
+        liquidityAtEntryUsd: trade.entryLiquidityUsd ?? ctx.liquidityUsd, // falls back to current (no-op check) only for trades opened before entryLiquidityUsd existed
+        unrealizedPnlPercent: ctx.unrealizedPnlPercent,
+        maxLossPercent: exitRules.maxLossPercent,
+        catastrophicLossPercent: exitRules.catastrophicLossPercent,
+        buySellRatio5m: ctx.buySellRatio5m,
+        totalTxns5m: ctx.totalTxns5m,
+        sellQuoteAvailable: ctx.sellQuoteAvailable,
+      });
+  if (positionRisk?.riskExitTriggered && positionRisk.severity === "CRITICAL") {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
@@ -351,7 +373,7 @@ function evaluateExits(ctx: {
   // is not a discretionary trim; it should never wait in that queue at all —
   // PROFIT_TARGET/TRAILING_EXIT/TIME_EXIT/AI_STRATEGY_EXIT stay non-emergency
   // since those are genuinely discretionary.
-  if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
+  if (!ctx.manualBuyAndHold && invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
     return {
       type: "INVALIDATION_EXIT",
       sellPercentOfRemaining: 100,
@@ -359,8 +381,11 @@ function evaluateExits(ctx: {
       isEmergency: true,
     };
   }
-  if (positionRisk.riskExitTriggered) {
+  if (positionRisk?.riskExitTriggered) {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
+  }
+  if (ctx.manualBuyAndHold && !ctx.sellQuoteAvailable) {
+    return null;
   }
 
   // Priority 3: staged profit-taking (§35/§36) — only the next step not yet
@@ -412,7 +437,7 @@ function evaluateExits(ctx: {
 
   // Priority 5: time exit.
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
-  if (holdMinutes >= exitRules.maxHoldMinutes) {
+  if (!ctx.manualBuyAndHold && holdMinutes >= exitRules.maxHoldMinutes) {
     return applyVerifiedRunnerGuard({
       trade,
       remainingTokens: ctx.remainingTokens,

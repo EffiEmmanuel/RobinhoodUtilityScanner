@@ -134,12 +134,12 @@ export function buildServer() {
   });
 
   app.post("/tokens/submit", async (req, reply) => {
-    const { address } = (req.body ?? {}) as { address?: string };
+    const { address, buyAndHold } = (req.body ?? {}) as { address?: string; buyAndHold?: boolean };
     if (!address || typeof address !== "string" || !address.trim()) {
       return reply.code(400).send({ error: "body must include `address`" });
     }
     try {
-      const result = await submitManualToken(address);
+      const result = await submitManualToken(address, { buyAndHold: buyAndHold === true });
       return { ...result.token, submitAction: result.action };
     } catch (err) {
       return reply.code(400).send({ error: String((err as Error).message ?? err) });

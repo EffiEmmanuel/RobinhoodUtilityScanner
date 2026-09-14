@@ -83,7 +83,18 @@ export const tradingConfig = {
   verifiedProjectMinCredibilityScore: num("VERIFIED_PROJECT_MIN_CREDIBILITY_SCORE", 65),
   verifiedProjectMinWebsiteScore: num("VERIFIED_PROJECT_MIN_WEBSITE_SCORE", 65),
   verifiedProjectMinLiquidityMultiple: num("VERIFIED_PROJECT_MIN_LIQUIDITY_MULTIPLE", 1.5),
-  tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.45),
+  // Past closed-trade review on 2026-09-14: the account was negative with a
+  // 30% win rate, and the ordinary stop-loss bucket did most of the damage.
+  // VERIFIED_PROJECT can still size meaningfully; MOMENTUM_TACTICAL is now a
+  // small probe until the lane proves positive expectancy under the new
+  // utility/honeypot gates.
+  tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.2),
+  tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 2.5),
+  tacticalMaxLossPercent: num("TACTICAL_MAX_LOSS_PERCENT", 12),
+  tacticalCatastrophicLossPercent: num("TACTICAL_CATASTROPHIC_LOSS_PERCENT", 25),
+  tacticalTrailingActivationMultiple: num("TACTICAL_TRAILING_ACTIVATION_MULTIPLE", 1.2),
+  tacticalTrailingPercent: num("TACTICAL_TRAILING_PERCENT", 10),
+  tacticalMaxHoldMinutes: num("TACTICAL_MAX_HOLD_MINUTES", 45),
   verifiedLaneSizeMultiplier: num("VERIFIED_LANE_SIZE_MULTIPLIER", 1.15),
   moonbagRetainPercent: num("MOONBAG_RETAIN_PERCENT", 15),
   // User directive 2026-09-11: PEG ($51K detection mcap -> ~4x) and TFLY
@@ -263,6 +274,15 @@ export const tradingConfig = {
   // positionManager.ts's executeSell). Never applied to a loss — only
   // realized gains get skimmed. 0 disables it entirely.
   profitLockboxPercent: num("PROFIT_LOCKBOX_PERCENT", 25),
+
+  // Learning/outcome labels. Raw max multiples are kept, but these thresholds
+  // decide whether a peak counts as realistically tradable for the "feasible"
+  // labels used by diagnostics and learning summaries.
+  outcomeFeasibleSellQuoteEnabled: bool("OUTCOME_FEASIBLE_SELL_QUOTE_ENABLED", true),
+  outcomeFeasibleProbeUsd: num("OUTCOME_FEASIBLE_PROBE_USD", 10),
+  outcomeFeasibleMinLiquidityUsd: num("OUTCOME_FEASIBLE_MIN_LIQUIDITY_USD", 15_000),
+  outcomeFeasibleMinLiquidityToMcapRatio: num("OUTCOME_FEASIBLE_MIN_LIQUIDITY_TO_MCAP_RATIO", 0.04),
+  outcomeFeasibleMaxSellImpactPercent: num("OUTCOME_FEASIBLE_MAX_SELL_IMPACT_PERCENT", 10),
 
   // Entry lifecycle.
   defaultEntryPlanTtlMinutes: num("DEFAULT_ENTRY_PLAN_TTL_MINUTES", 360),

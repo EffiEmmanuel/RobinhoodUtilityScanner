@@ -35,6 +35,7 @@ import {
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
 import { getPublicClient } from "./live/wallet";
+import { evaluateHoneypotRisk } from "./honeypotCheck";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -115,6 +116,10 @@ function entryPriorityRank(entry: { triggeredAt: Date | null; tradePlan: { actio
   if (entry.triggeredAt) return 0; // already in-zone once and deferred (e.g. circuit breaker) — most urgent to recheck
   if (entry.tradePlan.action === TradePlanAction.BUY_NOW) return 1; // meant to fire close to immediately
   return 2; // ordinary WAIT_FOR_ENTRY — FIFO within this bucket (Array.prototype.sort is stable)
+}
+
+function isManualBuyAndHoldPlan(planData: unknown): boolean {
+  return !!(planData && typeof planData === "object" && (planData as { manualBuyAndHold?: unknown }).manualBuyAndHold === true);
 }
 
 export type PendingEntryTickResult = "idle" | "replanned" | "checked";
@@ -297,11 +302,13 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     plan.invalidationMcap !== null ? plan.invalidationMcap * (1 - tradingConfig.invalidationTolerancePercent / 100) : null;
   const invalidationBreached = invalidationFloor !== null && mcap !== undefined && mcap <= invalidationFloor;
   const ceilingBreached = plan.doNotChaseAboveMcap !== null && mcap !== undefined && mcap > plan.doNotChaseAboveMcap;
+  const manualBuyAndHold = isManualBuyAndHoldPlan(plan.planData);
   if (
-    invalidationBreached ||
-    ceilingBreached ||
-    planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes ||
-    priceDriftPercent >= tradingConfig.pendingPlanReplanOnDriftPercent
+    !manualBuyAndHold &&
+    (invalidationBreached ||
+      ceilingBreached ||
+      planAgeMinutes >= tradingConfig.pendingPlanReviewIntervalMinutes ||
+      priceDriftPercent >= tradingConfig.pendingPlanReplanOnDriftPercent)
   ) {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.CANCELLED, lastCheckedAt: new Date() } });
     const reason = invalidationBreached
@@ -368,13 +375,19 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; tradeLane?: string; liquidityUsd?: number; analysis?: { marketRegime?: string } };
+    const planData = plan.planData as { freshEval?: { riskBucket: RiskBucket }; tradeLane?: string; liquidityUsd?: number; analysis?: { marketRegime?: string }; manualBuyAndHold?: boolean };
     const tradeLane = normalizeTradeLane(planData.tradeLane ?? candidate.tradeLane);
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
     const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address);
     if (!executionQuality.passed) {
       await rejectEntry(entry, candidate.id, executionQuality.reasons);
+      return;
+    }
+
+    const honeypotRisk = await evaluateHoneypotRisk(candidate.token.address);
+    if (!honeypotRisk.passed) {
+      await rejectEntry(entry, candidate.id, honeypotRisk.reasons);
       return;
     }
 

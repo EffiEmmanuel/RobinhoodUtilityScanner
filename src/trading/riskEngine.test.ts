@@ -196,7 +196,7 @@ describe("calculatePositionSize", () => {
     // liquidity/risk in both calls below — only currentMcapUsd differs.
     const base = {
       portfolio: portfolio({ availableToDeployUsd: 100_000 }),
-      sizingRules,
+      sizingRules: { ...sizingRules, baseAllocationPercent: 5 },
       qualityScore: 90,
       confidence: 90,
       riskBucket: "MEDIUM" as const,
