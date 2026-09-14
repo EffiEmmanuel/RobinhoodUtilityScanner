@@ -51,7 +51,7 @@ function formatExitRulesState(exitRules: ExitRules, currentMultiple: number): st
     `Profit-step targets: ${exitRules.profitSteps.map((s) => `${s.multiple}x (sell ${s.sellPercentOfRemaining}% of what's left)`).join(", ")}`,
     `Trailing stop: activates at ${exitRules.trailingActivationMultiple}x, then exits on a ${exitRules.trailingPercent}% retrace from peak${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"}`,
     `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss`,
-    `Max hold time: ${exitRules.maxHoldMinutes} minutes`,
+    "No time-based max-hold exit is active; hold until profit, risk, invalidation, trailing, or strategy evidence says to exit.",
   ].join("\n");
 }
 

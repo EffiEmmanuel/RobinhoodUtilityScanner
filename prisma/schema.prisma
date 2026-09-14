@@ -587,7 +587,7 @@ model ExitSignal {
   tradeId String
   trade   Trade  @relation(fields: [tradeId], references: [id])
 
-  type     String // RISK_EXIT | INVALIDATION_EXIT | PARTIAL_PROFIT | PROFIT_TARGET | TRAILING_EXIT | TIME_EXIT | MANUAL_EXIT | EMERGENCY_EXIT
+  type     String // RISK_EXIT | INVALIDATION_EXIT | PARTIAL_PROFIT | PROFIT_TARGET | TRAILING_EXIT | MANUAL_EXIT | EMERGENCY_EXIT
   severity String // INFO | WARNING | CRITICAL
 
   triggered Boolean

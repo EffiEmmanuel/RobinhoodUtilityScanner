@@ -39,7 +39,7 @@ function blockedExitAgeMinutes(tradeId: string): number {
 }
 
 interface ExitDecision {
-  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
+  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
   isEmergency: boolean;
@@ -159,7 +159,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // Periodic AI strategy review (not every tick) — proposes a partial-profit,
   // full-exit, or re-entry-target recommendation. Deterministic code below is
   // what actually executes anything; a HOLD or a review failure just falls
-  // through to the same profit-step/trailing/time exits as before this
+  // through to the same profit-step/trailing/risk exits as before this
   // feature existed.
   if (shouldRunStrategyReview(trade)) {
     let aiDecision: PositionStrategyDecision | null = null;
@@ -361,7 +361,7 @@ function evaluateExits(ctx: {
   // stuckExitEscalateAfterMinutes (5 min) of being blocked. THREE, PONSIBLE
   // and FFSTR all slipped 4-9 points past their stated stop this way. A stop
   // is not a discretionary trim; it should never wait in that queue at all —
-  // PROFIT_TARGET/TRAILING_EXIT/TIME_EXIT/AI_STRATEGY_EXIT stay non-emergency
+  // PROFIT_TARGET/TRAILING_EXIT/AI_STRATEGY_EXIT stay non-emergency
   // since those are genuinely discretionary.
   if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
     return {
@@ -420,17 +420,6 @@ function evaluateExits(ctx: {
         },
       });
     }
-  }
-
-  // Priority 5: time exit.
-  const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
-  if (holdMinutes >= exitRules.maxHoldMinutes) {
-    return applyVerifiedRunnerGuard({
-      trade,
-      remainingTokens: ctx.remainingTokens,
-      totalBoughtTokens: ctx.totalBoughtTokens,
-      decision: { type: "TIME_EXIT", sellPercentOfRemaining: 100, reason: `held ${Math.round(holdMinutes)} minutes, exceeds ${exitRules.maxHoldMinutes}min max`, isEmergency: false },
-    });
   }
 
   return null;

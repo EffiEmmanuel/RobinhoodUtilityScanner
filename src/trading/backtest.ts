@@ -76,12 +76,6 @@ function simulateExitUnderRules(
       break;
     }
 
-    if (remainingFraction > 0 && holdingMinutes >= exitRules.maxHoldMinutes) {
-      realizedMultiple += remainingFraction * multiple;
-      remainingFraction = 0;
-      exitReason = "time exit";
-      break;
-    }
   }
 
   if (remainingFraction > 0) {

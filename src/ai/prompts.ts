@@ -135,7 +135,7 @@ limits regardless of what you recommend: a capped re-entry size, a cap on how ma
 can be scaled back into, circuit breakers, and slippage limits. Nothing you say here bypasses those.
 
 Your options:
-- HOLD: no change right now — the deterministic profit-step/trailing-stop/time/risk exits already in
+- HOLD: no change right now — the deterministic profit-step/trailing-stop/risk exits already in
   place are still the right plan, or there simply isn't enough signal to act on yet.
 - TAKE_PARTIAL_PROFIT: recommend banking some gains right now, as a percent of what's still held. Use
   this when price is near a resistance level with fading momentum/volume, not just because it's "up".
