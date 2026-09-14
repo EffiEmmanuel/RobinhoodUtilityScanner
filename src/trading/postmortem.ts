@@ -4,6 +4,7 @@ import { logger } from "../logger";
 import { callStructured } from "../ai/provider";
 import { PostmortemAnalysisSchema, POSTMORTEM_JSON_SCHEMA } from "./schemas";
 import { POSTMORTEM_SYSTEM, buildPostmortemPrompt } from "./prompts";
+import { normalizeTradeLane } from "./tradeLane";
 
 /**
  * §72 — best-effort: a postmortem failing must never block trade closure
@@ -27,6 +28,11 @@ export async function generatePostmortem(tradeId: string): Promise<void> {
   const exitMcap = snapshots.length > 0 ? snapshots[snapshots.length - 1].marketCapUsd ?? undefined : undefined;
 
   const planData = trade.tradePlan?.planData as { analysis?: { reasoning?: string[] } } | undefined;
+  const deterministicTags = buildDeterministicPostmortemTags({
+    trade,
+    snapshots,
+    holdingMinutes,
+  });
 
   let analysis;
   try {
@@ -67,6 +73,7 @@ export async function generatePostmortem(tradeId: string): Promise<void> {
       holdingMinutes,
       whatWorked: analysis.whatWorked,
       whatFailed: analysis.whatFailed,
+      deterministicTags,
       missedOpportunity: analysis.missedOpportunity,
       lessons: analysis.lessons,
       aiSummary: analysis.summary,
@@ -74,4 +81,43 @@ export async function generatePostmortem(tradeId: string): Promise<void> {
   });
 
   logger.info({ tradeId, result: analysis.result }, "postmortem generated");
+}
+
+function buildDeterministicPostmortemTags(input: {
+  trade: Awaited<ReturnType<typeof db.trade.findUniqueOrThrow>>;
+  snapshots: Awaited<ReturnType<typeof db.positionSnapshot.findMany>>;
+  holdingMinutes: number | undefined;
+}): string[] {
+  const { trade, snapshots, holdingMinutes } = input;
+  const tags = new Set<string>();
+  const realizedMultiple = trade.realizedMultiple ?? 1;
+  const mfePercent = trade.mfePercent ?? 0;
+  const maePercent = trade.maePercent ?? 0;
+  const exitReason = (trade.exitReason ?? "").toLowerCase();
+  const lane = normalizeTradeLane(trade.tradeLane);
+
+  tags.add(lane === "VERIFIED_PROJECT" ? "LANE_VERIFIED_PROJECT" : "LANE_MOMENTUM_TACTICAL");
+  if (realizedMultiple < 1) tags.add("LOSS");
+  if (realizedMultiple >= 2) tags.add("REALIZED_2X_PLUS");
+  if (mfePercent >= 100 && realizedMultiple < 1.5) tags.add("GAVE_BACK_BIG_WINNER");
+  if (mfePercent >= 400 && realizedMultiple < 3) tags.add("MISSED_MOONBAG");
+  if (maePercent <= -30) tags.add("DEEP_DRAWDOWN");
+  if (exitReason.includes("invalidation")) tags.add("TECHNICAL_INVALIDATION");
+  if (exitReason.includes("sell pressure")) tags.add("SELL_PRESSURE_EXIT");
+  if (exitReason.includes("trailing")) tags.add("TRAILING_EXIT");
+  if (exitReason.includes("max loss") || exitReason.includes("catastrophic")) tags.add("STOP_LOSS");
+  if (exitReason.includes("failing to sell") || exitReason.includes("honeypot") || exitReason.includes("transfer")) tags.add("EXECUTION_TRAP");
+  if (holdingMinutes !== undefined && holdingMinutes < 10 && realizedMultiple < 1) tags.add("FAST_LOSS");
+
+  const first = snapshots[0];
+  const last = snapshots[snapshots.length - 1];
+  if (first?.liquidityUsd && last?.liquidityUsd && first.liquidityUsd > 0) {
+    const liquidityChange = ((last.liquidityUsd - first.liquidityUsd) / first.liquidityUsd) * 100;
+    if (liquidityChange <= -25) tags.add("LIQUIDITY_REMOVED");
+  }
+  const firstMcap = first?.marketCapUsd;
+  const entryMcap = trade.actualEntryMcap;
+  if (entryMcap && firstMcap && entryMcap > firstMcap * 1.3 && realizedMultiple < 1) tags.add("CHASED_EXTENSION");
+
+  return [...tags].sort();
 }

@@ -24,6 +24,12 @@ export interface ScoringInputs {
   synthesis: ResearchSynthesis;
   onchain: OnchainResearchResult;
   market: MarketSummary;
+  holders?: {
+    top1Percent: number;
+    top10Percent: number;
+    holderCount: number;
+    logScanComplete: boolean;
+  };
 }
 
 export interface ScoringResult {
@@ -161,10 +167,38 @@ function brandingScore(classification: BrandingInput): FactorResult {
   };
 }
 
-// No holder-distribution data source in v1 (would require an indexer) —
-// explicitly neutral + LOW confidence rather than silently scoring 0. See PRD §25.
-function holderScoreStub(): FactorResult {
-  return { score: 50, confidence: "LOW", reasoning: "holder distribution data not available in v1" };
+function holderDistributionScore(snapshot: ScoringInputs["holders"]): FactorResult {
+  if (!snapshot) {
+    return { score: 50, confidence: "LOW", reasoning: "holder distribution data not available" };
+  }
+  let score = 100;
+  const notes: string[] = [];
+  if (snapshot.holderCount < 10) {
+    score -= 35;
+    notes.push(`only ${snapshot.holderCount} non-excluded holders`);
+  } else if (snapshot.holderCount < 25) {
+    score -= 15;
+    notes.push(`${snapshot.holderCount} non-excluded holders`);
+  }
+  if (snapshot.top1Percent > 20) {
+    score -= 35;
+    notes.push(`top holder owns ${snapshot.top1Percent.toFixed(1)}%`);
+  } else if (snapshot.top1Percent > 10) {
+    score -= 15;
+    notes.push(`top holder owns ${snapshot.top1Percent.toFixed(1)}%`);
+  }
+  if (snapshot.top10Percent > 65) {
+    score -= 30;
+    notes.push(`top 10 holders own ${snapshot.top10Percent.toFixed(1)}%`);
+  } else if (snapshot.top10Percent > 45) {
+    score -= 12;
+    notes.push(`top 10 holders own ${snapshot.top10Percent.toFixed(1)}%`);
+  }
+  return {
+    score: clamp(score),
+    confidence: snapshot.logScanComplete ? "HIGH" : "MEDIUM",
+    reasoning: notes.join("; ") || "holder distribution looks reasonably dispersed",
+  };
 }
 
 export function computeHardRejections(onchain: OnchainResearchResult, synthesis: ResearchSynthesis, pair?: MarketPair): string[] {
@@ -201,7 +235,7 @@ export function computeScore(inputs: ScoringInputs): ScoringResult {
     social: fromFactorScore(inputs.synthesis.social),
     liquidity: liquidityScore(primaryPair),
     market: marketActivityScore(primaryPair),
-    holders: holderScoreStub(),
+    holders: holderDistributionScore(inputs.holders),
     team: fromFactorScore(inputs.synthesis.team),
     branding: brandingScore(inputs.classification),
   };

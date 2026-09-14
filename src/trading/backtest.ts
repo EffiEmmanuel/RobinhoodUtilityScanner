@@ -146,6 +146,7 @@ export async function runBacktest(input: BacktestInput) {
   const run = await db.backtestRun.create({
     data: {
       strategyVersionId: input.strategyVersionId,
+      scope: "EXIT_RULES",
       configuration: input.exitRules as unknown as object,
       fromDate: input.fromDate,
       toDate: input.toDate,
@@ -170,5 +171,135 @@ export async function runBacktest(input: BacktestInput) {
   });
 
   logger.info({ backtestId: run.id, totalTrades: replayed.length, winRate, averageReturn }, "backtest complete");
+  return run;
+}
+
+export interface EntryBacktestRules {
+  minLiquidityUsd: number;
+  minHourlyTxns: number;
+  minBuyRatio1h: number;
+  maxBuyRatio1h: number;
+  maxVolumeToLiquidity1h: number;
+  maxRecentRunUpPercent: number;
+  lookbackMinutes: number;
+}
+
+export interface EntryBacktestInput {
+  rules: EntryBacktestRules;
+  fromDate: Date;
+  toDate: Date;
+  strategyVersionId?: string;
+}
+
+function snapshotPassesEntryRules(
+  snap: {
+    marketCapUsd: number | null;
+    liquidityUsd: number | null;
+    volume1h: number | null;
+    buys1h: number | null;
+    sells1h: number | null;
+    capturedAt: Date;
+  },
+  prior: { marketCapUsd: number | null }[],
+  rules: EntryBacktestRules
+): { passed: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const txns = (snap.buys1h ?? 0) + (snap.sells1h ?? 0);
+  const buyRatio = txns > 0 ? (snap.buys1h ?? 0) / txns : undefined;
+  const volToLiq = snap.liquidityUsd && snap.liquidityUsd > 0 && snap.volume1h !== null ? snap.volume1h / snap.liquidityUsd : undefined;
+  const mcaps = prior.map((p) => p.marketCapUsd).filter((m): m is number => m !== null && m > 0);
+  const low = Math.min(...mcaps, snap.marketCapUsd ?? Infinity);
+  const runUp = snap.marketCapUsd && Number.isFinite(low) && low > 0 ? (snap.marketCapUsd / low - 1) * 100 : 0;
+
+  if ((snap.liquidityUsd ?? 0) < rules.minLiquidityUsd) reasons.push(`liquidity < ${rules.minLiquidityUsd}`);
+  if (txns < rules.minHourlyTxns) reasons.push(`hourly txns < ${rules.minHourlyTxns}`);
+  if (buyRatio === undefined || buyRatio < rules.minBuyRatio1h) reasons.push(`buy ratio < ${rules.minBuyRatio1h}`);
+  if (buyRatio !== undefined && buyRatio > rules.maxBuyRatio1h) reasons.push(`buy ratio > ${rules.maxBuyRatio1h}`);
+  if (volToLiq === undefined || volToLiq > rules.maxVolumeToLiquidity1h) reasons.push(`volume/liquidity > ${rules.maxVolumeToLiquidity1h}`);
+  if (runUp > rules.maxRecentRunUpPercent) reasons.push(`recent run-up ${runUp.toFixed(1)}% > ${rules.maxRecentRunUpPercent}%`);
+  return { passed: reasons.length === 0, reasons };
+}
+
+export async function runEntryBacktest(input: EntryBacktestInput) {
+  const candidates = await db.tradeCandidate.findMany({
+    where: { createdAt: { gte: input.fromDate, lte: input.toDate } },
+    include: {
+      token: { include: { marketSnapshots: { orderBy: { capturedAt: "asc" } } } },
+      outcome: true,
+    },
+  });
+
+  const replayed = candidates.map((candidate) => {
+    const snapshots = candidate.token.marketSnapshots.filter(
+      (s) => s.capturedAt >= candidate.createdAt && s.capturedAt <= new Date(candidate.createdAt.getTime() + 48 * 3_600_000)
+    );
+    let entry:
+      | {
+          snapshotId: string;
+          capturedAt: Date;
+          marketCapUsd: number;
+          reasons: string[];
+        }
+      | undefined;
+    let lastReasons: string[] = ["no snapshots"];
+
+    for (const snap of snapshots) {
+      if (snap.marketCapUsd === null) continue;
+      const priorCutoff = new Date(snap.capturedAt.getTime() - input.rules.lookbackMinutes * 60_000);
+      const prior = snapshots.filter((s) => s.capturedAt >= priorCutoff && s.capturedAt <= snap.capturedAt);
+      const check = snapshotPassesEntryRules(snap, prior, input.rules);
+      lastReasons = check.reasons;
+      if (check.passed) {
+        entry = { snapshotId: snap.id, capturedAt: snap.capturedAt, marketCapUsd: snap.marketCapUsd, reasons: ["entry rules passed"] };
+        break;
+      }
+    }
+
+    const afterEntry = entry ? snapshots.filter((s) => s.capturedAt >= entry!.capturedAt && s.marketCapUsd !== null) : [];
+    const mcaps = afterEntry.map((s) => s.marketCapUsd as number);
+    const maxMultiple = entry && mcaps.length ? Math.max(...mcaps) / entry.marketCapUsd : undefined;
+    const minMultiple = entry && mcaps.length ? Math.min(...mcaps) / entry.marketCapUsd : undefined;
+    return {
+      candidateId: candidate.id,
+      tokenId: candidate.tokenId,
+      status: candidate.status,
+      tradeLane: candidate.tradeLane,
+      qualificationPath: candidate.qualificationPath,
+      simulatedEntry: entry,
+      skippedReason: entry ? undefined : lastReasons,
+      maxMultipleAfterEntry: maxMultiple,
+      minMultipleAfterEntry: minMultiple,
+      actualTraded: candidate.outcome?.traded ?? false,
+      actualHit2x: candidate.outcome?.hit200x ?? false,
+      actualHit10x: candidate.outcome?.hit1000x ?? false,
+      actualHit100x: candidate.outcome?.hit10000x ?? false,
+    };
+  });
+
+  const entries = replayed.filter((r) => r.simulatedEntry);
+  const returns = entries.map((r) => ((r.maxMultipleAfterEntry ?? 1) - 1) * 100);
+  const averageReturn = returns.length ? returns.reduce((a, b) => a + b, 0) / returns.length : undefined;
+  const hit2xRate = entries.length ? entries.filter((r) => (r.maxMultipleAfterEntry ?? 0) >= 2).length / entries.length : undefined;
+  const hit25xRate = entries.length ? entries.filter((r) => (r.maxMultipleAfterEntry ?? 0) >= 2.5).length / entries.length : undefined;
+  const maxDrawdown = entries.length ? Math.min(...entries.map((r) => ((r.minMultipleAfterEntry ?? 1) - 1) * 100)) : undefined;
+
+  const run = await db.backtestRun.create({
+    data: {
+      strategyVersionId: input.strategyVersionId,
+      scope: "ENTRY_RULES",
+      configuration: input.rules as unknown as object,
+      fromDate: input.fromDate,
+      toDate: input.toDate,
+      totalTrades: entries.length,
+      winRate: entries.length ? entries.filter((r) => (r.maxMultipleAfterEntry ?? 0) > 1).length / entries.length : undefined,
+      averageReturn,
+      maxDrawdown,
+      hit2xRate,
+      hit25xRate,
+      tradesReplayed: replayed as unknown as object,
+      notes: `Entry-rule backtest over ${candidates.length} candidates using stored MarketSnapshot history. This estimates entry eligibility only; it does not simulate live quote fills or exits.`,
+    },
+  });
+  logger.info({ backtestId: run.id, candidates: candidates.length, simulatedEntries: entries.length, hit2xRate }, "entry backtest complete");
   return run;
 }

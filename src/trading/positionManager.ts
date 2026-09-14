@@ -14,6 +14,8 @@ import { checkPortfolioMilestones } from "./milestones";
 import { tradingConfig } from "./config";
 import { shouldRunStrategyReview, runPositionStrategyReview, applyReentryTarget, checkAndExecutePendingReentry } from "./positionStrategy";
 import { recordSellFailure, recordSellSuccess, getSellFailureMinutes } from "./executionAlerts";
+import { normalizeTradeLane } from "./tradeLane";
+import { recordExecutionQuality } from "./executionQuality";
 import type { PositionStrategyDecision } from "../ai/schemas";
 
 // When an exit first started being refused by the slippage guard, per trade —
@@ -83,7 +85,8 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
   );
 
-  const remainingTokens = await getRemainingTokenAmount(trade);
+  const tokenAmounts = await getPositionTokenAmounts(trade);
+  const remainingTokens = tokenAmounts.remainingTokens;
   if (remainingTokens <= 0) {
     // Legitimate case: prior partial sells summed to the full position but
     // the last one never got flagged as a full exit — close now. But if
@@ -175,7 +178,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
     }
     if (aiDecision) {
-      const acted = await applyAiStrategyDecision(trade, token.address, pair, remainingTokens, aiDecision);
+      const acted = await applyAiStrategyDecision(trade, token.address, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision);
       if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
     }
   }
@@ -192,6 +195,8 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     totalTxns5m,
     sellQuoteAvailable: await isSellable(token.address, pair, remainingTokens),
     profitStepsTaken,
+    remainingTokens,
+    totalBoughtTokens: tokenAmounts.totalBoughtTokens,
   });
 
   if (!decision) return;
@@ -214,6 +219,7 @@ async function applyAiStrategyDecision(
   tokenAddress: string,
   pair: MarketPair | undefined,
   remainingTokens: number,
+  totalBoughtTokens: number,
   decision: PositionStrategyDecision
 ): Promise<boolean> {
   if (decision.action === "SET_REENTRY_TARGET") {
@@ -237,7 +243,10 @@ async function applyAiStrategyDecision(
           isEmergency: false,
         };
 
-  await executeSell(trade, tokenAddress, remainingTokens, exitDecision, pair);
+  const runnerAwareDecision = applyVerifiedRunnerGuard({ trade, decision: exitDecision, remainingTokens, totalBoughtTokens });
+  if (!runnerAwareDecision) return false;
+
+  await executeSell(trade, tokenAddress, remainingTokens, runnerAwareDecision, pair);
   return true;
 }
 
@@ -256,11 +265,14 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
   if (!fastFlip) return baseExitRules;
 
   const candidate = trade.candidateId
-    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true } })
+    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true, tradeLane: true } })
     : null;
   const qualityScore = candidate?.qualityScore ?? undefined;
+  const tradeLane = normalizeTradeLane(trade.tradeLane ?? candidate?.tradeLane);
 
-  const isSpeculative = qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold;
+  if (tradeLane === "VERIFIED_PROJECT") return baseExitRules;
+
+  const isSpeculative = tradeLane === "MOMENTUM_TACTICAL" || (qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold);
   const isLargeEntryNotYetProven =
     trade.actualEntryMcap != null &&
     trade.actualEntryMcap > fastFlip.largeMcapUsd &&
@@ -283,13 +295,13 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
  * scalar entryTokenAmount alone — that field only ever reflects the original
  * fill, so it silently under-counts a position once a re-entry buy adds to it.
  */
-async function getRemainingTokenAmount(trade: Trade): Promise<number> {
+async function getPositionTokenAmounts(trade: Trade): Promise<{ totalBoughtTokens: number; remainingTokens: number }> {
   const [buys, sells] = await Promise.all([
     db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "BUY" }, _sum: { tokenAmount: true } }),
     db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "SELL" }, _sum: { tokenAmount: true } }),
   ]);
   const totalBought = buys._sum.tokenAmount ?? trade.entryTokenAmount ?? 0;
-  return totalBought - (sells._sum.tokenAmount ?? 0);
+  return { totalBoughtTokens: totalBought, remainingTokens: totalBought - (sells._sum.tokenAmount ?? 0) };
 }
 
 function evaluateExits(ctx: {
@@ -304,6 +316,8 @@ function evaluateExits(ctx: {
   totalTxns5m: number | undefined;
   sellQuoteAvailable: boolean;
   profitStepsTaken: number;
+  remainingTokens: number;
+  totalBoughtTokens: number;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
 
@@ -354,12 +368,17 @@ function evaluateExits(ctx: {
   // ExitSignal rows for this trade (see monitorOneTrade).
   const nextStep = exitRules.profitSteps[ctx.profitStepsTaken];
   if (nextStep && ctx.currentMultiple >= nextStep.multiple) {
-    return {
-      type: "PROFIT_TARGET",
-      sellPercentOfRemaining: nextStep.sellPercentOfRemaining,
-      reason: `reached ${nextStep.multiple}x profit target (step ${ctx.profitStepsTaken + 1}/${exitRules.profitSteps.length})`,
-      isEmergency: false,
-    };
+    return applyVerifiedRunnerGuard({
+      trade,
+      remainingTokens: ctx.remainingTokens,
+      totalBoughtTokens: ctx.totalBoughtTokens,
+      decision: {
+        type: "PROFIT_TARGET",
+        sellPercentOfRemaining: nextStep.sellPercentOfRemaining,
+        reason: `reached ${nextStep.multiple}x profit target (step ${ctx.profitStepsTaken + 1}/${exitRules.profitSteps.length})`,
+        isEmergency: false,
+      },
+    });
   }
 
   // Priority 4: trailing exit — armed once the position's PEAK (never the
@@ -377,22 +396,58 @@ function evaluateExits(ctx: {
   if (peakMultiple >= exitRules.trailingActivationMultiple) {
     const retracePercent = ((peakMultiple - ctx.currentMultiple) / peakMultiple) * 100;
     if (retracePercent >= exitRules.trailingPercent) {
-      return {
-        type: "TRAILING_EXIT",
-        sellPercentOfRemaining: 100,
-        reason: `retraced ${retracePercent.toFixed(1)}% from peak ${peakMultiple.toFixed(2)}x (trail ${exitRules.trailingPercent}%)`,
-        isEmergency: false,
-      };
+      return applyVerifiedRunnerGuard({
+        trade,
+        remainingTokens: ctx.remainingTokens,
+        totalBoughtTokens: ctx.totalBoughtTokens,
+        decision: {
+          type: "TRAILING_EXIT",
+          sellPercentOfRemaining: 100,
+          reason: `retraced ${retracePercent.toFixed(1)}% from peak ${peakMultiple.toFixed(2)}x (trail ${exitRules.trailingPercent}%)`,
+          isEmergency: false,
+        },
+      });
     }
   }
 
   // Priority 5: time exit.
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
   if (holdMinutes >= exitRules.maxHoldMinutes) {
-    return { type: "TIME_EXIT", sellPercentOfRemaining: 100, reason: `held ${Math.round(holdMinutes)} minutes, exceeds ${exitRules.maxHoldMinutes}min max`, isEmergency: false };
+    return applyVerifiedRunnerGuard({
+      trade,
+      remainingTokens: ctx.remainingTokens,
+      totalBoughtTokens: ctx.totalBoughtTokens,
+      decision: { type: "TIME_EXIT", sellPercentOfRemaining: 100, reason: `held ${Math.round(holdMinutes)} minutes, exceeds ${exitRules.maxHoldMinutes}min max`, isEmergency: false },
+    });
   }
 
   return null;
+}
+
+function applyVerifiedRunnerGuard(input: {
+  trade: Trade;
+  decision: ExitDecision;
+  remainingTokens: number;
+  totalBoughtTokens: number;
+}): ExitDecision | null {
+  const { trade, decision, remainingTokens, totalBoughtTokens } = input;
+  if (decision.isEmergency || normalizeTradeLane(trade.tradeLane) !== "VERIFIED_PROJECT") return decision;
+  if (remainingTokens <= 0 || totalBoughtTokens <= 0 || tradingConfig.moonbagRetainPercent <= 0) return decision;
+
+  const targetRunnerTokens = totalBoughtTokens * (tradingConfig.moonbagRetainPercent / 100);
+  const requestedSellTokens = remainingTokens * (decision.sellPercentOfRemaining / 100);
+  const remainingAfterRequestedSell = remainingTokens - requestedSellTokens;
+  if (remainingAfterRequestedSell >= targetRunnerTokens) return decision;
+
+  const maxSellTokens = Math.max(0, remainingTokens - targetRunnerTokens);
+  if (maxSellTokens <= 1e-12) return null;
+
+  const adjustedSellPercent = (maxSellTokens / remainingTokens) * 100;
+  return {
+    ...decision,
+    sellPercentOfRemaining: adjustedSellPercent,
+    reason: `${decision.reason}; adjusted to retain ${tradingConfig.moonbagRetainPercent}% verified-project runner`,
+  };
 }
 
 async function executeSell(
@@ -442,6 +497,13 @@ async function executeSell(
     fill = await executeSellFill(tokenAddress, sellTokens, pair);
   } catch (err) {
     logger.error({ tradeId: trade.id, err: String(err) }, "sell execution failed — will retry next tick");
+    void recordExecutionQuality({
+      tokenAddress,
+      pair,
+      direction: "SELL",
+      success: false,
+      error: String(err),
+    });
     recordSellFailure({
       tokenAddress,
       tokenLabel: pair.baseTokenSymbol ?? pair.baseTokenName ?? tokenAddress.slice(0, 10),
@@ -473,7 +535,14 @@ async function executeSell(
   // math.
   const soldTokens = fill.tokenAmount;
   const proceedsUsd = soldTokens * fill.priceUsd;
-  const costBasisForSoldTokens = trade.positionSizeUsd * (soldTokens / (trade.entryTokenAmount ?? soldTokens));
+  const buyTotals = await db.tradeExecution.aggregate({
+    where: { tradeId: trade.id, type: "BUY" },
+    _sum: { tokenAmount: true, usdValue: true },
+  });
+  const totalBoughtTokens = buyTotals._sum.tokenAmount ?? trade.entryTokenAmount ?? soldTokens;
+  const totalBuyUsd = buyTotals._sum.usdValue ?? trade.positionSizeUsd;
+  const averageCostPerToken = totalBoughtTokens > 0 ? totalBuyUsd / totalBoughtTokens : fill.priceUsd;
+  const costBasisForSoldTokens = soldTokens * averageCostPerToken;
   const realizedPnlThisSell = proceedsUsd - costBasisForSoldTokens;
 
   await db.tradeExecution.create({

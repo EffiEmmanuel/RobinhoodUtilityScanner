@@ -10,6 +10,7 @@ import type { PoolKey } from "./live/poolDiscovery";
 import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
 import { ensureSellApprovals } from "./live/permit2Approvals";
+import { recordExecutionQuality } from "./executionQuality";
 
 /**
  * The one seam entryMonitor.ts and positionManager.ts call through — neither
@@ -79,7 +80,19 @@ function logSuspiciousQuote(
  * fresh quote must exist and be acceptable before a real buy is ever signed).
  */
 export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "tokenAmount">> {
-  if (!isLiveModeReady()) return getPaperQuote(positionSizeUsd, pair);
+  if (!isLiveModeReady()) {
+    const quote = getPaperQuote(positionSizeUsd, pair);
+    void recordExecutionQuality({
+      tokenAddress,
+      pair,
+      direction: "QUOTE_BUY",
+      success: true,
+      slippageBps: quote.estimatedSlippageBps,
+      priceImpactPercent: quote.estimatedPriceImpactPercent,
+      suspiciousQuote: quote.estimatedPriceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+    });
+    return quote;
+  }
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
   if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
@@ -93,12 +106,30 @@ export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: numb
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((effectivePriceUsd - spotPriceUsd) / spotPriceUsd) * 100) : 0;
   logSuspiciousQuote("buy", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
+  void recordExecutionQuality({
+    tokenAddress,
+    pair,
+    direction: "QUOTE_BUY",
+    success: true,
+    slippageBps: Math.round(priceImpactPercent * 100),
+    priceImpactPercent,
+    suspiciousQuote: priceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+  });
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
 }
 
 export async function executeBuyFill(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<FillResult> {
   if (!isLiveModeReady()) {
-    return { ...getPaperQuote(positionSizeUsd, pair), provider: "paper" };
+    const fill = { ...getPaperQuote(positionSizeUsd, pair), provider: "paper" as const };
+    void recordExecutionQuality({
+      tokenAddress,
+      pair,
+      direction: "BUY",
+      success: true,
+      slippageBps: fill.estimatedSlippageBps,
+      priceImpactPercent: fill.estimatedPriceImpactPercent,
+    });
+    return fill;
   }
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
@@ -148,6 +179,7 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   const gasCostUsd = gasCostEth * ethPriceUsd;
 
   logger.info({ tokenAddress, txHash: result.txHash, tokenAmount, gasCostUsd }, "live buy confirmed");
+  void recordExecutionQuality({ tokenAddress, pair, direction: "BUY", success: true, slippageBps: 0, priceImpactPercent: 0 });
 
   // Desk review D8: Permit2 approvals were only ever requested at SELL time,
   // so a stop-loss or profit-target exit had to wait on 1-2 approval
@@ -190,7 +222,20 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
  * available" and fall back, never as a real $0 price.
  */
 export async function getSellEstimate(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "priceUsd">> {
-  if (!isLiveModeReady()) return getPaperSellQuote(tokenAmount, pair);
+  if (!isLiveModeReady()) {
+    const quote = getPaperSellQuote(tokenAmount, pair);
+    void recordExecutionQuality({
+      tokenAddress,
+      pair,
+      direction: "QUOTE_SELL",
+      success: quote.priceUsd > 0,
+      slippageBps: quote.estimatedSlippageBps,
+      priceImpactPercent: quote.estimatedPriceImpactPercent,
+      suspiciousQuote: quote.estimatedPriceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+      error: quote.priceUsd > 0 ? undefined : "paper sell quote unavailable",
+    });
+    return quote;
+  }
 
   const client = getPublicClient();
   const token = tokenAddress as `0x${string}`;
@@ -209,12 +254,31 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
   const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((spotPriceUsd - effectivePriceUsd) / spotPriceUsd) * 100) : 0;
   logSuspiciousQuote("sell", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
+  void recordExecutionQuality({
+    tokenAddress,
+    pair,
+    direction: "QUOTE_SELL",
+    success: true,
+    slippageBps: Math.round(priceImpactPercent * 100),
+    priceImpactPercent,
+    suspiciousQuote: priceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+  });
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, priceUsd: effectivePriceUsd };
 }
 
 export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<FillResult> {
   if (!isLiveModeReady()) {
-    return { ...getPaperSellQuote(tokenAmount, pair), provider: "paper" };
+    const fill = { ...getPaperSellQuote(tokenAmount, pair), provider: "paper" as const };
+    void recordExecutionQuality({
+      tokenAddress,
+      pair,
+      direction: "SELL",
+      success: fill.priceUsd > 0,
+      slippageBps: fill.estimatedSlippageBps,
+      priceImpactPercent: fill.estimatedPriceImpactPercent,
+      error: fill.priceUsd > 0 ? undefined : "paper sell fill unavailable",
+    });
+    return fill;
   }
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
@@ -275,6 +339,7 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const proceedsUsd = ethReceived * ethPriceUsd;
 
   logger.info({ tokenAddress, txHash: result.txHash, soldTokens, proceedsUsd, gasCostUsd }, "live sell confirmed");
+  void recordExecutionQuality({ tokenAddress, pair, direction: "SELL", success: true, slippageBps: 0, priceImpactPercent: 0 });
 
   return {
     priceUsd: soldTokens > 0 ? proceedsUsd / soldTokens : 0,

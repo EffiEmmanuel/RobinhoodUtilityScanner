@@ -4,6 +4,7 @@ import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/p
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { classifyTradeLane } from "./tradeLane";
+import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
 
 /**
  * A token becomes a trade candidate once it clears the base research
@@ -78,9 +79,16 @@ export async function generateTradeCandidates(): Promise<number> {
       hourlyTxns: (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0),
       hardReject: run.hardReject,
     });
+    const utilityGate = evaluateUtilityOnlyGate(
+      utilityGateInputFromRawResearch(run.rawResearch, {
+        utilityScore: run.utilityScore,
+        credibilityScore: run.credibilityScore,
+        websiteScore: run.websiteScore,
+      })
+    );
     const qualificationPath = evaluation.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : "NORMAL";
     const lane = classifyTradeLane({
-      evaluation,
+      evaluation: utilityGate.passed ? evaluation : { eligible: false, riskBucket: "REJECT", reasons: utilityGate.reasons },
       qualificationPath,
       qualityScore: run.finalScore,
       researchConfidence: run.confidence,
@@ -99,15 +107,15 @@ export async function generateTradeCandidates(): Promise<number> {
         stage: "candidate_eligibility",
         strategyVersionId: strategy.id,
         marketState: {},
-        projectState: { qualityScore: run.finalScore, researchConfidence: run.confidence, contractScore: run.contractScore },
+        projectState: { qualityScore: run.finalScore, researchConfidence: run.confidence, contractScore: run.contractScore, utilityGate: utilityGate.reasons },
         technicalState: {},
         portfolioState: {},
-        deterministicRules: { riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane, laneReasons: lane.reasons, reasons: evaluation.reasons },
-        finalReasons: [...evaluation.reasons, ...lane.reasons],
+        deterministicRules: { riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, reasons: evaluation.reasons },
+        finalReasons: [...evaluation.reasons, ...utilityGate.reasons, ...lane.reasons],
       },
     });
 
-    if (!evaluation.eligible) {
+    if (!evaluation.eligible || !utilityGate.passed) {
       await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     } else {
       // "Learn which entry pathway actually pays" (user directive

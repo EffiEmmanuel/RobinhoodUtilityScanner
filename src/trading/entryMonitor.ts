@@ -23,6 +23,7 @@ import { tradingConfig } from "./config";
 import { sendTradeEntryEmail, sendTradeClosedEmail } from "./notifications";
 import { planCandidate } from "./planning";
 import { recordBuyFailure, recordBuySuccess } from "./executionAlerts";
+import { evaluateExecutionQualityForEntry, recordExecutionQuality } from "./executionQuality";
 import {
   estimateTokenAgeMinutes,
   evaluateChaseGuard,
@@ -371,6 +372,12 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     const tradeLane = normalizeTradeLane(planData.tradeLane ?? candidate.tradeLane);
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
+    const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address);
+    if (!executionQuality.passed) {
+      await rejectEntry(entry, candidate.id, executionQuality.reasons);
+      return;
+    }
+
     // Chase guard — every mode, not just conservative (user directive
     // 2026-09-12): blocks buying a token that's already run up hard in our
     // OWN recent snapshot history, not DexScreener's lagging 5m change. A
@@ -651,6 +658,13 @@ async function openTrade(input: {
     fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair);
   } catch (err) {
     logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — candidate reverted to REJECTED, no trade created");
+    void recordExecutionQuality({
+      tokenAddress: input.tokenAddress,
+      pair: input.pair,
+      direction: "BUY",
+      success: false,
+      error: String(err),
+    });
     recordBuyFailure({
       tokenAddress: input.tokenAddress,
       tokenLabel: input.pair.baseTokenSymbol ?? input.pair.baseTokenName ?? input.tokenAddress.slice(0, 10),

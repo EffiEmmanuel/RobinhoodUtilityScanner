@@ -4,7 +4,17 @@ import { TradeCandidateStatus } from "../generated/prisma";
 import { pollCandidateMarket } from "./marketAnalysis";
 
 const OBSERVATION_WINDOW_HOURS = 48;
-const HIT_MULTIPLES = [1.25, 1.5, 2, 2.5] as const;
+const HIT_MULTIPLES = {
+  hit125x: 1.25,
+  hit150x: 1.5,
+  hit200x: 2,
+  hit250x: 2.5,
+  hit500x: 5,
+  hit1000x: 10,
+  hit2500x: 25,
+  hit5000x: 50,
+  hit10000x: 100,
+} as const;
 
 /**
  * §61/§62 — tracks EVERY candidate's actual subsequent market performance for
@@ -70,14 +80,24 @@ async function updateOutcomeForCandidate(
     marketCapAtDetection > 0 && min24h !== undefined ? ((min24h - marketCapAtDetection) / marketCapAtDetection) * 100 : undefined;
 
   const bestMultipleSoFar = Math.max(maxMultiple24h ?? 0, maxMultiple48h ?? 0, mcap / marketCapAtDetection);
-  const hit125x = existing?.hit125x || bestMultipleSoFar >= HIT_MULTIPLES[0];
-  const hit150x = existing?.hit150x || bestMultipleSoFar >= HIT_MULTIPLES[1];
-  const hit200x = existing?.hit200x || bestMultipleSoFar >= HIT_MULTIPLES[2];
-  const hit250x = existing?.hit250x || bestMultipleSoFar >= HIT_MULTIPLES[3];
+  const hit125x = existing?.hit125x || bestMultipleSoFar >= HIT_MULTIPLES.hit125x;
+  const hit150x = existing?.hit150x || bestMultipleSoFar >= HIT_MULTIPLES.hit150x;
+  const hit200x = existing?.hit200x || bestMultipleSoFar >= HIT_MULTIPLES.hit200x;
+  const hit250x = existing?.hit250x || bestMultipleSoFar >= HIT_MULTIPLES.hit250x;
+  const hit500x = existing?.hit500x || bestMultipleSoFar >= HIT_MULTIPLES.hit500x;
+  const hit1000x = existing?.hit1000x || bestMultipleSoFar >= HIT_MULTIPLES.hit1000x;
+  const hit2500x = existing?.hit2500x || bestMultipleSoFar >= HIT_MULTIPLES.hit2500x;
+  const hit5000x = existing?.hit5000x || bestMultipleSoFar >= HIT_MULTIPLES.hit5000x;
+  const hit10000x = existing?.hit10000x || bestMultipleSoFar >= HIT_MULTIPLES.hit10000x;
 
-  const timeTo150xMinutes = !existing?.timeTo150xMinutes && bestMultipleSoFar >= HIT_MULTIPLES[1] ? Math.round(ageMinutes) : existing?.timeTo150xMinutes;
-  const timeTo200xMinutes = !existing?.timeTo200xMinutes && bestMultipleSoFar >= HIT_MULTIPLES[2] ? Math.round(ageMinutes) : existing?.timeTo200xMinutes;
-  const timeTo250xMinutes = !existing?.timeTo250xMinutes && bestMultipleSoFar >= HIT_MULTIPLES[3] ? Math.round(ageMinutes) : existing?.timeTo250xMinutes;
+  const timeTo150xMinutes = !existing?.timeTo150xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit150x ? Math.round(ageMinutes) : existing?.timeTo150xMinutes;
+  const timeTo200xMinutes = !existing?.timeTo200xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit200x ? Math.round(ageMinutes) : existing?.timeTo200xMinutes;
+  const timeTo250xMinutes = !existing?.timeTo250xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit250x ? Math.round(ageMinutes) : existing?.timeTo250xMinutes;
+  const timeTo500xMinutes = !existing?.timeTo500xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit500x ? Math.round(ageMinutes) : existing?.timeTo500xMinutes;
+  const timeTo1000xMinutes = !existing?.timeTo1000xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit1000x ? Math.round(ageMinutes) : existing?.timeTo1000xMinutes;
+  const timeTo2500xMinutes = !existing?.timeTo2500xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit2500x ? Math.round(ageMinutes) : existing?.timeTo2500xMinutes;
+  const timeTo5000xMinutes = !existing?.timeTo5000xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit5000x ? Math.round(ageMinutes) : existing?.timeTo5000xMinutes;
+  const timeTo10000xMinutes = !existing?.timeTo10000xMinutes && bestMultipleSoFar >= HIT_MULTIPLES.hit10000x ? Math.round(ageMinutes) : existing?.timeTo10000xMinutes;
 
   const data = {
     traded: candidate.status === TradeCandidateStatus.TRADED,
@@ -100,9 +120,19 @@ async function updateOutcomeForCandidate(
     hit150x,
     hit200x,
     hit250x,
+    hit500x,
+    hit1000x,
+    hit2500x,
+    hit5000x,
+    hit10000x,
     timeTo150xMinutes,
     timeTo200xMinutes,
     timeTo250xMinutes,
+    timeTo500xMinutes,
+    timeTo1000xMinutes,
+    timeTo2500xMinutes,
+    timeTo5000xMinutes,
+    timeTo10000xMinutes,
   };
 
   await db.candidateOutcome.upsert({

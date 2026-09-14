@@ -611,6 +611,7 @@ model TradePostmortem {
 
   whatWorked        Json
   whatFailed        Json
+  deterministicTags Json?
   missedOpportunity Json?
   lessons           Json?
 
@@ -784,6 +785,7 @@ model BacktestRun {
   id String @id @default(cuid())
 
   strategyVersionId String? // the config actually tested, if it came from a saved version
+  scope             String? // EXIT_RULES | ENTRY_RULES
   configuration     Json // the sizing/exit rules actually tested (inline override or copied from a version)
 
   fromDate DateTime
@@ -806,6 +808,37 @@ model BacktestRun {
   notes          String?
 
   createdAt DateTime @default(now())
+}
+
+// Lightweight venue/token execution memory. This turns observed slippage,
+// quote weirdness, and repeated execution failures into a queryable risk
+// signal that entryMonitor can use before risking more capital on the same
+// token/venue profile.
+model ExecutionQualityStat {
+  id String @id @default(cuid())
+
+  tokenAddress String
+  dexId        String?
+  pairAddress  String?
+  direction    String // BUY | SELL | QUOTE_BUY | QUOTE_SELL
+
+  attempts         Int @default(0)
+  successes        Int @default(0)
+  failures         Int @default(0)
+  suspiciousQuotes Int @default(0)
+
+  avgSlippageBps       Float?
+  avgPriceImpactPercent Float?
+  maxPriceImpactPercent Float?
+
+  lastError  String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tokenAddress, dexId, pairAddress, direction])
+  @@index([tokenAddress])
+  @@index([lastSeenAt])
 }
 
 // §65/§66 — only ever a recommendation surface. Never referenced by

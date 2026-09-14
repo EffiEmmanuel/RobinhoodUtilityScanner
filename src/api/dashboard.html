@@ -1777,6 +1777,7 @@
                   ? "&q=" + encodeURIComponent(state.activitySearch)
                   : "")
             ),
+            fetchJson("/learning/summary"),
           ])
             .then(function (results) {
               state.connected = true;
@@ -1789,6 +1790,7 @@
                 ledger: results[4],
                 profileUpdates: results[5],
                 tokens: results[6],
+                learning: results[7],
               });
             })
             .catch(function (err) {
@@ -1895,6 +1897,23 @@
                 p.openPositionCount !== undefined ? p.openPositionCount : "—",
             },
           ];
+          var learning = data.learning || {};
+          if (learning.outlierCounts) {
+            tiles.push({
+              label: "10x / 100x Candidates",
+              value:
+                (learning.outlierCounts.hit10x || 0) +
+                " / " +
+                (learning.outlierCounts.hit100x || 0),
+              sub:
+                "5x " +
+                (learning.outlierCounts.hit5x || 0) +
+                " &middot; 25x " +
+                (learning.outlierCounts.hit25x || 0) +
+                " &middot; 50x " +
+                (learning.outlierCounts.hit50x || 0),
+            });
+          }
           els.tiles.innerHTML = tiles
             .map(function (t) {
               return (
@@ -2166,6 +2185,13 @@
                 c.researchConfidence !== undefined
                   ? c.researchConfidence.toFixed(0)
                   : "—";
+              var lane = c.tradeLane || c.qualificationPath || "—";
+              var outcomeBits = [];
+              if (c.outcome && c.outcome.hit10000x) outcomeBits.push("100x");
+              else if (c.outcome && c.outcome.hit5000x) outcomeBits.push("50x");
+              else if (c.outcome && c.outcome.hit2500x) outcomeBits.push("25x");
+              else if (c.outcome && c.outcome.hit1000x) outcomeBits.push("10x");
+              else if (c.outcome && c.outcome.hit500x) outcomeBits.push("5x");
               return (
                 '<div class="feed-row clickable" data-token-id="' +
                 esc(c.token && c.token.id) +
@@ -2181,6 +2207,9 @@
                 q +
                 " &middot; confidence " +
                 conf +
+                " &middot; " +
+                esc(lane) +
+                (outcomeBits.length ? " &middot; hit " + esc(outcomeBits.join(", ")) : "") +
                 '</span><span class="time">' +
                 fmtAgo(c.createdAt) +
                 "</span></div>" +
@@ -2474,7 +2503,9 @@
         function statChip(label, value, opts) {
           opts = opts || {};
           var display;
-          if (value === null || value === undefined || isNaN(value)) {
+          if (opts.isText) {
+            display = esc(value || "—");
+          } else if (value === null || value === undefined || isNaN(value)) {
             display = "&mdash;";
           } else if (opts.isFraction) {
             display = Math.round(value * 100) + "%";
@@ -2673,6 +2704,26 @@
                 '<div class="stat-grid">' +
                 statChip("Quality", candidate.qualityScore) +
                 statChip("Confidence", candidate.researchConfidence) +
+                statChip("Lane", candidate.tradeLane || candidate.qualificationPath || "—", { isText: true }) +
+                (candidate.outcome
+                  ? statChip(
+                      "Best hit",
+                      candidate.outcome.hit10000x
+                        ? "100x"
+                        : candidate.outcome.hit5000x
+                        ? "50x"
+                        : candidate.outcome.hit2500x
+                        ? "25x"
+                        : candidate.outcome.hit1000x
+                        ? "10x"
+                        : candidate.outcome.hit500x
+                        ? "5x"
+                        : candidate.outcome.hit250x
+                        ? "2.5x"
+                        : "—",
+                      { isText: true }
+                    )
+                  : "") +
                 "</div>" +
                 (candDecision && candDecision.finalReasons
                   ? listBlock("Why", candDecision.finalReasons)

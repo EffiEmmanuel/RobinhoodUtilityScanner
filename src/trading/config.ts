@@ -66,6 +66,13 @@ export const tradingConfig = {
   minTradeResearchConfidence: num("MIN_TRADE_RESEARCH_CONFIDENCE", 65),
   minTradeContractScore: num("MIN_TRADE_CONTRACT_SCORE", 75),
   minTradeLiquidityUsd: num("MIN_TRADE_LIQUIDITY_USD", 15000),
+  utilityOnlyTradingEnabled: bool("UTILITY_ONLY_TRADING_ENABLED", true),
+  minTradeUtilityScore: num("MIN_TRADE_UTILITY_SCORE", 70),
+  minTradeCredibilityScore: num("MIN_TRADE_CREDIBILITY_SCORE", 50),
+  minTradeWebsiteScore: num("MIN_TRADE_WEBSITE_SCORE", 45),
+  requireProductForTrade: bool("REQUIRE_PRODUCT_FOR_TRADE", true),
+  allowUnknownProductPredatesToken: bool("ALLOW_UNKNOWN_PRODUCT_PREDATES_TOKEN", true),
+  honeypotBytecodeCheckEnabled: bool("HONEYPOT_BYTECODE_CHECK_ENABLED", true),
   // "Verified project" is deliberately stricter than "tradeable." Momentum
   // can make a token worth a tactical scalp, but it must not masquerade as a
   // researched project worthy of larger sizing and runner exits.

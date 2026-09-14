@@ -13,20 +13,30 @@ import { logger } from "../logger";
  * directly alter production strategy").
  */
 
-export type OutcomeLabel = "hit125x" | "hit150x" | "hit200x" | "hit250x";
+export type OutcomeLabel = "hit125x" | "hit150x" | "hit200x" | "hit250x" | "hit500x" | "hit1000x" | "hit2500x" | "hit5000x" | "hit10000x";
 
 const FEATURE_NAMES = [
   "qualityScore",
   "researchConfidence",
   "contractScore",
   "utilityScore",
+  "credibilityScore",
   "websiteScore",
   "socialScore",
+  "liquidityScore",
+  "marketScore",
+  "holderScore",
   "brandingScore",
   "teamScore",
   "liquidityUsd",
   "marketCapAtDetection",
   "liquidityToMcapRatio",
+  "hourlyTxns",
+  "buyRatio1h",
+  "volumeToLiquidity1h",
+  "tradeLaneVerified",
+  "tradeLaneTactical",
+  "qualificationMomentumOverride",
 ] as const;
 type FeatureName = (typeof FEATURE_NAMES)[number];
 
@@ -38,21 +48,37 @@ export interface FeatureRow {
   // for anything created before this field existed, or anything that never
   // actually qualified (a REJECTED candidate can still have an outcome).
   qualificationPath?: string;
+  tradeLane?: string;
   qualityScore?: number;
   researchConfidence?: number;
   contractScore?: number;
   utilityScore?: number;
+  credibilityScore?: number;
   websiteScore?: number;
   socialScore?: number;
+  liquidityScore?: number;
+  marketScore?: number;
+  holderScore?: number;
   brandingScore?: number;
   teamScore?: number;
   liquidityUsd?: number;
   marketCapAtDetection?: number;
   liquidityToMcapRatio?: number;
+  hourlyTxns?: number;
+  buyRatio1h?: number;
+  volumeToLiquidity1h?: number;
+  tradeLaneVerified?: number;
+  tradeLaneTactical?: number;
+  qualificationMomentumOverride?: number;
   hit125x: boolean;
   hit150x: boolean;
   hit200x: boolean;
   hit250x: boolean;
+  hit500x: boolean;
+  hit1000x: boolean;
+  hit2500x: boolean;
+  hit5000x: boolean;
+  hit10000x: boolean;
   maxDrawdown24h?: number;
 }
 
@@ -73,29 +99,62 @@ export async function exportFeatureDataset(): Promise<FeatureRow[]> {
     .filter((c) => c.outcome)
     .map((c) => {
       const run = c.token.researchRuns[0];
-      const rawResearch = run?.rawResearch as { market?: { primaryPair?: { liquidityUsd?: number } } } | undefined;
-      const liquidityUsd = rawResearch?.market?.primaryPair?.liquidityUsd;
+      const rawResearch = run?.rawResearch as
+        | {
+            market?: {
+              primaryPair?: {
+                liquidityUsd?: number;
+                volume1h?: number;
+                buys1h?: number;
+                sells1h?: number;
+              };
+            };
+          }
+        | undefined;
+      const primaryPair = rawResearch?.market?.primaryPair;
+      const liquidityUsd = primaryPair?.liquidityUsd;
       const marketCapAtDetection = c.outcome!.marketCapAtDetection ?? undefined;
+      const hourlyTxns = primaryPair?.buys1h !== undefined || primaryPair?.sells1h !== undefined ? (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0) : undefined;
+      const buyRatio1h = hourlyTxns && hourlyTxns > 0 ? (primaryPair?.buys1h ?? 0) / hourlyTxns : undefined;
+      const volumeToLiquidity1h = liquidityUsd && liquidityUsd > 0 && primaryPair?.volume1h !== undefined ? primaryPair.volume1h / liquidityUsd : undefined;
+      const tradeLane = c.tradeLane ?? undefined;
+      const qualificationPath = c.qualificationPath ?? undefined;
 
       return {
         candidateId: c.id,
         traded: c.outcome!.traded,
-        qualificationPath: c.qualificationPath ?? undefined,
+        qualificationPath,
+        tradeLane,
         qualityScore: c.qualityScore ?? undefined,
         researchConfidence: c.researchConfidence ?? undefined,
         contractScore: run?.contractScore ?? undefined,
         utilityScore: run?.utilityScore ?? undefined,
+        credibilityScore: run?.credibilityScore ?? undefined,
         websiteScore: run?.websiteScore ?? undefined,
         socialScore: run?.socialScore ?? undefined,
+        liquidityScore: run?.liquidityScore ?? undefined,
+        marketScore: run?.marketScore ?? undefined,
+        holderScore: run?.holderScore ?? undefined,
         brandingScore: run?.brandingScore ?? undefined,
         teamScore: run?.teamScore ?? undefined,
         liquidityUsd,
         marketCapAtDetection,
         liquidityToMcapRatio: liquidityUsd && marketCapAtDetection ? liquidityUsd / marketCapAtDetection : undefined,
+        hourlyTxns,
+        buyRatio1h,
+        volumeToLiquidity1h,
+        tradeLaneVerified: tradeLane === "VERIFIED_PROJECT" ? 1 : 0,
+        tradeLaneTactical: tradeLane === "MOMENTUM_TACTICAL" ? 1 : 0,
+        qualificationMomentumOverride: qualificationPath === "MOMENTUM_OVERRIDE" ? 1 : 0,
         hit125x: c.outcome!.hit125x ?? false,
         hit150x: c.outcome!.hit150x ?? false,
         hit200x: c.outcome!.hit200x ?? false,
         hit250x: c.outcome!.hit250x ?? false,
+        hit500x: c.outcome!.hit500x ?? false,
+        hit1000x: c.outcome!.hit1000x ?? false,
+        hit2500x: c.outcome!.hit2500x ?? false,
+        hit5000x: c.outcome!.hit5000x ?? false,
+        hit10000x: c.outcome!.hit10000x ?? false,
         maxDrawdown24h: c.outcome!.maxDrawdown24h ?? undefined,
       };
     });
@@ -170,6 +229,28 @@ export function computeOutcomeRateByQualificationPath(rows: FeatureRow[], target
   return Array.from(byPath.entries())
     .map(([path, group]) => ({
       path,
+      sampleSize: group.length,
+      hitRate: group.filter((r) => r[target]).length / group.length,
+    }))
+    .sort((a, b) => b.sampleSize - a.sampleSize);
+}
+
+export interface TradeLaneRate {
+  lane: string;
+  sampleSize: number;
+  hitRate: number;
+}
+export function computeOutcomeRateByTradeLane(rows: FeatureRow[], target: OutcomeLabel): TradeLaneRate[] {
+  const byLane = new Map<string, FeatureRow[]>();
+  for (const row of rows) {
+    const lane = row.tradeLane ?? "UNKNOWN";
+    const group = byLane.get(lane);
+    if (group) group.push(row);
+    else byLane.set(lane, [row]);
+  }
+  return Array.from(byLane.entries())
+    .map(([lane, group]) => ({
+      lane,
       sampleSize: group.length,
       hitRate: group.filter((r) => r[target]).length / group.length,
     }))

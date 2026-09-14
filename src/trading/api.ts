@@ -7,8 +7,8 @@ import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { getAllowedRouterAddresses } from "./live/contracts";
-import { runBacktest } from "./backtest";
-import { trainOrAnalyze, exportFeatureDataset, type OutcomeLabel } from "./learning";
+import { runBacktest, runEntryBacktest } from "./backtest";
+import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
 import { PendingEntryStatus, StrategyStatus, TradeStatus } from "../generated/prisma";
 
@@ -216,6 +216,15 @@ export function registerTradingRoutes(app: FastifyInstance): void {
 
   app.get("/strategies", async () => db.strategyVersion.findMany({ orderBy: { createdAt: "desc" } }));
 
+  app.get("/execution-quality", async (req) => {
+    const { limit, tokenAddress } = req.query as { limit?: string; tokenAddress?: string };
+    return db.executionQualityStat.findMany({
+      where: tokenAddress ? { tokenAddress: tokenAddress.toLowerCase() } : undefined,
+      orderBy: [{ failures: "desc" }, { suspiciousQuotes: "desc" }, { lastSeenAt: "desc" }],
+      take: Math.min(Number(limit) || 100, 500),
+    });
+  });
+
   app.get("/strategies/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const strategy = await db.strategyVersion.findUnique({ where: { id } });
@@ -234,6 +243,37 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     } catch (err) {
       return reply.code(409).send({ error: String(err) });
     }
+  });
+
+  app.post("/strategies/variants", async (req, reply) => {
+    const body = req.body as {
+      parentStrategyVersionId?: string;
+      name?: string;
+      version: string;
+      configuration?: object;
+      scoringWeights?: object;
+      entryRules?: object;
+      sizingRules?: object;
+      exitRules?: object;
+    };
+    if (!body.version) return reply.code(400).send({ error: "body.version is required" });
+    const parent = body.parentStrategyVersionId
+      ? await db.strategyVersion.findUnique({ where: { id: body.parentStrategyVersionId } })
+      : await getActiveStrategyVersion();
+    if (!parent) return reply.code(404).send({ error: "parent strategy version not found" });
+    return db.strategyVersion.create({
+      data: {
+        name: body.name ?? parent.name,
+        version: body.version,
+        status: StrategyStatus.DRAFT,
+        configuration: { ...(parent.configuration as object), ...(body.configuration ?? {}) } as object,
+        scoringWeights: { ...(parent.scoringWeights as object), ...(body.scoringWeights ?? {}) } as object,
+        entryRules: { ...(parent.entryRules as object), ...(body.entryRules ?? {}) } as object,
+        sizingRules: { ...(parent.sizingRules as object), ...(body.sizingRules ?? {}) } as object,
+        exitRules: { ...(parent.exitRules as object), ...(body.exitRules ?? {}) } as object,
+        parentVersionId: parent.id,
+      },
+    });
   });
 
   app.get("/learning/candidate-outcomes", async (req) => {
@@ -264,6 +304,27 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     return result;
   });
 
+  app.post("/backtests/entry-rules", async (req) => {
+    const body = req.body as {
+      fromDate?: string;
+      toDate?: string;
+      strategyVersionId?: string;
+      rules?: Partial<Parameters<typeof runEntryBacktest>[0]["rules"]>;
+    };
+    const fromDate = body.fromDate ? new Date(body.fromDate) : new Date(Date.now() - 30 * 24 * 3600_000);
+    const toDate = body.toDate ? new Date(body.toDate) : new Date();
+    const rules = {
+      minLiquidityUsd: body.rules?.minLiquidityUsd ?? tradingConfig.minTradeLiquidityUsd,
+      minHourlyTxns: body.rules?.minHourlyTxns ?? tradingConfig.normalMinHourlyTxns,
+      minBuyRatio1h: body.rules?.minBuyRatio1h ?? tradingConfig.normalMinBuyRatio1h,
+      maxBuyRatio1h: body.rules?.maxBuyRatio1h ?? tradingConfig.normalMaxBuyRatio1h,
+      maxVolumeToLiquidity1h: body.rules?.maxVolumeToLiquidity1h ?? tradingConfig.normalMaxVolumeToLiquidity1h,
+      maxRecentRunUpPercent: body.rules?.maxRecentRunUpPercent ?? tradingConfig.conservativeMaxRecentRunUpPercent,
+      lookbackMinutes: body.rules?.lookbackMinutes ?? tradingConfig.conservativeRecentWindowMinutes,
+    };
+    return runEntryBacktest({ rules, fromDate, toDate, strategyVersionId: body.strategyVersionId });
+  });
+
   app.get("/backtests", async (req) => {
     const { limit } = req.query as { limit?: string };
     return db.backtestRun.findMany({ orderBy: { createdAt: "desc" }, take: Math.min(Number(limit) || 50, 200) });
@@ -284,7 +345,25 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     return { sampleSize: rows.length, rows };
   });
 
-  const VALID_LABELS: OutcomeLabel[] = ["hit125x", "hit150x", "hit200x", "hit250x"];
+  app.get("/learning/summary", async () => {
+    const rows = await exportFeatureDataset();
+    const target: OutcomeLabel = "hit1000x";
+    return {
+      sampleSize: rows.length,
+      tradeLaneHitRates: computeOutcomeRateByTradeLane(rows, target),
+      qualificationPathHitRates: computeOutcomeRateByQualificationPath(rows, target),
+      target,
+      outlierCounts: {
+        hit5x: rows.filter((r) => r.hit500x).length,
+        hit10x: rows.filter((r) => r.hit1000x).length,
+        hit25x: rows.filter((r) => r.hit2500x).length,
+        hit50x: rows.filter((r) => r.hit5000x).length,
+        hit100x: rows.filter((r) => r.hit10000x).length,
+      },
+    };
+  });
+
+  const VALID_LABELS: OutcomeLabel[] = ["hit125x", "hit150x", "hit200x", "hit250x", "hit500x", "hit1000x", "hit2500x", "hit5000x", "hit10000x"];
 
   app.post("/learning/train", async (req, reply) => {
     const { targetLabel } = req.body as { targetLabel?: string };

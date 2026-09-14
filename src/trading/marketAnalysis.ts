@@ -124,6 +124,8 @@ export interface TechnicalFeatures {
   distanceFromLowPercent?: number;
   mcapVelocityPercentPerHour?: number;
   liquidityToMcapRatio?: number;
+  liquidityChangeSinceFirstSnapshotPercent?: number;
+  liquidityRecentTrend?: Trend;
   buySellRatio1h?: number;
   buySellRatio5m?: number;
   priceChange5mPercent?: number;
@@ -156,10 +158,23 @@ function volumeTrend(volumes: number[]): Trend | undefined {
   return "FLAT";
 }
 
+function numericTrend(values: number[]): Trend | undefined {
+  if (values.length < 4) return undefined;
+  const mid = Math.floor(values.length / 2);
+  const olderAvg = values.slice(0, mid).reduce((a, b) => a + b, 0) / mid;
+  const recentAvg = values.slice(mid).reduce((a, b) => a + b, 0) / (values.length - mid);
+  if (olderAvg === 0) return recentAvg > 0 ? "RISING" : "FLAT";
+  const change = (recentAvg - olderAvg) / olderAvg;
+  if (change >= 0.12) return "RISING";
+  if (change <= -0.12) return "FALLING";
+  return "FLAT";
+}
+
 export async function computeTechnicalFeatures(tokenId: string, latestPair: MarketPair | undefined, tokenAddress: string): Promise<TechnicalFeatures> {
   const series = await getSnapshotSeries(tokenId);
   const mcaps = series.map((s) => s.mcap);
   const volumes = series.map((s) => s.volume5m).filter((v): v is number => v !== null);
+  const liquidities = series.map((s) => s.liquidity).filter((v): v is number => v !== null && v > 0);
   const confidence = confidenceForDataPoints(series.length);
 
   const features: TechnicalFeatures = {
@@ -178,7 +193,11 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
     volume6hNow: latestPair?.volume6h,
     volume24hNow: latestPair?.volume24h,
     volume5mTrend: volumeTrend(volumes),
+    liquidityRecentTrend: numericTrend(liquidities),
   };
+  if (liquidities.length >= 2 && liquidities[0] > 0) {
+    features.liquidityChangeSinceFirstSnapshotPercent = ((liquidities[liquidities.length - 1] - liquidities[0]) / liquidities[0]) * 100;
+  }
 
   if (latestPair?.buys1h !== undefined || latestPair?.sells1h !== undefined) {
     const total = (latestPair.buys1h ?? 0) + (latestPair.sells1h ?? 0);
@@ -282,6 +301,9 @@ export function formatTechnicalFeaturesForPrompt(f: TechnicalFeatures): string {
     f.rsi14Like !== undefined ? `RSI(14)-like momentum: ${f.rsi14Like.toFixed(0)}/100 (>70 stretched to the upside, <30 stretched to the downside, as a rough guide only)` : "RSI: insufficient history yet",
     ...volLines,
     f.liquidityToMcapRatio !== undefined ? `Liquidity/mcap ratio: ${f.liquidityToMcapRatio.toFixed(3)}` : undefined,
+    f.liquidityChangeSinceFirstSnapshotPercent !== undefined
+      ? `Liquidity change since first snapshot: ${f.liquidityChangeSinceFirstSnapshotPercent.toFixed(1)}%${f.liquidityRecentTrend ? ` (${f.liquidityRecentTrend})` : ""}`
+      : undefined,
     f.buySellRatio1h !== undefined ? `1h buy ratio: ${(f.buySellRatio1h * 100).toFixed(0)}%` : undefined,
     f.buySellRatio5m !== undefined ? `5m buy ratio: ${(f.buySellRatio5m * 100).toFixed(0)}%` : undefined,
     f.priceChange5mPercent !== undefined ? `5m price change: ${f.priceChange5mPercent.toFixed(1)}%` : undefined,

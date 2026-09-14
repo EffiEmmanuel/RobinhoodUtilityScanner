@@ -21,6 +21,11 @@ function row(overrides: Partial<FeatureRow>): FeatureRow {
     hit150x: false,
     hit200x: false,
     hit250x: false,
+    hit500x: false,
+    hit1000x: false,
+    hit2500x: false,
+    hit5000x: false,
+    hit10000x: false,
     ...overrides,
   };
 }

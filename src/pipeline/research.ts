@@ -9,6 +9,8 @@ import { callStructured } from "../ai/provider";
 import { ResearchSynthesisSchema, RESEARCH_SYNTHESIS_JSON_SCHEMA } from "../ai/schemas";
 import { RESEARCH_SYNTHESIZER_SYSTEM, buildResearchSynthesisPrompt } from "../ai/prompts";
 import { computeScore } from "../scoring";
+import { getHolderSnapshot } from "../trading/holderConcentration";
+import { getPublicClient } from "../trading/live/wallet";
 import { sendAlertEmail } from "../notify/email";
 import type { DiscoveredTokenProfile } from "../dex/types";
 import { TokenStatus, ResearchRunStatus } from "../generated/prisma";
@@ -79,12 +81,14 @@ export async function researchToken(tokenId: string): Promise<void> {
 
   const profile = (token.rawProfile as unknown as DiscoveredTokenProfile) ?? null;
 
-  const [marketSettled, onchainSettled] = await Promise.allSettled([
+  const [marketSettled, onchainSettled, holdersSettled] = await Promise.allSettled([
     captureMarketSnapshot(tokenId, token.chain, token.address),
     researchOnchain(token.address),
+    getHolderSnapshot(getPublicClient(), token.address as `0x${string}`),
   ]);
   const market = marketSettled.status === "fulfilled" ? marketSettled.value : { pairs: [] };
   const onchain = onchainSettled.status === "fulfilled" ? onchainSettled.value : UNAVAILABLE_ONCHAIN;
+  const holders = holdersSettled.status === "fulfilled" ? holdersSettled.value : undefined;
 
   const websiteUrl = pickWebsiteUrl(profile?.links ?? [], market.primaryPair?.websites ?? []);
   const website = await researchWebsite(websiteUrl).catch(() => UNAVAILABLE_WEBSITE);
@@ -124,6 +128,7 @@ export async function researchToken(tokenId: string): Promise<void> {
     synthesis,
     onchain,
     market,
+    holders,
   });
 
   const completedAt = new Date();
@@ -149,7 +154,7 @@ export async function researchToken(tokenId: string): Promise<void> {
       summary: synthesis.projectSummary,
       risks: synthesis.risks,
       positives: synthesis.positives,
-      rawResearch: { market, website, onchain, synthesis } as unknown as object,
+      rawResearch: { market, website, onchain, holders, synthesis } as unknown as object,
     },
   });
 
