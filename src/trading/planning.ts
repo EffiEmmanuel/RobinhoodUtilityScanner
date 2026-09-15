@@ -213,6 +213,35 @@ export async function planCandidate(candidateId: string): Promise<void> {
     clampedZone = { ...clampedZone, min: Math.min(clampedZone.min, invalidationFloor) };
   }
 
+  const tacticalScoutOverride = tacticalScoutActionForWatchOnly({
+    action,
+    qualificationPath,
+    tradeLane: lane.tradeLane,
+    currentMcap,
+    targetEntryMcapMin: clampedZone.min,
+    targetEntryMcapMax: clampedZone.max,
+    pair: market.primaryPair,
+  });
+  if (tacticalScoutOverride) {
+    logger.warn(
+      {
+        candidateId: candidate.id,
+        fromAction: action,
+        toAction: tacticalScoutOverride,
+        currentMcap,
+        targetEntryMcapMin: clampedZone.min,
+        targetEntryMcapMax: clampedZone.max,
+        buys1h: market.primaryPair?.buys1h,
+        sells1h: market.primaryPair?.sells1h,
+        liquidityUsd,
+        aiReasoning: analysis.reasoning,
+      },
+      "deterministic tactical scout override: AI chose WATCH_ONLY for a tradeable momentum setup with an actionable zone"
+    );
+    action = tacticalScoutOverride;
+    entryStyle = tacticalScoutOverride === TradePlanAction.BUY_NOW ? "MARKET_ENTRY" : "PULLBACK_ENTRY";
+  }
+
   const plan = await db.tradePlan.create({
     data: {
       candidateId: candidate.id,
@@ -320,6 +349,41 @@ export function shouldRetryPlanningForTransientMomentumMarket(input: {
   if (!freshMarketUnavailable) return false;
 
   return input.evaluation.reasons.some((reason) => reason.startsWith("liquidityUsd "));
+}
+
+export function tacticalScoutActionForWatchOnly(input: {
+  action: TradePlanAction;
+  qualificationPath: string | null | undefined;
+  tradeLane: string | null | undefined;
+  currentMcap: number | undefined;
+  targetEntryMcapMin: number | undefined;
+  targetEntryMcapMax: number | undefined;
+  pair: Pick<MarketPair, "liquidityUsd" | "volume1h" | "buys1h" | "sells1h"> | undefined;
+}): TradePlanAction | undefined {
+  if (input.action !== TradePlanAction.WATCH_ONLY) return undefined;
+  if (input.qualificationPath !== "MOMENTUM_OVERRIDE" || input.tradeLane !== "MOMENTUM_TACTICAL") return undefined;
+  if (!input.pair || input.currentMcap === undefined) return undefined;
+  if (input.targetEntryMcapMin === undefined || input.targetEntryMcapMax === undefined) return undefined;
+
+  const hourlyTxns = (input.pair.buys1h ?? 0) + (input.pair.sells1h ?? 0);
+  if (hourlyTxns < config.momentumOverrideMinHourlyTxns) return undefined;
+  if ((input.pair.liquidityUsd ?? 0) < tradingConfig.momentumTacticalMinLiquidityUsd) return undefined;
+
+  const buyRatio = hourlyTxns > 0 ? (input.pair.buys1h ?? 0) / hourlyTxns : 0;
+  if (buyRatio < tradingConfig.normalMinBuyRatio1h || buyRatio > tradingConfig.normalMaxBuyRatio1h) return undefined;
+
+  const liquidityUsd = input.pair.liquidityUsd ?? 0;
+  if (input.pair.volume1h !== undefined && liquidityUsd > 0 && input.pair.volume1h / liquidityUsd > tradingConfig.normalMaxVolumeToLiquidity1h) {
+    return undefined;
+  }
+
+  if (input.currentMcap >= input.targetEntryMcapMin && input.currentMcap <= input.targetEntryMcapMax) {
+    return TradePlanAction.BUY_NOW;
+  }
+  if (input.currentMcap > input.targetEntryMcapMax) {
+    return TradePlanAction.WAIT_FOR_ENTRY;
+  }
+  return undefined;
 }
 
 /**

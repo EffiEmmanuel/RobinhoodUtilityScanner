@@ -817,7 +817,7 @@ async function openTrade(input: {
   try {
     fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair, { maxSlippageBps: input.maxSlippageBps });
   } catch (err) {
-    logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — candidate reverted to REJECTED, no trade created");
+    logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — no trade created; pending entry will retry if the candidate is still waiting");
     void recordExecutionQuality({
       tokenAddress: input.tokenAddress,
       pair: input.pair,
@@ -830,7 +830,6 @@ async function openTrade(input: {
       tokenLabel: input.pair.baseTokenSymbol ?? input.pair.baseTokenName ?? input.tokenAddress.slice(0, 10),
       error: String(err),
     });
-    await db.tradeCandidate.update({ where: { id: input.candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
     throw err;
   }
   recordBuySuccess();

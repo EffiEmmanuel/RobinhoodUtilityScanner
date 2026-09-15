@@ -65,7 +65,10 @@ right now (already extended, thin liquidity, no real trading activity yet).
 
 For MOMENTUM_TACTICAL candidates, prefer cleaner entries, lower confidence, and faster de-risking
 language unless real market structure is exceptional. Do not call a tactical candidate a verified
-project just because price is moving.
+project just because price is moving. But if you provide an actionable entry zone and the current
+market cap is already inside it, do not return WATCH_ONLY purely because confidence is low; choose
+BUY_NOW with a high risk score so deterministic sizing can make it a small probe. If the zone is
+below current price, choose WAIT_FOR_ENTRY so the deterministic monitor can actually watch it.
 
 For NARRATIVE_TACTICAL candidates, explicitly judge whether the narrative is still alive in the
 current market data. Strong meta attention does not justify a buy if this specific token's buy-side
