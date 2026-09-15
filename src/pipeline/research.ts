@@ -205,9 +205,11 @@ export async function researchToken(tokenId: string): Promise<void> {
     "research complete"
   );
 
-  if (meetsAlertBar && config.alertEmailTo) {
+  if ((newStatus === TokenStatus.ALERTED || newStatus === TokenStatus.WATCHLISTED) && config.alertEmailTo) {
+    const emailKind = newStatus === TokenStatus.ALERTED ? "ALERT" : "WATCHLIST";
     try {
       const providerId = await sendAlertEmail({
+        kind: emailKind,
         tokenName: token.name,
         tokenSymbol: token.symbol,
         tokenAddress: token.address,
@@ -221,15 +223,15 @@ export async function researchToken(tokenId: string): Promise<void> {
       await db.alert.create({
         data: {
           tokenId,
-          type: "ALERT",
+          type: emailKind,
           score: score.finalScore,
           recipient: config.alertEmailTo,
           providerId,
         },
       });
-      logger.info({ tokenId, address: token.address }, "alert email sent");
+      logger.info({ tokenId, address: token.address, type: emailKind }, "research notification email sent");
     } catch (err) {
-      logger.error({ tokenId, err: String(err) }, "failed to send alert email");
+      logger.error({ tokenId, type: emailKind, err: String(err) }, "failed to send research notification email");
     }
   }
 }

@@ -604,6 +604,7 @@ async function executeSell(
     void sendPartialProfitEmail({ tradeId: trade.id, tokenId: trade.tokenId, multiple: 1 + (trade.mfePercent ?? 0) / 100, sellPercent: decision.sellPercentOfRemaining, mode: trade.mode }).catch(
       (err) => logger.error({ tradeId: trade.id, err: String(err) }, "failed to send partial profit email")
     );
+    await checkPortfolioMilestones().catch((err) => logger.error({ err: String(err) }, "milestone check failed after partial exit"));
     logger.info({ tradeId: trade.id, decision: decision.type, sellTokens, provider: fill.provider }, "partial exit executed");
   }
 }

@@ -12,9 +12,11 @@ import { pollCandidateOutcomes } from "./outcomes";
 import { ensurePaperWalletSeeded, recordPortfolioSnapshot, checkCircuitBreakers } from "./portfolio";
 import { checkForCircuitBreakerTransition } from "./circuitBreakerAlerts";
 import { getActiveStrategyVersion } from "./strategy";
+import { checkPortfolioMilestones } from "./milestones";
 
 const CANDIDATE_GENERATION_INTERVAL_SECONDS = 30;
 const OUTCOME_POLL_INTERVAL_SECONDS = 300; // 5 min — this is 15m/1h/6h/24h/48h bucketed data, no need to hammer it
+const MILESTONE_POLL_INTERVAL_SECONDS = 60;
 // checkCircuitBreakers() is already called from several other places
 // (entryMonitor.ts only once a pending entry is actually in-zone, the
 // dashboard's /trading/status only while someone has it open) — neither is
@@ -163,6 +165,17 @@ async function outcomePollLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
+async function milestoneLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      await checkPortfolioMilestones();
+    } catch (err) {
+      logger.error({ err: String(err) }, "portfolio milestone check failed");
+    }
+    await sleep(MILESTONE_POLL_INTERVAL_SECONDS * 1000);
+  }
+}
+
 export async function startTradingOrchestrator(): Promise<() => void> {
   if (tradingConfig.mode === "DISABLED") {
     logger.info("trading extension is DISABLED (TRADING_MODE=DISABLED) — not starting any trading loops");
@@ -189,6 +202,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     positionMonitorLoop(signal),
     outcomePollLoop(signal),
     circuitBreakerAlertLoop(signal),
+    milestoneLoop(signal),
   ];
   Promise.allSettled(loops);
 

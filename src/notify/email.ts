@@ -5,6 +5,7 @@ import type { ScoringResult } from "../scoring";
 import type { ResearchSynthesis } from "../ai/schemas";
 
 export interface AlertEmailInput {
+  kind?: "ALERT" | "WATCHLIST";
   tokenName?: string | null;
   tokenSymbol?: string | null;
   tokenAddress: string;
@@ -22,7 +23,8 @@ function fmtScore(n: number) {
 
 export function buildAlertSubject(input: AlertEmailInput): string {
   const name = input.tokenName ?? input.tokenSymbol ?? input.tokenAddress.slice(0, 10);
-  return `\u{1F6A8} RH Utility Candidate — ${name} — ${fmtScore(input.score.finalScore)}/100`;
+  const prefix = input.kind === "WATCHLIST" ? "\u{1F440} RH Watchlist Candidate" : "\u{1F6A8} RH Utility Candidate";
+  return `${prefix} — ${name} — ${fmtScore(input.score.finalScore)}/100`;
 }
 
 export function buildAlertPlainText(input: AlertEmailInput): string {
@@ -31,6 +33,7 @@ export function buildAlertPlainText(input: AlertEmailInput): string {
     `Project: ${input.tokenName ?? "(unknown)"}`,
     `Ticker: ${input.tokenSymbol ?? "(unknown)"}`,
     `Contract: ${input.tokenAddress}`,
+    `Status: ${input.kind === "WATCHLIST" ? "WATCHLISTED" : "ALERTED"}`,
     `Score: ${fmtScore(input.score.finalScore)}/100 (${input.score.band})`,
     `Confidence: ${input.score.confidence}/100`,
     "",

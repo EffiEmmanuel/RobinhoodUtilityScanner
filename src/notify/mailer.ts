@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 import { config } from "../config";
+import { logger } from "../logger";
 
 // Free SMTP relay (Gmail App Password by default) in place of Resend, which
 // hit its monthly send cap. Regular Gmail allows 500 sends/24hr, Google
@@ -31,6 +32,7 @@ export interface MailInput {
 export async function sendMail(input: MailInput): Promise<string | undefined> {
   try {
     const info = await getTransporter().sendMail(input);
+    logger.info({ to: input.to, subject: input.subject, messageId: info.messageId }, "email accepted by SMTP relay");
     return info.messageId;
   } catch (err) {
     throw new Error(`SMTP send failed: ${err instanceof Error ? err.message : String(err)}`);
