@@ -12,6 +12,8 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
+    "wallet:track": "tsx scripts/track-wallet.ts",
+    "wallet:poll": "tsx scripts/run-wallet-tracking-poll.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

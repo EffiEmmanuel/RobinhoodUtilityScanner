@@ -14,6 +14,7 @@ import { getPublicClient } from "../trading/live/wallet";
 import { sendAlertEmail } from "../notify/email";
 import type { DiscoveredTokenProfile } from "../dex/types";
 import { TokenStatus, ResearchRunStatus } from "../generated/prisma";
+import { formatWalletSignalsForPrompt, getWalletSignalsForToken } from "../walletTracking/signals";
 
 const UNAVAILABLE_WEBSITE: WebsiteResearchResult = {
   status: "UNAVAILABLE",
@@ -92,6 +93,7 @@ export async function researchToken(tokenId: string): Promise<void> {
 
   const websiteUrl = pickWebsiteUrl(profile?.links ?? [], market.primaryPair?.websites ?? []);
   const website = await researchWebsite(websiteUrl).catch(() => UNAVAILABLE_WEBSITE);
+  const walletSignals = await getWalletSignalsForToken(tokenId, token.address);
 
   const linkList = buildLinksList(profile, website, market.primaryPair?.url);
   const linksText = linkList.map((l) => `${l.label}: ${l.url}`).join("\n") || "No links found.";
@@ -108,6 +110,7 @@ export async function researchToken(tokenId: string): Promise<void> {
         onchain: formatOnchainResultForPrompt(onchain),
         links: linksText,
         xResearch: formatXFindingsForPrompt(token.xFindings),
+        walletSignals: formatWalletSignalsForPrompt(walletSignals),
       }),
       schema: ResearchSynthesisSchema,
       jsonSchema: RESEARCH_SYNTHESIS_JSON_SCHEMA,
@@ -154,7 +157,7 @@ export async function researchToken(tokenId: string): Promise<void> {
       summary: synthesis.projectSummary,
       risks: synthesis.risks,
       positives: synthesis.positives,
-      rawResearch: { market, website, onchain, holders, synthesis } as unknown as object,
+      rawResearch: { market, website, onchain, holders, walletSignals, synthesis } as unknown as object,
     },
   });
 

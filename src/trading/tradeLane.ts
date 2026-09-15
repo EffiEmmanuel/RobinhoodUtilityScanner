@@ -1,7 +1,7 @@
 import { tradingConfig } from "./config";
 import type { CandidateRiskResult } from "./riskEngine";
 
-export const TRADE_LANES = ["VERIFIED_PROJECT", "MOMENTUM_TACTICAL", "REJECT"] as const;
+export const TRADE_LANES = ["VERIFIED_PROJECT", "MOMENTUM_TACTICAL", "NARRATIVE_TACTICAL", "REJECT"] as const;
 export type TradeLane = (typeof TRADE_LANES)[number];
 
 export interface TradeLaneInput {
@@ -30,6 +30,9 @@ export function classifyTradeLane(input: TradeLaneInput): TradeLaneResult {
     return { tradeLane: "REJECT", reasons: ["candidate is not trade-eligible"] };
   }
 
+  if (input.qualificationPath === "NARRATIVE_META") {
+    return { tradeLane: "NARRATIVE_TACTICAL", reasons: ["qualified through trending narrative/meta evidence"] };
+  }
   if (input.qualificationPath === "MOMENTUM_OVERRIDE" || input.evaluation.reasons[0]?.startsWith("momentum override:")) {
     return { tradeLane: "MOMENTUM_TACTICAL", reasons: ["qualified through momentum override, not verified-project evidence"] };
   }
@@ -74,5 +77,5 @@ export function classifyTradeLane(input: TradeLaneInput): TradeLaneResult {
 }
 
 export function normalizeTradeLane(value: string | null | undefined): TradeLane {
-  return value === "VERIFIED_PROJECT" || value === "MOMENTUM_TACTICAL" || value === "REJECT" ? value : "MOMENTUM_TACTICAL";
+  return value === "VERIFIED_PROJECT" || value === "MOMENTUM_TACTICAL" || value === "NARRATIVE_TACTICAL" || value === "REJECT" ? value : "MOMENTUM_TACTICAL";
 }

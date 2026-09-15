@@ -25,6 +25,25 @@ enum TokenStatus {
   FAILED
 }
 
+enum TrackedWalletStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum TrackedWalletConfidence {
+  USER_SUPPLIED
+  PUBLICLY_POSTED
+  CONFIRMED_BY_CREATOR
+  UNKNOWN
+}
+
+enum WalletEventDirection {
+  TOKEN_IN
+  TOKEN_OUT
+  SELF_TRANSFER
+}
+
 enum ResearchRunStatus {
   PENDING
   RUNNING
@@ -81,9 +100,77 @@ model Token {
   tradeCandidates TradeCandidate[]
   trades          Trade[]
   profileUpdates  ProfileUpdate[]
+  walletEvents    TrackedWalletEvent[]
+  narrativeSnapshots NarrativeSnapshot[]
 
   @@unique([chain, address])
   @@index([status])
+}
+
+model TrackedWallet {
+  id      String @id @default(cuid())
+  chain   String
+  address String
+
+  label      String?
+  source     String?
+  confidence TrackedWalletConfidence @default(USER_SUPPLIED)
+  status     TrackedWalletStatus     @default(ACTIVE)
+  tags       Json?
+  notes      String?
+
+  lastScannedBlock BigInt?
+  lastScannedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events TrackedWalletEvent[]
+
+  @@unique([chain, address])
+  @@index([status])
+  @@index([chain, status])
+}
+
+model TrackedWalletEvent {
+  id       String        @id @default(cuid())
+  walletId String
+  wallet   TrackedWallet @relation(fields: [walletId], references: [id])
+
+  tokenId String?
+  token   Token?  @relation(fields: [tokenId], references: [id])
+  chain   String
+
+  tokenAddress String
+  txHash       String
+  logIndex     Int
+  blockNumber  BigInt
+
+  blockTimestamp DateTime?
+  direction      WalletEventDirection
+
+  // Transfer logs prove token movement, not intent. A TOKEN_IN from a router/
+  // pool is often a buy and TOKEN_OUT is often a sell, but deposits, sends,
+  // airdrops, and contract mechanics can look similar. Keep the classification
+  // explicit so planning never treats this as blind copy-trade certainty.
+  classification String?
+  confidence     Float?
+
+  rawAmount      String
+  tokenAmount    Float?
+  usdValue       Float?
+  marketCapUsd   Float?
+  liquidityUsd   Float?
+  discoveredToken Boolean @default(false)
+
+  rawEvent  Json?
+  createdAt DateTime @default(now())
+
+  @@unique([walletId, txHash, logIndex, direction])
+  @@index([tokenAddress])
+  @@index([tokenId])
+  @@index([direction])
+  @@index([blockNumber])
 }
 
 // A separate table (not just a flag on Token) so a token's profile-change
@@ -201,6 +288,44 @@ model Alert {
   sentAt     DateTime @default(now())
 
   @@index([tokenId])
+}
+
+model NarrativeSnapshot {
+  id      String @id @default(cuid())
+  tokenId String
+  token   Token  @relation(fields: [tokenId], references: [id])
+
+  metaName String
+  metaSlug String
+  metaRank Int?
+
+  narrativeScore Float
+  xScore         Float?
+  dexScore       Float?
+  marketScore    Float?
+
+  xTweetCount      Int?
+  xUniqueAccounts  Int?
+  xTotalEngagement Int?
+
+  marketCapUsd Float?
+  liquidityUsd Float?
+  volume1h     Float?
+  volume24h    Float?
+  buyRatio1h   Float?
+
+  reasons Json
+  dexMeta Json
+  tokenMarket Json?
+  xFindings Json?
+
+  createdAt DateTime @default(now())
+
+  tradeCandidates TradeCandidate[]
+
+  @@index([tokenId, createdAt])
+  @@index([metaSlug, createdAt])
+  @@index([narrativeScore])
 }
 
 // =============================================================================
@@ -324,6 +449,8 @@ model TradeCandidate {
   tokenId       String
   token         Token   @relation(fields: [tokenId], references: [id])
   researchRunId String?
+  narrativeSnapshotId String?
+  narrativeSnapshot   NarrativeSnapshot? @relation(fields: [narrativeSnapshotId], references: [id])
 
   status TradeCandidateStatus @default(QUALIFIED)
 
@@ -358,6 +485,7 @@ model TradeCandidate {
   @@index([status])
   @@index([createdAt])
   @@index([status, createdAt])
+  @@index([narrativeSnapshotId])
 }
 
 model TradePlan {

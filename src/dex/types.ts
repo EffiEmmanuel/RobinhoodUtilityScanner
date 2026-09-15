@@ -12,9 +12,11 @@ export interface DiscoveredTokenProfile {
 }
 
 export interface MarketPair {
+  chainId?: string;
   dexId: string;
   pairAddress: string;
   url: string;
+  baseTokenAddress?: string;
   priceUsd?: number;
   // Price denominated in the quote token — NOT reliably ETH. A pair's quote
   // token can be any other token that's ever been paired against this one
@@ -59,4 +61,26 @@ export interface MarketPair {
 export interface MarketSummary {
   pairs: MarketPair[];
   primaryPair?: MarketPair; // highest-liquidity pair
+}
+
+export interface TrendingMeta {
+  name: string;
+  slug: string;
+  description?: string;
+  marketCap?: number;
+  liquidity?: number;
+  volume?: number;
+  tokenCount?: number;
+  marketCapChange?: {
+    m5?: number;
+    h1?: number;
+    h6?: number;
+    h24?: number;
+  };
+  marketCapDelta?: {
+    m5?: number;
+    h1?: number;
+    h6?: number;
+    h24?: number;
+  };
 }

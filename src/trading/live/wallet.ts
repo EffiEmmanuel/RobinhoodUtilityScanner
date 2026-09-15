@@ -23,7 +23,7 @@ const robinhoodChain = {
 // rate-limited fallback once the primary actually fails (viem's default
 // fallback behavior, not a sticky switch) — see config.ts's rhRpcFallbackUrl
 // for why this exists.
-const rpcTransport = fallback([http(config.rhRpcUrl), http(config.rhRpcFallbackUrl)]);
+const rpcTransport = fallback([http(config.rhRpcUrl), ...config.rhRpcExtraUrls.map((url) => http(url)), http(config.rhRpcFallbackUrl)]);
 
 let account: ReturnType<typeof privateKeyToAccount> | undefined;
 

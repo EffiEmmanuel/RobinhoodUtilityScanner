@@ -13,6 +13,9 @@ import { canBypassUtilityGateForMomentum, evaluateUtilityOnlyGate, utilityGateIn
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
+import { formatWalletSignalsForPrompt, getWalletSignalsForToken } from "../walletTracking/signals";
+
+const MOMENTUM_PLANNING_DATA_RETRY_MINUTES = 2;
 
 /**
  * §14: turns a QUALIFIED candidate into BUY_NOW / WAIT_FOR_ENTRY / WATCH_ONLY
@@ -43,6 +46,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const strategy = await getActiveStrategyVersion();
   const market = await pollCandidateMarket(candidate.tokenId, candidate.token.chain, candidate.token.address);
   const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair, candidate.token.address);
+  const walletSignals = await getWalletSignalsForToken(candidate.tokenId, candidate.token.address);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
   const hourlyTxns = (market.primaryPair?.buys1h ?? 0) + (market.primaryPair?.sells1h ?? 0);
@@ -61,7 +65,12 @@ export async function planCandidate(candidateId: string): Promise<void> {
       websiteScore: run.websiteScore,
     })
   );
-  const qualificationPath = freshEval.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : (candidate.qualificationPath ?? "NORMAL");
+  const qualificationPath =
+    candidate.qualificationPath === "NARRATIVE_META"
+      ? "NARRATIVE_META"
+      : freshEval.reasons[0]?.startsWith("momentum override:")
+        ? "MOMENTUM_OVERRIDE"
+        : (candidate.qualificationPath ?? "NORMAL");
   const utilityBypassedForMomentum = canBypassUtilityGateForMomentum({ qualificationPath, evaluation: freshEval });
   const tradeEligibilityEvaluation =
     utilityGate.passed || utilityBypassedForMomentum
@@ -80,14 +89,39 @@ export async function planCandidate(candidateId: string): Promise<void> {
   });
 
   const utilityBypassReason = utilityBypassedForMomentum
-    ? ["momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup"]
+    ? [
+        qualificationPath === "NARRATIVE_META"
+          ? "narrative tactical override: utility/product gate bypassed for a tradeable trending-meta setup"
+          : "momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup",
+      ]
     : [];
 
   if (!freshEval.eligible || (!utilityGate.passed && !utilityBypassedForMomentum)) {
+    if (shouldRetryPlanningForTransientMomentumMarket({ qualificationPath, evaluation: freshEval, pair: market.primaryPair })) {
+      const retryAfter = new Date(Date.now() + MOMENTUM_PLANNING_DATA_RETRY_MINUTES * 60_000);
+      const reasons = [
+        `planning retry: momentum candidate has missing/zero fresh market liquidity; retrying after ${retryAfter.toISOString()} instead of rejecting`,
+        ...freshEval.reasons,
+        ...utilityGate.reasons,
+      ];
+      await recordDecision(candidate.id, null, TradeDecision.WAIT, "planning_retry", strategy.id, {
+        market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+        project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
+        technical,
+        walletSignals,
+        reasons,
+        deterministic: { retryAfter: retryAfter.toISOString(), retryMinutes: MOMENTUM_PLANNING_DATA_RETRY_MINUTES, qualificationPath, tradeLane: lane.tradeLane },
+      });
+      await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.QUALIFIED, qualificationPath, tradeLane: lane.tradeLane } });
+      logger.warn({ candidateId, retryAfter: retryAfter.toISOString(), reasons: freshEval.reasons }, "momentum candidate planning deferred because fresh market data looked transiently unavailable");
+      return;
+    }
+
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
+      walletSignals,
       reasons: [...freshEval.reasons, ...utilityGate.reasons],
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
@@ -109,6 +143,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
         laneReasons: lane.reasons,
         marketText: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd, market.primaryPair?.priceUsd),
         technicalText: formatTechnicalFeaturesForPrompt(technical),
+        walletSignalsText: formatWalletSignalsForPrompt(walletSignals),
       }),
       schema: TradeAnalysisSchema,
       jsonSchema: TRADE_ANALYSIS_JSON_SCHEMA,
@@ -190,7 +225,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, utilityBypassedForMomentum, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
+      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, utilityBypassedForMomentum, walletSignals, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });
@@ -207,6 +242,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       aiAnalysis: analysis,
+      walletSignals,
       reasons: [...freshEval.reasons, ...utilityGate.reasons, ...utilityBypassReason, ...lane.reasons, analysis.reasoning],
     }
   );
@@ -268,6 +304,21 @@ function isExtremeMomentum(pair: MarketPair | undefined): boolean {
   if ((pair.priceChange1h ?? 0) < tradingConfig.extremeMomentumOverride1hPriceChangePercent) return false;
   const buyRatio1h = (pair.buys1h ?? 0) / Math.max(hourlyTxns, 1);
   return buyRatio1h >= tradingConfig.extremeMomentumOverrideMinBuyRatio1h;
+}
+
+export function shouldRetryPlanningForTransientMomentumMarket(input: {
+  qualificationPath: string | null | undefined;
+  evaluation: { eligible: boolean; reasons: string[] };
+  pair: Pick<MarketPair, "liquidityUsd"> | undefined;
+}): boolean {
+  if (input.evaluation.eligible) return false;
+  if (input.qualificationPath !== "MOMENTUM_OVERRIDE") return false;
+
+  const liquidity = input.pair?.liquidityUsd;
+  const freshMarketUnavailable = !input.pair || liquidity === undefined || liquidity <= 0;
+  if (!freshMarketUnavailable) return false;
+
+  return input.evaluation.reasons.some((reason) => reason.startsWith("liquidityUsd "));
 }
 
 /**
@@ -341,7 +392,7 @@ async function recordDecision(
   decision: TradeDecision,
   stage: string,
   strategyVersionId: string,
-  data: { market: unknown; project: unknown; technical: unknown; aiAnalysis?: unknown; reasons: unknown }
+  data: { market: unknown; project: unknown; technical: unknown; aiAnalysis?: unknown; walletSignals?: unknown; reasons: unknown; deterministic?: unknown }
 ) {
   await db.tradeDecisionSnapshot.create({
     data: {
@@ -355,7 +406,7 @@ async function recordDecision(
       technicalState: data.technical as object,
       portfolioState: {},
       aiAnalysis: (data.aiAnalysis ?? undefined) as object | undefined,
-      deterministicRules: { reasons: data.reasons } as object,
+      deterministicRules: { reasons: data.reasons, walletSignals: data.walletSignals, ...((data.deterministic as object | undefined) ?? {}) } as object,
       finalReasons: data.reasons as object,
       modelName: data.aiAnalysis ? config.researchModel : undefined,
     },

@@ -1,7 +1,7 @@
 import { config } from "../config";
 import { fetchJsonWithRetry } from "../util/http";
 import { logger } from "../logger";
-import type { DiscoveredTokenProfile, MarketPair, MarketSummary } from "./types";
+import type { DiscoveredTokenProfile, MarketPair, MarketSummary, TrendingMeta } from "./types";
 
 // Raw DexScreener response shapes (provider-specific). Nothing outside this
 // file should know about these — see FR-001/FR-002: wrap the provider so a
@@ -45,6 +45,32 @@ interface RawPair {
   };
 }
 
+interface RawMeta {
+  name?: string;
+  slug?: string;
+  description?: string;
+  marketCap?: number;
+  liquidity?: number;
+  volume?: number;
+  tokenCount?: number;
+  marketCapChange?: {
+    m5?: number;
+    h1?: number;
+    h6?: number;
+    h24?: number;
+  };
+  marketCapDelta?: {
+    m5?: number;
+    h1?: number;
+    h6?: number;
+    h24?: number;
+  };
+}
+
+interface RawSearchResponse {
+  pairs?: RawPair[];
+}
+
 function normalizeProfile(raw: RawTokenProfile): DiscoveredTokenProfile {
   return {
     chainId: raw.chainId,
@@ -58,9 +84,11 @@ function normalizeProfile(raw: RawTokenProfile): DiscoveredTokenProfile {
 
 function normalizePair(raw: RawPair): MarketPair {
   return {
+    chainId: raw.chainId,
     dexId: raw.dexId,
     pairAddress: raw.pairAddress,
     url: raw.url,
+    baseTokenAddress: raw.baseToken?.address,
     priceUsd: raw.priceUsd ? Number(raw.priceUsd) : undefined,
     priceNative: raw.priceNative ? Number(raw.priceNative) : undefined,
     marketCapUsd: raw.marketCap,
@@ -85,6 +113,21 @@ function normalizePair(raw: RawPair): MarketPair {
     headerUrl: raw.info?.header,
     websites: (raw.info?.websites ?? []).map((w) => w.url),
     socials: (raw.info?.socials ?? []).map((s) => ({ type: s.type, url: s.url })),
+  };
+}
+
+function normalizeMeta(raw: RawMeta): TrendingMeta | undefined {
+  if (!raw.name || !raw.slug) return undefined;
+  return {
+    name: raw.name,
+    slug: raw.slug,
+    description: raw.description,
+    marketCap: raw.marketCap,
+    liquidity: raw.liquidity,
+    volume: raw.volume,
+    tokenCount: raw.tokenCount,
+    marketCapChange: raw.marketCapChange,
+    marketCapDelta: raw.marketCapDelta,
   };
 }
 
@@ -117,6 +160,26 @@ export async function fetchLatestTokenProfiles(): Promise<DiscoveredTokenProfile
     return [];
   }
   return raw.map(normalizeProfile);
+}
+
+export async function fetchTrendingMetas(): Promise<TrendingMeta[]> {
+  const url = `${config.dexscreenerBaseUrl}/metas/trending/v1`;
+  const raw = await fetchJsonWithRetry<RawMeta[]>(url);
+  if (!Array.isArray(raw)) {
+    logger.warn({ url }, "unexpected trending metas response shape");
+    return [];
+  }
+  return raw.map(normalizeMeta).filter((m): m is TrendingMeta => m !== undefined);
+}
+
+export async function searchPairs(query: string): Promise<MarketPair[]> {
+  const url = `${config.dexscreenerBaseUrl}/latest/dex/search?q=${encodeURIComponent(query)}`;
+  const raw = await fetchJsonWithRetry<RawSearchResponse>(url);
+  if (!raw || !Array.isArray(raw.pairs)) {
+    logger.warn({ url }, "unexpected pair search response shape");
+    return [];
+  }
+  return raw.pairs.map(normalizePair);
 }
 
 export async function fetchMarketForToken(

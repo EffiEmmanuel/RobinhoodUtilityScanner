@@ -19,6 +19,23 @@ function num(name: string, fallback: number): number {
   return n;
 }
 
+function bool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v === "") return fallback;
+  if (["1", "true", "yes", "on"].includes(v.toLowerCase())) return true;
+  if (["0", "false", "no", "off"].includes(v.toLowerCase())) return false;
+  throw new Error(`Env var ${name} must be a boolean, got "${v}"`);
+}
+
+function csv(name: string, fallback: string[] = []): string[] {
+  const v = process.env[name];
+  if (v === undefined || v.trim() === "") return fallback;
+  return v
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 export const config = {
   nodeEnv: str("NODE_ENV", "development"),
   logLevel: str("LOG_LEVEL", "info"),
@@ -75,7 +92,16 @@ export const config = {
   // primary — see wallet.ts's fallback transport, which only reaches this
   // after the primary itself fails.
   rhRpcFallbackUrl: str("RH_RPC_FALLBACK_URL", "https://rpc.nodeflare.app/robinhood/public"),
+  rhRpcExtraUrls: csv("RH_RPC_EXTRA_URLS"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
+
+  walletTrackingEnabled: bool("WALLET_TRACKING_ENABLED", true),
+  walletTrackingIntervalSeconds: num("WALLET_TRACKING_INTERVAL_SECONDS", 15),
+  // Robinhood Chain is fast, and public RPCs often cap eth_getLogs ranges.
+  // Keep wallet scans incremental and bounded; lag catches up over several
+  // ticks instead of risking one giant provider-rejected request.
+  walletTrackingBatchBlocks: num("WALLET_TRACKING_BATCH_BLOCKS", 500),
+  walletTrackingInitialBackfillBlocks: num("WALLET_TRACKING_INITIAL_BACKFILL_BLOCKS", 3000),
 
   geminiApiKey: optStr("GEMINI_API_KEY"),
   geminiApiKey2: optStr("GEMINI_API_KEY_2"),

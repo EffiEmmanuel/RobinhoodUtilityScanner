@@ -59,6 +59,7 @@ export function canBypassUtilityGateForMomentum(input: MomentumUtilityBypassInpu
 
   return (
     input.qualificationPath === "MOMENTUM_OVERRIDE" ||
+    input.qualificationPath === "NARRATIVE_META" ||
     input.evaluation.reasons.some((reason) => reason.startsWith("momentum override:"))
   );
 }

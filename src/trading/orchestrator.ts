@@ -5,6 +5,7 @@ import { retryAsync } from "../util/retry";
 import { TradeCandidateStatus } from "../generated/prisma";
 import { tradingConfig } from "./config";
 import { generateTradeCandidates, recoverRecentMomentumUtilityRejects } from "./candidates";
+import { generateNarrativeTradeCandidates } from "./narratives";
 import { planCandidate } from "./planning";
 import { processPendingEntries, recoverStuckPendingEntries, recoverStalledRevalidatingEntries } from "./entryMonitor";
 import { runPositionMonitorTick } from "./positionManager";
@@ -24,18 +25,43 @@ const MILESTONE_POLL_INTERVAL_SECONDS = 60;
 // dedicated poll is the actual guarantee.
 const CIRCUIT_BREAKER_ALERT_INTERVAL_SECONDS = 20;
 const CLAIM_IDLE_DELAY_MS = 3000;
+const QUALIFIED_CLAIM_BATCH_SIZE = 50;
 
 async function claimNextQualifiedCandidate(): Promise<string | undefined> {
-  const candidate = await db.tradeCandidate.findFirst({
+  const candidates = await db.tradeCandidate.findMany({
     where: { status: TradeCandidateStatus.QUALIFIED },
     orderBy: { createdAt: "asc" },
+    take: QUALIFIED_CLAIM_BATCH_SIZE,
+    select: {
+      id: true,
+      decisions: {
+        where: { stage: "planning_retry" },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { deterministicRules: true },
+      },
+    },
   });
-  if (!candidate) return undefined;
-  const result = await db.tradeCandidate.updateMany({
-    where: { id: candidate.id, status: TradeCandidateStatus.QUALIFIED },
-    data: { status: TradeCandidateStatus.PLANNING },
-  });
-  return result.count === 1 ? candidate.id : undefined;
+  const now = Date.now();
+  for (const candidate of candidates) {
+    const retryAfterMs = getPlanningRetryAfterMs(candidate.decisions[0]?.deterministicRules);
+    if (retryAfterMs !== undefined && retryAfterMs > now) continue;
+
+    const result = await db.tradeCandidate.updateMany({
+      where: { id: candidate.id, status: TradeCandidateStatus.QUALIFIED },
+      data: { status: TradeCandidateStatus.PLANNING },
+    });
+    if (result.count === 1) return candidate.id;
+  }
+  return undefined;
+}
+
+function getPlanningRetryAfterMs(deterministicRules: unknown): number | undefined {
+  if (!deterministicRules || typeof deterministicRules !== "object") return undefined;
+  const retryAfter = (deterministicRules as { retryAfter?: unknown }).retryAfter;
+  if (typeof retryAfter !== "string") return undefined;
+  const parsed = Date.parse(retryAfter);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 async function recoverStuckCandidates(): Promise<void> {
@@ -142,6 +168,18 @@ async function candidateGenerationLoop(signal: { stopped: boolean }): Promise<vo
   }
 }
 
+async function narrativeCandidateLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const created = await generateNarrativeTradeCandidates();
+      if (created > 0) logger.info({ created }, "narrative trade candidates generated");
+    } catch (err) {
+      logger.error({ err: String(err) }, "narrative candidate generation failed");
+    }
+    await sleep(tradingConfig.narrativePollIntervalSeconds * 1000);
+  }
+}
+
 async function circuitBreakerAlertLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
     try {
@@ -197,6 +235,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
   const signal = { stopped: false };
   const loops = [
     candidateGenerationLoop(signal),
+    narrativeCandidateLoop(signal),
     planningLoop(signal),
     entryMonitorLoop(signal),
     positionMonitorLoop(signal),

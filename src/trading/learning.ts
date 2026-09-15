@@ -54,7 +54,13 @@ const FEATURE_NAMES = [
   "volumeToLiquidity1h",
   "tradeLaneVerified",
   "tradeLaneTactical",
+  "tradeLaneNarrative",
   "qualificationMomentumOverride",
+  "qualificationNarrativeMeta",
+  "trackedWalletCount",
+  "walletPossibleBuyCount",
+  "walletPossibleSellCount",
+  "walletNetPossibleBuys",
 ] as const;
 type FeatureName = (typeof FEATURE_NAMES)[number];
 
@@ -87,7 +93,13 @@ export interface FeatureRow {
   volumeToLiquidity1h?: number;
   tradeLaneVerified?: number;
   tradeLaneTactical?: number;
+  tradeLaneNarrative?: number;
   qualificationMomentumOverride?: number;
+  qualificationNarrativeMeta?: number;
+  trackedWalletCount?: number;
+  walletPossibleBuyCount?: number;
+  walletPossibleSellCount?: number;
+  walletNetPossibleBuys?: number;
   hit125x: boolean;
   hit150x: boolean;
   hit200x: boolean;
@@ -136,9 +148,15 @@ export async function exportFeatureDataset(): Promise<FeatureRow[]> {
                 sells1h?: number;
               };
             };
+            walletSignals?: {
+              trackedWalletCount?: number;
+              possibleBuyCount?: number;
+              possibleSellCount?: number;
+            };
           }
         | undefined;
       const primaryPair = rawResearch?.market?.primaryPair;
+      const walletSignals = rawResearch?.walletSignals;
       const liquidityUsd = primaryPair?.liquidityUsd;
       const marketCapAtDetection = c.outcome!.marketCapAtDetection ?? undefined;
       const hourlyTxns = primaryPair?.buys1h !== undefined || primaryPair?.sells1h !== undefined ? (primaryPair?.buys1h ?? 0) + (primaryPair?.sells1h ?? 0) : undefined;
@@ -172,7 +190,16 @@ export async function exportFeatureDataset(): Promise<FeatureRow[]> {
         volumeToLiquidity1h,
         tradeLaneVerified: tradeLane === "VERIFIED_PROJECT" ? 1 : 0,
         tradeLaneTactical: tradeLane === "MOMENTUM_TACTICAL" ? 1 : 0,
+        tradeLaneNarrative: tradeLane === "NARRATIVE_TACTICAL" ? 1 : 0,
         qualificationMomentumOverride: qualificationPath === "MOMENTUM_OVERRIDE" ? 1 : 0,
+        qualificationNarrativeMeta: qualificationPath === "NARRATIVE_META" ? 1 : 0,
+        trackedWalletCount: walletSignals?.trackedWalletCount,
+        walletPossibleBuyCount: walletSignals?.possibleBuyCount,
+        walletPossibleSellCount: walletSignals?.possibleSellCount,
+        walletNetPossibleBuys:
+          walletSignals?.possibleBuyCount !== undefined || walletSignals?.possibleSellCount !== undefined
+            ? (walletSignals?.possibleBuyCount ?? 0) - (walletSignals?.possibleSellCount ?? 0)
+            : undefined,
         hit125x: c.outcome!.hit125x ?? false,
         hit150x: c.outcome!.hit150x ?? false,
         hit200x: c.outcome!.hit200x ?? false,

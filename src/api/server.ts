@@ -73,6 +73,8 @@ export function buildServer() {
       lastOnchainDiscoveryError: pollerHealth.lastOnchainDiscoveryError ?? null,
       lastActivityCheck: pollerHealth.lastActivityCheckAt?.toISOString() ?? null,
       lastActivityCheckError: pollerHealth.lastActivityCheckError ?? null,
+      lastWalletTrackingPoll: pollerHealth.lastWalletTrackingPollAt?.toISOString() ?? null,
+      lastWalletTrackingError: pollerHealth.lastWalletTrackingError ?? null,
     };
   });
 

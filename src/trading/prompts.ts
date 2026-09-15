@@ -20,6 +20,9 @@ prompt includes a deterministic trade lane:
 - VERIFIED_PROJECT means research evidence is strong enough to manage for asymmetric upside.
 - MOMENTUM_TACTICAL means the token may still be tradeable, but should be treated as a fast,
   speculative setup unless current evidence improves.
+- NARRATIVE_TACTICAL means the token is being considered because its meta/narrative is trending,
+  not because project fundamentals are proven. It should be treated as the fastest-decaying lane:
+  buy only when market structure confirms the wave, de-risk quickly, and reject stale/churny setups.
 Your job is narrower and mostly about market structure and timing:
 
 1. Classify the current market regime.
@@ -64,6 +67,10 @@ For MOMENTUM_TACTICAL candidates, prefer cleaner entries, lower confidence, and 
 language unless real market structure is exceptional. Do not call a tactical candidate a verified
 project just because price is moving.
 
+For NARRATIVE_TACTICAL candidates, explicitly judge whether the narrative is still alive in the
+current market data. Strong meta attention does not justify a buy if this specific token's buy-side
+volume is fading, liquidity is thin, or volume/liquidity looks like churn.
+
 Never assume high volume or a large 24h percentage gain means the move is safe to chase — a huge
 gain can coexist with an imminent collapse. You are not deciding position size and you are not
 approving the final trade; a separate deterministic risk engine does that regardless of what you
@@ -80,6 +87,7 @@ export interface TradeAnalysisInputs {
   laneReasons: string[];
   marketText: string;
   technicalText: string;
+  walletSignalsText: string;
 }
 
 export function buildTradeAnalysisPrompt(inputs: TradeAnalysisInputs): string {
@@ -101,6 +109,9 @@ ${inputs.marketText}
 
 TECHNICAL STATE (derived from our own snapshot history — see confidence note)
 ${inputs.technicalText}
+
+TRACKED-WALLET SIGNALS
+${inputs.walletSignalsText}
 
 Analyze the current market/technical state and recommend an action now.`;
 }

@@ -11,6 +11,7 @@ import { classifyToken } from "./classify";
 import { researchToken } from "./research";
 import { TokenStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
+import { runWalletTrackingPoll } from "../walletTracking/poller";
 
 const WORKER_CONCURRENCY = 2;
 const WORKER_IDLE_DELAY_MS = 3000;
@@ -45,6 +46,8 @@ export const health = {
   lastOnchainDiscoveryError: undefined as string | undefined,
   lastActivityCheckAt: undefined as Date | undefined,
   lastActivityCheckError: undefined as string | undefined,
+  lastWalletTrackingPollAt: undefined as Date | undefined,
+  lastWalletTrackingError: undefined as string | undefined,
   running: false,
 };
 
@@ -215,6 +218,32 @@ async function awaitingProfileActivityLoop(signal: { stopped: boolean }): Promis
   }
 }
 
+const WALLET_TRACKING_MAX_BACKOFF_SECONDS = 120;
+let walletTrackingConsecutiveFailures = 0;
+
+async function walletTrackingLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const result = await runWalletTrackingPoll();
+      health.lastWalletTrackingPollAt = new Date();
+      health.lastWalletTrackingError = undefined;
+      walletTrackingConsecutiveFailures = 0;
+      if (result.events > 0 || result.discoveredTokens > 0) {
+        logger.info(result, "wallet tracking detected token movement");
+      }
+    } catch (err) {
+      health.lastWalletTrackingError = summarizeError(err);
+      walletTrackingConsecutiveFailures++;
+      logger.error({ err: summarizeError(err), consecutiveFailures: walletTrackingConsecutiveFailures }, "wallet tracking poll crashed");
+    }
+    const backoffSeconds =
+      walletTrackingConsecutiveFailures > 0
+        ? Math.min(config.walletTrackingIntervalSeconds * 2 ** (walletTrackingConsecutiveFailures - 1), WALLET_TRACKING_MAX_BACKOFF_SECONDS)
+        : config.walletTrackingIntervalSeconds;
+    await sleep(backoffSeconds * 1000);
+  }
+}
+
 export async function startOrchestrator(): Promise<() => void> {
   // The first DB call of the process, most likely to hit a cold Neon compute.
   await retryAsync("recoverStuckTokens", recoverStuckTokens);
@@ -226,6 +255,7 @@ export async function startOrchestrator(): Promise<() => void> {
     discoveryLoop(signal),
     onchainDiscoveryLoop(signal),
     awaitingProfileActivityLoop(signal),
+    walletTrackingLoop(signal),
     ...Array.from({ length: WORKER_CONCURRENCY }, (_, i) => workerLoop(i, signal)),
   ];
 

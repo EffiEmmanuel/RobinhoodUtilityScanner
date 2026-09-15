@@ -272,7 +272,10 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
 
   if (tradeLane === "VERIFIED_PROJECT") return baseExitRules;
 
-  const isSpeculative = tradeLane === "MOMENTUM_TACTICAL" || (qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold);
+  const isSpeculative =
+    tradeLane === "MOMENTUM_TACTICAL" ||
+    tradeLane === "NARRATIVE_TACTICAL" ||
+    (qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold);
   const isLargeEntryNotYetProven =
     trade.actualEntryMcap != null &&
     trade.actualEntryMcap > fastFlip.largeMcapUsd &&
@@ -289,15 +292,32 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
           maxHoldMinutes: fastFlip.maxHoldMinutes,
         };
 
-  if (tradeLane !== "MOMENTUM_TACTICAL") return resolved;
+  if (tradeLane !== "MOMENTUM_TACTICAL" && tradeLane !== "NARRATIVE_TACTICAL") return resolved;
+
+  const caps =
+    tradeLane === "NARRATIVE_TACTICAL"
+      ? {
+          maxLossPercent: tradingConfig.narrativeMaxLossPercent,
+          catastrophicLossPercent: tradingConfig.narrativeCatastrophicLossPercent,
+          trailingActivationMultiple: tradingConfig.narrativeTrailingActivationMultiple,
+          trailingPercent: tradingConfig.narrativeTrailingPercent,
+          maxHoldMinutes: tradingConfig.narrativeMaxHoldMinutes,
+        }
+      : {
+          maxLossPercent: tradingConfig.tacticalMaxLossPercent,
+          catastrophicLossPercent: tradingConfig.tacticalCatastrophicLossPercent,
+          trailingActivationMultiple: tradingConfig.tacticalTrailingActivationMultiple,
+          trailingPercent: tradingConfig.tacticalTrailingPercent,
+          maxHoldMinutes: tradingConfig.tacticalMaxHoldMinutes,
+        };
 
   return {
     ...resolved,
-    maxLossPercent: Math.min(resolved.maxLossPercent, tradingConfig.tacticalMaxLossPercent),
-    catastrophicLossPercent: Math.min(resolved.catastrophicLossPercent, tradingConfig.tacticalCatastrophicLossPercent),
-    trailingActivationMultiple: Math.min(resolved.trailingActivationMultiple, tradingConfig.tacticalTrailingActivationMultiple),
-    trailingPercent: Math.min(resolved.trailingPercent, tradingConfig.tacticalTrailingPercent),
-    maxHoldMinutes: Math.min(resolved.maxHoldMinutes, tradingConfig.tacticalMaxHoldMinutes),
+    maxLossPercent: Math.min(resolved.maxLossPercent, caps.maxLossPercent),
+    catastrophicLossPercent: Math.min(resolved.catastrophicLossPercent, caps.catastrophicLossPercent),
+    trailingActivationMultiple: Math.min(resolved.trailingActivationMultiple, caps.trailingActivationMultiple),
+    trailingPercent: Math.min(resolved.trailingPercent, caps.trailingPercent),
+    maxHoldMinutes: Math.min(resolved.maxHoldMinutes, caps.maxHoldMinutes),
   };
 }
 
@@ -346,6 +366,27 @@ function evaluateExits(ctx: {
   });
   if (positionRisk.riskExitTriggered && positionRisk.severity === "CRITICAL") {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
+  }
+
+  const tradeLane = normalizeTradeLane(trade.tradeLane);
+  const holdingMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
+  if (tradeLane === "NARRATIVE_TACTICAL" && holdingMinutes >= tradingConfig.narrativeVolumeExitAfterMinutes) {
+    if ((ctx.totalTxns5m ?? 0) < tradingConfig.narrativeMinTxns5mToHold) {
+      return {
+        type: "RISK_EXIT",
+        sellPercentOfRemaining: 100,
+        reason: `narrative volume faded: ${ctx.totalTxns5m ?? 0} txns/5m < ${tradingConfig.narrativeMinTxns5mToHold} after ${Math.round(holdingMinutes)}m`,
+        isEmergency: false,
+      };
+    }
+    if (ctx.buySellRatio5m !== undefined && ctx.buySellRatio5m < tradingConfig.narrativeMinBuyRatio5mToHold) {
+      return {
+        type: "RISK_EXIT",
+        sellPercentOfRemaining: 100,
+        reason: `narrative buy pressure faded: buy ratio ${(ctx.buySellRatio5m * 100).toFixed(0)}% < ${Math.round(tradingConfig.narrativeMinBuyRatio5mToHold * 100)}%`,
+        isEmergency: false,
+      };
+    }
   }
 
   // Priority 2: technical invalidation. Tolerance-adjusted, not the AI's

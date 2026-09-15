@@ -96,6 +96,7 @@ export interface ResearchSynthesisInputs {
   onchain: string;
   links: string;
   xResearch: string;
+  walletSignals: string;
 }
 
 export function buildResearchSynthesisPrompt(inputs: ResearchSynthesisInputs): string {
@@ -121,6 +122,9 @@ X (TWITTER) FINDINGS — searched for this exact contract address, not just the 
 copycat contract can reuse a real project's name but cannot make genuine tweets about a different
 address exist for itself
 ${inputs.xResearch}
+
+TRACKED-WALLET SIGNALS
+${inputs.walletSignals}
 
 Synthesize this into the structured research output now.`;
 }

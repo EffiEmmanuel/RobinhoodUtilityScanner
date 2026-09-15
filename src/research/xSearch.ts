@@ -92,6 +92,17 @@ export interface XContractSearchResult {
   error?: string;
 }
 
+export interface XNarrativeSearchResult {
+  query: string;
+  tweetCount: number;
+  uniqueAccountCount: number;
+  totalEngagement: number;
+  credibleAccountCount: number;
+  sampleTweetUrls: string[];
+  accounts: XAccountSummary[];
+  error?: string;
+}
+
 function accountAgeDays(createdAt: string | undefined): number | undefined {
   if (!createdAt) return undefined;
   return Math.round((Date.now() - new Date(createdAt).getTime()) / 86_400_000);
@@ -171,6 +182,85 @@ export async function searchXForContractAddress(address: string): Promise<XContr
     };
   } catch (err) {
     logger.warn({ address, err: String(err) }, "X contract-address search threw");
+    return { ...empty, error: String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function searchXForNarrative(query: string, maxResults = 50): Promise<XNarrativeSearchResult> {
+  const empty = {
+    query,
+    tweetCount: 0,
+    uniqueAccountCount: 0,
+    totalEngagement: 0,
+    credibleAccountCount: 0,
+    sampleTweetUrls: [],
+    accounts: [],
+  };
+  if (!config.xBearerToken) {
+    return { ...empty, error: "X_BEARER_TOKEN not configured" };
+  }
+
+  const url =
+    `${X_API_BASE}/tweets/search/recent` +
+    `?query=${encodeURIComponent(query)}` +
+    `&max_results=${Math.max(10, Math.min(100, maxResults))}` +
+    `&tweet.fields=created_at,author_id,public_metrics` +
+    `&expansions=author_id` +
+    `&user.fields=created_at,public_metrics,verified,description,protected`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${config.xBearerToken}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      logger.warn({ query, status: res.status, body: body.slice(0, 300) }, "X narrative search failed");
+      return { ...empty, error: `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as XSearchResponse;
+    const tweets = data.data ?? [];
+    const users = data.includes?.users ?? [];
+    const accounts: XAccountSummary[] = users.map((u) => ({
+      username: u.username,
+      name: u.name,
+      createdAt: u.created_at,
+      accountAgeDays: accountAgeDays(u.created_at),
+      followersCount: u.public_metrics?.followers_count,
+      followingCount: u.public_metrics?.following_count,
+      tweetCount: u.public_metrics?.tweet_count,
+      verified: u.verified,
+      description: u.description,
+    }));
+
+    const totalEngagement = tweets.reduce((sum, t) => {
+      const m = t.public_metrics;
+      if (!m) return sum;
+      return sum + m.like_count + m.retweet_count + m.reply_count + m.quote_count;
+    }, 0);
+    const credibleAccountCount = accounts.filter((a) => {
+      const followers = a.followersCount ?? 0;
+      const accountAge = a.accountAgeDays ?? 0;
+      const tweetCount = a.tweetCount ?? 0;
+      const looksLikeScanner = /scanner|radar|alert|call|gem|signal/i.test(a.description ?? "");
+      return !looksLikeScanner && (a.verified || followers >= 500 || (followers >= 100 && accountAge >= 90 && tweetCount < 20_000));
+    }).length;
+
+    return {
+      query,
+      tweetCount: tweets.length,
+      uniqueAccountCount: new Set(tweets.map((t) => t.author_id).filter(Boolean)).size || accounts.length,
+      totalEngagement,
+      credibleAccountCount,
+      sampleTweetUrls: tweets.slice(0, 5).map((t) => `https://x.com/i/web/status/${t.id}`),
+      accounts,
+    };
+  } catch (err) {
+    logger.warn({ query, err: String(err) }, "X narrative search threw");
     return { ...empty, error: String(err) };
   } finally {
     clearTimeout(timer);

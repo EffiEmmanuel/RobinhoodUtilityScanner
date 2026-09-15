@@ -186,6 +186,8 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   const laneMult =
     input.tradeLane === "VERIFIED_PROJECT"
       ? tradingConfig.verifiedLaneSizeMultiplier
+      : input.tradeLane === "NARRATIVE_TACTICAL"
+        ? tradingConfig.narrativeLaneSizeMultiplier
       : input.tradeLane === "MOMENTUM_TACTICAL"
         ? tradingConfig.tacticalLaneSizeMultiplier
         : 1;
@@ -210,6 +212,15 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   ) {
     positionSizeUsd = tradingConfig.tacticalLiveMaxPositionUsd;
     reasons.push(`capped tactical LIVE probe at $${tradingConfig.tacticalLiveMaxPositionUsd.toFixed(2)} until this lane proves positive expectancy`);
+  }
+  if (
+    tradingConfig.mode === "LIVE" &&
+    input.tradeLane === "NARRATIVE_TACTICAL" &&
+    tradingConfig.narrativeLiveMaxPositionUsd > 0 &&
+    positionSizeUsd > tradingConfig.narrativeLiveMaxPositionUsd
+  ) {
+    positionSizeUsd = tradingConfig.narrativeLiveMaxPositionUsd;
+    reasons.push(`capped narrative LIVE probe at $${tradingConfig.narrativeLiveMaxPositionUsd.toFixed(2)} until this lane proves positive expectancy`);
   }
 
   // Small-account gas check (§23). Below this size, gas alone exceeds

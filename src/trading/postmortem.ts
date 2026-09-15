@@ -96,7 +96,13 @@ function buildDeterministicPostmortemTags(input: {
   const exitReason = (trade.exitReason ?? "").toLowerCase();
   const lane = normalizeTradeLane(trade.tradeLane);
 
-  tags.add(lane === "VERIFIED_PROJECT" ? "LANE_VERIFIED_PROJECT" : "LANE_MOMENTUM_TACTICAL");
+  tags.add(
+    lane === "VERIFIED_PROJECT"
+      ? "LANE_VERIFIED_PROJECT"
+      : lane === "NARRATIVE_TACTICAL"
+        ? "LANE_NARRATIVE_TACTICAL"
+        : "LANE_MOMENTUM_TACTICAL"
+  );
   if (realizedMultiple < 1) tags.add("LOSS");
   if (realizedMultiple >= 2) tags.add("REALIZED_2X_PLUS");
   if (mfePercent >= 100 && realizedMultiple < 1.5) tags.add("GAVE_BACK_BIG_WINNER");
