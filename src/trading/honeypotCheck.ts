@@ -57,6 +57,20 @@ function selectorPresent(bytecode: string, signature: string): boolean {
   }
 }
 
+export function isBenignZeroTransferProbeFailure(err: unknown): boolean {
+  const message = String(err).toLowerCase();
+  return (
+    message.includes("transfer amount must be greater than zero") ||
+    message.includes("transfer amount must be greater than 0") ||
+    message.includes("transfer amount should be greater than zero") ||
+    message.includes("transfer amount should be greater than 0") ||
+    message.includes("amount must be greater than zero") ||
+    message.includes("amount must be greater than 0") ||
+    message.includes("amount should be greater than zero") ||
+    message.includes("amount should be greater than 0")
+  );
+}
+
 export async function evaluateHoneypotRisk(tokenAddress: string): Promise<HoneypotRiskResult> {
   if (!tradingConfig.honeypotBytecodeCheckEnabled) return { passed: true, reasons: ["honeypot bytecode check disabled"], flags: [] };
 
@@ -86,7 +100,11 @@ export async function evaluateHoneypotRisk(tokenAddress: string): Promise<Honeyp
         account: getWalletAddress(),
       });
     } catch (err) {
-      flags.push(`zero-value wallet transfer simulation failed before buy: ${String(err).slice(0, 180)}`);
+      if (isBenignZeroTransferProbeFailure(err)) {
+        flags.push("zero-value wallet transfer probe skipped: token rejects zero-amount transfers");
+      } else {
+        flags.push(`zero-value wallet transfer simulation failed before buy: ${String(err).slice(0, 180)}`);
+      }
     }
   }
 

@@ -122,6 +122,13 @@ function isManualBuyAndHoldPlan(planData: unknown): boolean {
   return !!(planData && typeof planData === "object" && (planData as { manualBuyAndHold?: unknown }).manualBuyAndHold === true);
 }
 
+function pendingStatusForSettledCandidate(status: TradeCandidateStatus): PendingEntryStatus {
+  if (status === TradeCandidateStatus.TRADED) return PendingEntryStatus.APPROVED;
+  if (status === TradeCandidateStatus.REJECTED) return PendingEntryStatus.REJECTED;
+  if (status === TradeCandidateStatus.EXPIRED || status === TradeCandidateStatus.MISSED) return PendingEntryStatus.EXPIRED;
+  return PendingEntryStatus.CANCELLED;
+}
+
 export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 
 // Confirmed live 2026-09-11: a pending entry (SCHIFFY) got claimed
@@ -217,7 +224,19 @@ async function processOnePendingEntry(candidate: PendingEntry): Promise<"replann
       );
       await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.APPROVED } });
     } else {
-      await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
+      const current = await db.pendingEntry.findUnique({
+        where: { id: candidate.id },
+        select: { tradePlan: { select: { candidate: { select: { status: true } } } } },
+      });
+      const candidateStatus = current?.tradePlan.candidate.status;
+      if (candidateStatus && candidateStatus !== TradeCandidateStatus.WAITING) {
+        await db.pendingEntry.update({
+          where: { id: candidate.id },
+          data: { status: pendingStatusForSettledCandidate(candidateStatus), lastCheckedAt: new Date() },
+        });
+      } else {
+        await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
+      }
     }
     return "checked";
   }
@@ -249,6 +268,16 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     include: { candidate: { include: { token: true } } },
   });
   const candidate = plan.candidate;
+
+  if (candidate.status !== TradeCandidateStatus.WAITING) {
+    const nextStatus = pendingStatusForSettledCandidate(candidate.status);
+    await db.pendingEntry.update({ where: { id: entry.id }, data: { status: nextStatus, lastCheckedAt: new Date() } });
+    logger.warn(
+      { pendingEntryId: entry.id, candidateId: candidate.id, candidateStatus: candidate.status, pendingStatus: nextStatus },
+      "closed pending entry whose trade candidate was already settled"
+    );
+    return false;
+  }
 
   if (entry.expiresAt && entry.expiresAt < new Date()) {
     // §15/§8: if price ran away past the ceiling and never pulled back, this
