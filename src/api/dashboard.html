@@ -1935,17 +1935,17 @@
           if (learning.outlierCounts) {
             var feasible = learning.feasibleOutlierCounts || {};
             tiles.push({
-              label: "Feasible 10x / 100x",
+              label: "Tradable 10x / 100x Seen",
               value:
                 (feasible.hit10x || 0) +
                 " / " +
                 (feasible.hit100x || 0),
               sub:
-                "raw 10x " +
+                "chart-only 10x " +
                 (learning.outlierCounts.hit10x || 0) +
-                " &middot; raw 100x " +
+                " &middot; chart-only 100x " +
                 (learning.outlierCounts.hit100x || 0) +
-                " &middot; feasible 5x " +
+                " &middot; tradable 5x " +
                 (feasible.hit5x || 0),
             });
           }
