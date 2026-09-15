@@ -299,6 +299,28 @@ describe("validateEntry", () => {
   it("approves when everything is clean", () => {
     expect(validateEntry(base).decision).toBe("APPROVED");
   });
+
+  it("defers rather than permanently rejects when the buy quote is too expensive", () => {
+    const result = validateEntry({
+      ...base,
+      estimatedSlippageBps: 725,
+      estimatedPriceImpactPercent: 7.25,
+    });
+    expect(result.decision).toBe("DEFER");
+    expect(result.reasons).toContain("estimated slippage 725bps exceeds 300bps limit");
+    expect(result.reasons).toContain("estimated price impact 7.25% exceeds 3% limit");
+  });
+
+  it("allows probe-sized tactical entries to use explicit wider execution limits", () => {
+    const result = validateEntry({
+      ...base,
+      estimatedSlippageBps: 725,
+      estimatedPriceImpactPercent: 7.25,
+      maxBuySlippageBps: 1000,
+      maxBuyPriceImpactPercent: 10,
+    });
+    expect(result.decision).toBe("APPROVED");
+  });
 });
 
 describe("validatePosition", () => {

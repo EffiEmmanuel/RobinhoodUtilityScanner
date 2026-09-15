@@ -118,7 +118,12 @@ export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: numb
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
 }
 
-export async function executeBuyFill(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<FillResult> {
+export async function executeBuyFill(
+  tokenAddress: string,
+  positionSizeUsd: number,
+  pair: MarketPair,
+  options: { maxSlippageBps?: number } = {}
+): Promise<FillResult> {
   if (!isLiveModeReady()) {
     const fill = { ...getPaperQuote(positionSizeUsd, pair), provider: "paper" as const };
     void recordExecutionQuality({
@@ -145,7 +150,7 @@ export async function executeBuyFill(tokenAddress: string, positionSizeUsd: numb
   // one RPC round-trip off buy latency.
   const [balanceBefore, result] = await Promise.all([
     getTokenBalance(client, token, wallet),
-    executeLiveBuy(token, amountInWei, tradingConfig.defaultMaxBuySlippageBps),
+    executeLiveBuy(token, amountInWei, options.maxSlippageBps ?? tradingConfig.defaultMaxBuySlippageBps),
   ]);
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
   if (receipt.status !== "success") throw new Error(`live buy transaction reverted on-chain: ${result.txHash}`);

@@ -581,13 +581,26 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // reason to walk away from a confirmed real move; it's a reason to buy
     // less of it. Floor matches calculatePositionSize's own gas-viability
     // floor — never sized below what's worth paying gas for.
-    let positionSizeUsd = sizing.positionSizeUsd;
-    let quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
     const sizeFloorUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
+    let positionSizeUsd = sizing.positionSizeUsd;
+    const tacticalProbeCapUsd =
+      tradeLane === "MOMENTUM_TACTICAL"
+        ? tradingConfig.tacticalLiveMaxPositionUsd
+        : tradeLane === "NARRATIVE_TACTICAL"
+          ? tradingConfig.narrativeLiveMaxPositionUsd
+          : 0;
+    const usesTacticalProbeLimits =
+      tradingConfig.mode === "LIVE" &&
+      tacticalProbeCapUsd > 0 &&
+      positionSizeUsd <= tacticalProbeCapUsd + 1e-9 &&
+      (tradeLane === "MOMENTUM_TACTICAL" || tradeLane === "NARRATIVE_TACTICAL");
+    const maxBuySlippageBps = usesTacticalProbeLimits ? tradingConfig.tacticalProbeMaxBuySlippageBps : tradingConfig.defaultMaxBuySlippageBps;
+    const maxBuyPriceImpactPercent = usesTacticalProbeLimits ? tradingConfig.tacticalProbeMaxBuyPriceImpactPercent : tradingConfig.maxBuyPriceImpactPercent;
+    let quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
     let resized = false;
     while (
-      (quote.estimatedSlippageBps > tradingConfig.defaultMaxBuySlippageBps ||
-        quote.estimatedPriceImpactPercent > tradingConfig.maxBuyPriceImpactPercent) &&
+      (quote.estimatedSlippageBps > maxBuySlippageBps ||
+        quote.estimatedPriceImpactPercent > maxBuyPriceImpactPercent) &&
       positionSizeUsd > sizeFloorUsd
     ) {
       positionSizeUsd = Math.max(positionSizeUsd / 2, sizeFloorUsd);
@@ -598,6 +611,12 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       logger.info(
         { pendingEntryId: entry.id, candidateId: candidate.id, from: sizing.positionSizeUsd, to: positionSizeUsd, estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent },
         "position size shrunk to fit real on-chain liquidity depth"
+      );
+    }
+    if (usesTacticalProbeLimits && (maxBuySlippageBps !== tradingConfig.defaultMaxBuySlippageBps || maxBuyPriceImpactPercent !== tradingConfig.maxBuyPriceImpactPercent)) {
+      logger.info(
+        { pendingEntryId: entry.id, candidateId: candidate.id, maxBuySlippageBps, maxBuyPriceImpactPercent, positionSizeUsd },
+        "using tactical probe execution limits for live entry"
       );
     }
 
@@ -632,6 +651,8 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
           priceChange5mPercent: pair.priceChange5m,
           estimatedSlippageBps: quote.estimatedSlippageBps,
           estimatedPriceImpactPercent: quote.estimatedPriceImpactPercent,
+          maxBuySlippageBps,
+          maxBuyPriceImpactPercent,
           positionSizeUsd,
           availableToDeployUsd: portfolio.availableToDeployUsd,
         });
@@ -693,6 +714,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       actualEntryMcap: mcap,
       tradeLane,
       pair,
+      maxSlippageBps: maxBuySlippageBps,
       reasons: manualEntryOverride
         ? entryResult.reasons
         : conservative
@@ -783,6 +805,7 @@ async function openTrade(input: {
   actualEntryMcap: number | undefined;
   tradeLane: TradeLane;
   pair: MarketPair;
+  maxSlippageBps: number;
   reasons: string[];
 }): Promise<void> {
   const mode: TradingMode = tradingConfig.mode === "LIVE" ? TradingMode.LIVE : tradingConfig.mode === "SHADOW" ? TradingMode.SHADOW : TradingMode.PAPER;
@@ -792,7 +815,7 @@ async function openTrade(input: {
   // resolves, so a failed live swap never creates a phantom open position.
   let fill: FillResult;
   try {
-    fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair);
+    fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair, { maxSlippageBps: input.maxSlippageBps });
   } catch (err) {
     logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — candidate reverted to REJECTED, no trade created");
     void recordExecutionQuality({
