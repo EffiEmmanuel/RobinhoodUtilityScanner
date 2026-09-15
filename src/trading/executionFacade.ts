@@ -359,6 +359,24 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
 }
 
 /**
+ * LIVE-only reconciliation read: how many of this token the bot wallet
+ * actually holds right now. Used by the position monitor to notice an
+ * external/manual wallet sale instead of leaving a database position open
+ * forever. Returns undefined outside LIVE mode so paper/shadow accounting
+ * stays purely ledger-driven.
+ */
+export async function getLiveWalletTokenBalance(tokenAddress: string): Promise<number | undefined> {
+  if (!isLiveModeReady()) return undefined;
+  const client = getPublicClient();
+  const token = tokenAddress as `0x${string}`;
+  const [decimals, rawBalance] = await Promise.all([
+    getTokenDecimals(client, token),
+    getTokenBalance(client, token, getWalletAddress()),
+  ]);
+  return Number(formatUnits(rawBalance, decimals));
+}
+
+/**
  * A honeypot check as much as a liquidity check: many honeypot contracts
  * happily quote a sell for a trivial dust amount while reverting on anything
  * a real position would actually hold (the classic "works in the tester,

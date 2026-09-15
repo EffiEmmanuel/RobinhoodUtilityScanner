@@ -5,7 +5,7 @@ import type { Trade } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis";
 import { validatePosition, validateExit } from "./riskEngine";
-import { executeSellFill, getSellEstimate, isSellable, type FillResult } from "./executionFacade";
+import { executeSellFill, getLiveWalletTokenBalance, getSellEstimate, isSellable, type FillResult } from "./executionFacade";
 import { recordLedgerEntry, recordPortfolioSnapshot } from "./portfolio";
 import { getActiveStrategyVersion, type ExitRules } from "./strategy";
 import { sendPartialProfitEmail, sendTradeClosedEmail } from "./notifications";
@@ -39,7 +39,7 @@ function blockedExitAgeMinutes(tradeId: string): number {
 }
 
 interface ExitDecision {
-  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "AI_STRATEGY_EXIT";
+  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
   isEmergency: boolean;
@@ -70,20 +70,10 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const strategy = await getActiveStrategyVersion();
   const exitRules = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
 
-  const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
-  const pair = market.primaryPair;
-
   // Same fix as entryMonitor.ts: an open position is checked every tick here,
   // but Token.lastSeenAt otherwise only reflects the base discovery poll's
   // cadence — misleading on the dashboard for a token we're actively holding.
   await db.token.update({ where: { id: trade.tokenId }, data: { lastSeenAt: new Date() } }).catch(() => {});
-
-  // Deterministic, cheap, runs every tick regardless of the AI review cadence
-  // below: executes a previously AI-proposed re-entry buy only if (and once)
-  // price has actually fallen to that target — the AI never buys directly.
-  await checkAndExecutePendingReentry(trade, token, pair).catch((err) =>
-    logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
-  );
 
   const tokenAmounts = await getPositionTokenAmounts(trade);
   const remainingTokens = tokenAmounts.remainingTokens;
@@ -104,6 +94,18 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     await closeTrade(trade, "fully exited via partial sells");
     return;
   }
+
+  if (await reconcileExternalWalletExit(trade, token.address, remainingTokens)) return;
+
+  const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
+  const pair = market.primaryPair;
+
+  // Deterministic, cheap, runs every tick regardless of the AI review cadence
+  // below: executes a previously AI-proposed re-entry buy only if (and once)
+  // price has actually fallen to that target — the AI never buys directly.
+  await checkAndExecutePendingReentry(trade, token, pair).catch((err) =>
+    logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
+  );
 
   // User directive 2026-09-12: price this position off a real on-chain sell
   // quote for its actual remaining size, not DexScreener's spot price — see
@@ -336,7 +338,7 @@ async function getPositionTokenAmounts(trade: Trade): Promise<{ totalBoughtToken
   return { totalBoughtTokens: totalBought, remainingTokens: totalBought - (sells._sum.tokenAmount ?? 0) };
 }
 
-function evaluateExits(ctx: {
+export function evaluateExits(ctx: {
   trade: Trade;
   plan: { invalidationMcap: number | null } | null;
   exitRules: ExitRules;
@@ -416,6 +418,15 @@ function evaluateExits(ctx: {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
+  if (holdingMinutes >= exitRules.maxHoldMinutes) {
+    return {
+      type: "TIME_EXIT",
+      sellPercentOfRemaining: 100,
+      reason: `max hold reached: ${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m`,
+      isEmergency: false,
+    };
+  }
+
   // Priority 3: staged profit-taking (§35/§36) — only the next step not yet
   // taken, in ascending order. ctx.profitStepsTaken counts prior PROFIT_TARGET
   // ExitSignal rows for this trade (see monitorOneTrade).
@@ -464,6 +475,29 @@ function evaluateExits(ctx: {
   }
 
   return null;
+}
+
+async function reconcileExternalWalletExit(trade: Trade, tokenAddress: string, remainingTokens: number): Promise<boolean> {
+  let walletTokens: number | undefined;
+  try {
+    walletTokens = await getLiveWalletTokenBalance(tokenAddress);
+  } catch (err) {
+    logger.warn({ tradeId: trade.id, tokenAddress, err: String(err) }, "could not reconcile live wallet token balance — continuing with normal position monitoring");
+    return false;
+  }
+  if (walletTokens === undefined) return false;
+
+  const negligibleDust = Math.max(remainingTokens * 0.000001, 1e-12);
+  if (walletTokens > negligibleDust) return false;
+
+  logger.error(
+    { tradeId: trade.id, tokenAddress, dbRemainingTokens: remainingTokens, walletTokens },
+    "open trade has no tokens left in the live wallet — closing as an external/manual wallet exit with unknown proceeds"
+  );
+  await closeTrade(trade, "external/manual wallet exit detected: bot wallet token balance is zero", { realizedPnlUnknown: true });
+  recordSellSuccess(tokenAddress);
+  clearExitBlocked(trade.id);
+  return true;
 }
 
 function applyVerifiedRunnerGuard(input: {
@@ -650,17 +684,26 @@ async function executeSell(
   }
 }
 
-async function closeTrade(trade: Trade, exitReason: string): Promise<void> {
+async function closeTrade(trade: Trade, exitReason: string, options: { realizedPnlUnknown?: boolean } = {}): Promise<void> {
   const executions = await db.tradeExecution.findMany({ where: { tradeId: trade.id } });
   const totalBuyUsd = executions.filter((e) => e.type === "BUY").reduce((s, e) => s + (e.usdValue ?? 0), 0);
   const totalSellUsd = executions.filter((e) => e.type === "SELL").reduce((s, e) => s + (e.usdValue ?? 0), 0);
-  const realizedPnlUsd = totalSellUsd - totalBuyUsd;
-  const realizedMultiple = totalBuyUsd > 0 ? totalSellUsd / totalBuyUsd : undefined;
+  const realizedPnlUsd = options.realizedPnlUnknown ? null : totalSellUsd - totalBuyUsd;
+  const realizedMultiple = options.realizedPnlUnknown ? null : totalBuyUsd > 0 ? totalSellUsd / totalBuyUsd : undefined;
 
   const updated = await db.trade.update({
     where: { id: trade.id },
     data: { status: TradeStatus.CLOSED, closedAt: new Date(), realizedPnlUsd, realizedMultiple, exitReason },
   });
+
+  if (options.realizedPnlUnknown) {
+    await recordLedgerEntry({
+      type: LedgerEntryType.MANUAL_ADJUSTMENT,
+      tradeId: trade.id,
+      amountUsd: 0,
+      notes: "external/manual wallet exit detected; proceeds and realized PnL were not observed by the bot",
+    });
+  }
 
   logger.info({ tradeId: trade.id, realizedPnlUsd, realizedMultiple, exitReason }, "trade closed");
 
