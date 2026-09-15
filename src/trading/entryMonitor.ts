@@ -36,6 +36,8 @@ import {
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
 import { getPublicClient } from "./live/wallet";
 import { evaluateHoneypotRisk } from "./honeypotCheck";
+import { isPoolDiscoveryInconclusiveError } from "./live/poolDiscovery";
+import { summarizeError } from "../util/errors";
 
 async function claim(id: string, from: PendingEntryStatus, to: PendingEntryStatus): Promise<boolean> {
   // Also stamps lastCheckedAt at claim time (not just on completion) so a
@@ -145,6 +147,46 @@ export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 // aren't held hostage by it indefinitely: the row gets released back to
 // ACTIVE and processing moves on, same recovery path as any other error.
 const PENDING_ENTRY_EVALUATION_TIMEOUT_MS = 90_000;
+const transientEntryCooldownUntil = new Map<string, number>();
+
+function transientEntryCooldownMs(): number {
+  const raw = process.env.PENDING_ENTRY_INFRA_COOLDOWN_MS;
+  if (raw === undefined || raw === "") return 60_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60_000;
+}
+
+function isTransientEntryInfraError(err: unknown): boolean {
+  const message = String(err).toLowerCase();
+  return (
+    isPoolDiscoveryInconclusiveError(err) ||
+    message.includes("too many requests") ||
+    message.includes("http 429") ||
+    message.includes("status: 429") ||
+    message.includes("rpc request failed") ||
+    message.includes("connection timeout")
+  );
+}
+
+function rememberTransientEntryFailure(entryId: string, err: unknown): void {
+  const cooldownMs = transientEntryCooldownMs();
+  if (cooldownMs <= 0) return;
+  transientEntryCooldownUntil.set(entryId, Date.now() + cooldownMs);
+  logger.warn(
+    { pendingEntryId: entryId, cooldownSeconds: Math.round(cooldownMs / 1000), err: summarizeError(err) },
+    "pending entry hit transient infra failure — cooling it down instead of retrying immediately"
+  );
+}
+
+function isEntryCoolingDown(entryId: string): boolean {
+  const until = transientEntryCooldownUntil.get(entryId);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    transientEntryCooldownUntil.delete(entryId);
+    return false;
+  }
+  return true;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -187,8 +229,10 @@ export async function processPendingEntries(): Promise<PendingEntryTickResult> {
 
   const batch = pool
     .slice()
+    .filter((entry) => !isEntryCoolingDown(entry.id))
     .sort((a, b) => entryPriorityRank(a) - entryPriorityRank(b))
     .slice(0, PENDING_ENTRY_BATCH_SIZE);
+  if (batch.length === 0) return "idle";
 
   const results = await Promise.allSettled(batch.map((candidate) => processOnePendingEntry(candidate)));
   const anyReplanned = results.some((r) => r.status === "fulfilled" && r.value === "replanned");
@@ -202,7 +246,13 @@ async function processOnePendingEntry(candidate: PendingEntry): Promise<"replann
     const replanned = await withTimeout(evaluateOnePendingEntry(candidate), PENDING_ENTRY_EVALUATION_TIMEOUT_MS, "pending entry evaluation");
     return replanned ? "replanned" : "checked";
   } catch (err) {
-    logger.error({ pendingEntryId: candidate.id, err: String(err) }, "pending entry evaluation failed");
+    const transientInfra = isTransientEntryInfraError(err);
+    const logData = { pendingEntryId: candidate.id, err: transientInfra ? summarizeError(err) : String(err) };
+    if (transientInfra) {
+      logger.warn(logData, "pending entry evaluation hit transient infra failure");
+    } else {
+      logger.error(logData, "pending entry evaluation failed");
+    }
     // Confirmed live 2026-09-12: this used to reset straight to ACTIVE, with
     // no way to know whether the timed-out evaluation had already bought
     // before it timed out (that run keeps executing in the background —
@@ -235,6 +285,7 @@ async function processOnePendingEntry(candidate: PendingEntry): Promise<"replann
           data: { status: pendingStatusForSettledCandidate(candidateStatus), lastCheckedAt: new Date() },
         });
       } else {
+        if (transientInfra) rememberTransientEntryFailure(candidate.id, err);
         await db.pendingEntry.update({ where: { id: candidate.id }, data: { status: PendingEntryStatus.ACTIVE } });
       }
     }

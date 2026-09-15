@@ -101,9 +101,43 @@ export interface DiscoverPoolOptions {
 // pool's key is immutable once initialized, and a process restart naturally
 // clears this (in-memory only, nothing persisted).
 const poolKeyCache = new Map<string, PoolCandidate>();
+const poolDiscoveryFailureCache = new Map<string, { until: number; error: string }>();
+
+export class PoolDiscoveryInconclusiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PoolDiscoveryInconclusiveError";
+  }
+}
+
+export function isPoolDiscoveryInconclusiveError(err: unknown): boolean {
+  return err instanceof PoolDiscoveryInconclusiveError || String(err).includes("pool discovery inconclusive");
+}
+
+function envNum(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const message = String(err).toLowerCase();
+  return message.includes("too many requests") || message.includes("http 429") || message.includes("status: 429");
+}
 
 function cacheKey(token: `0x${string}`, allowHighFeePools: boolean): string {
   return `${token.toLowerCase()}:${allowHighFeePools}`;
+}
+
+function failureCooldownMs(): number {
+  return envNum("POOL_DISCOVERY_INFRA_COOLDOWN_MS", 60_000);
+}
+
+function rememberPoolDiscoveryFailure(key: string, err: unknown): void {
+  const cooldownMs = failureCooldownMs();
+  if (cooldownMs <= 0) return;
+  poolDiscoveryFailureCache.set(key, { until: Date.now() + cooldownMs, error: String(err).replace(/\s+/g, " ").slice(0, 240) });
 }
 
 export async function discoverPool(
@@ -112,7 +146,18 @@ export async function discoverPool(
   options: DiscoverPoolOptions = {}
 ): Promise<DiscoveredPool | undefined> {
   const token = getAddress(tokenAddress);
-  const cached = poolKeyCache.get(cacheKey(token, options.allowHighFeePools ?? false));
+  const key = cacheKey(token, options.allowHighFeePools ?? false);
+  const cachedFailure = poolDiscoveryFailureCache.get(key);
+  if (cachedFailure) {
+    if (cachedFailure.until > Date.now()) {
+      throw new PoolDiscoveryInconclusiveError(
+        `pool discovery inconclusive for ${token}: cooling down after a recent RPC/infra failure (${Math.ceil((cachedFailure.until - Date.now()) / 1000)}s left): ${cachedFailure.error}`
+      );
+    }
+    poolDiscoveryFailureCache.delete(key);
+  }
+
+  const cached = poolKeyCache.get(key);
   if (cached) {
     // Liquidity is never cached — always re-read fresh (this is usually why
     // discoverPool is being called at all: to price against current depth).
@@ -134,6 +179,7 @@ export async function discoverPool(
   }
 
   let logScanFailed = false;
+  let logScanError: unknown;
 
   try {
     const logs = await scanInitializeLogsBackward(client, token);
@@ -154,7 +200,7 @@ export async function discoverPool(
       }));
       const withLiquidity = await pickPoolWithLiquidity(client, candidates, options);
       if (withLiquidity) {
-        poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), {
+        poolKeyCache.set(key, {
           poolKey: withLiquidity.poolKey,
           poolId: withLiquidity.poolId,
           initializedAtBlock: withLiquidity.initializedAtBlock,
@@ -164,6 +210,14 @@ export async function discoverPool(
     }
   } catch (err) {
     logScanFailed = true;
+    logScanError = err;
+    if (isRateLimitError(err)) {
+      rememberPoolDiscoveryFailure(key, err);
+      logger.warn({ token, cooldownMs: failureCooldownMs(), err: String(err) }, "pool discovery via event logs was rate-limited — cooling down before retry");
+      throw new PoolDiscoveryInconclusiveError(
+        `pool discovery inconclusive for ${token}: event-log scan was rate-limited by RPC, so entry will retry after cooldown instead of hammering fallback probes`
+      );
+    }
     logger.warn({ token, err: String(err) }, "pool discovery via event logs failed, falling back to standard fee-tier probe");
   }
 
@@ -178,9 +232,20 @@ export async function discoverPool(
     };
     return { poolKey, poolId: computePoolId(poolKey), initializedAtBlock: undefined };
   });
-  const fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates, options);
+  let fallbackResult: DiscoveredPool | undefined;
+  try {
+    fallbackResult = await pickPoolWithLiquidity(client, fallbackCandidates, options);
+  } catch (err) {
+    if (logScanFailed || isRateLimitError(err)) {
+      rememberPoolDiscoveryFailure(key, err);
+      throw new PoolDiscoveryInconclusiveError(
+        `pool discovery inconclusive for ${token}: event-log scan failed and standard fee-tier probe also hit RPC/infra trouble: ${String(err).replace(/\s+/g, " ").slice(0, 240)}`
+      );
+    }
+    throw err;
+  }
   if (fallbackResult) {
-    poolKeyCache.set(cacheKey(token, options.allowHighFeePools ?? false), {
+    poolKeyCache.set(key, {
       poolKey: fallbackResult.poolKey,
       poolId: fallbackResult.poolId,
       initializedAtBlock: fallbackResult.initializedAtBlock,
@@ -207,7 +272,8 @@ export async function discoverPool(
   // recovery path every other transient infra failure in this codebase
   // already gets — never a silent, permanent false rejection.
   if (logScanFailed) {
-    throw new Error(
+    rememberPoolDiscoveryFailure(key, logScanError);
+    throw new PoolDiscoveryInconclusiveError(
       `pool discovery inconclusive for ${token}: event-log scan failed (RPC/infra error) and no standard fee-tier pool was found — this does not confirm the token has no tradeable pool, only that it couldn't be checked`
     );
   }
