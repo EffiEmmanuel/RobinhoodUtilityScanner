@@ -4,7 +4,10 @@ import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/p
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { classifyTradeLane } from "./tradeLane";
-import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
+import { canBypassUtilityGateForMomentum, evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
+
+const MOMENTUM_UTILITY_REJECT_RECOVERY_LOOKBACK_MS = 12 * 60 * 60 * 1000;
+const MOMENTUM_UTILITY_REJECT_RECOVERY_LIMIT = 50;
 
 /**
  * A token becomes a trade candidate once it clears the base research
@@ -87,8 +90,13 @@ export async function generateTradeCandidates(): Promise<number> {
       })
     );
     const qualificationPath = evaluation.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : "NORMAL";
+    const utilityBypassedForMomentum = canBypassUtilityGateForMomentum({ qualificationPath, evaluation });
+    const tradeEligibilityEvaluation =
+      utilityGate.passed || utilityBypassedForMomentum
+        ? evaluation
+        : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
     const lane = classifyTradeLane({
-      evaluation: utilityGate.passed ? evaluation : { eligible: false, riskBucket: "REJECT", reasons: utilityGate.reasons },
+      evaluation: tradeEligibilityEvaluation,
       qualificationPath,
       qualityScore: run.finalScore,
       researchConfidence: run.confidence,
@@ -100,22 +108,28 @@ export async function generateTradeCandidates(): Promise<number> {
     });
 
     const strategy = await getActiveStrategyVersion();
+    const finalReasons = [
+      ...evaluation.reasons,
+      ...utilityGate.reasons,
+      ...(utilityBypassedForMomentum ? ["momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup"] : []),
+      ...lane.reasons,
+    ];
     await db.tradeDecisionSnapshot.create({
       data: {
         candidateId: candidate.id,
-        decision: evaluation.eligible ? TradeDecision.WAIT : TradeDecision.SKIP,
+        decision: evaluation.eligible && (utilityGate.passed || utilityBypassedForMomentum) ? TradeDecision.WAIT : TradeDecision.SKIP,
         stage: "candidate_eligibility",
         strategyVersionId: strategy.id,
         marketState: {},
         projectState: { qualityScore: run.finalScore, researchConfidence: run.confidence, contractScore: run.contractScore, utilityGate: utilityGate.reasons },
         technicalState: {},
         portfolioState: {},
-        deterministicRules: { riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, reasons: evaluation.reasons },
-        finalReasons: [...evaluation.reasons, ...utilityGate.reasons, ...lane.reasons],
+        deterministicRules: { riskBucket: evaluation.riskBucket, qualificationPath, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, utilityBypassedForMomentum, reasons: evaluation.reasons },
+        finalReasons,
       },
     });
 
-    if (!evaluation.eligible || !utilityGate.passed) {
+    if (!evaluation.eligible || (!utilityGate.passed && !utilityBypassedForMomentum)) {
       await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     } else {
       // "Learn which entry pathway actually pays" (user directive
@@ -131,4 +145,75 @@ export async function generateTradeCandidates(): Promise<number> {
     );
   }
   return created;
+}
+
+export async function recoverRecentMomentumUtilityRejects(): Promise<number> {
+  const since = new Date(Date.now() - MOMENTUM_UTILITY_REJECT_RECOVERY_LOOKBACK_MS);
+  const candidates = await db.tradeCandidate.findMany({
+    where: {
+      status: TradeCandidateStatus.REJECTED,
+      qualificationPath: "MOMENTUM_OVERRIDE",
+      createdAt: { gte: since },
+      plans: { none: {} },
+    },
+    orderBy: { createdAt: "desc" },
+    take: MOMENTUM_UTILITY_REJECT_RECOVERY_LIMIT,
+    select: {
+      id: true,
+      decisions: {
+        orderBy: { createdAt: "desc" },
+        take: 5,
+        select: {
+          decision: true,
+          stage: true,
+          deterministicRules: true,
+          finalReasons: true,
+        },
+      },
+    },
+  });
+
+  const recoverableIds = candidates
+    .filter((candidate) => candidate.decisions.some(wasMomentumUtilityBlockedDecision))
+    .map((candidate) => candidate.id);
+
+  if (recoverableIds.length === 0) return 0;
+
+  const result = await db.tradeCandidate.updateMany({
+    where: { id: { in: recoverableIds }, status: TradeCandidateStatus.REJECTED },
+    data: { status: TradeCandidateStatus.QUALIFIED },
+  });
+
+  if (result.count > 0) {
+    logger.warn(
+      { count: result.count, lookbackHours: MOMENTUM_UTILITY_REJECT_RECOVERY_LOOKBACK_MS / 3_600_000 },
+      "requeued recent momentum candidates that were blocked by the old utility-only gate"
+    );
+  }
+  return result.count;
+}
+
+function wasMomentumUtilityBlockedDecision(decision: {
+  decision: TradeDecision;
+  stage: string;
+  deterministicRules: unknown;
+  finalReasons: unknown;
+}): boolean {
+  if (decision.decision !== TradeDecision.SKIP) return false;
+  if (decision.stage !== "candidate_eligibility" && decision.stage !== "planning") return false;
+
+  const text = JSON.stringify({
+    deterministicRules: decision.deterministicRules,
+    finalReasons: decision.finalReasons,
+  }).toLowerCase();
+
+  return (
+    text.includes("momentum override:") &&
+    !text.includes("momentum tactical override") &&
+    (text.includes("utility class is meme") ||
+      text.includes("utility class is unknown") ||
+      text.includes("research did not verify a real product/app exists") ||
+      text.includes("utilityscore") ||
+      text.includes("productpredatestoken"))
+  );
 }

@@ -9,7 +9,7 @@ import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
-import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
+import { canBypassUtilityGateForMomentum, evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
@@ -62,8 +62,13 @@ export async function planCandidate(candidateId: string): Promise<void> {
     })
   );
   const qualificationPath = freshEval.reasons[0]?.startsWith("momentum override:") ? "MOMENTUM_OVERRIDE" : (candidate.qualificationPath ?? "NORMAL");
+  const utilityBypassedForMomentum = canBypassUtilityGateForMomentum({ qualificationPath, evaluation: freshEval });
+  const tradeEligibilityEvaluation =
+    utilityGate.passed || utilityBypassedForMomentum
+      ? freshEval
+      : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
   const lane = classifyTradeLane({
-    evaluation: utilityGate.passed ? freshEval : { eligible: false, riskBucket: "REJECT", reasons: utilityGate.reasons },
+    evaluation: tradeEligibilityEvaluation,
     qualificationPath,
     qualityScore: candidate.qualityScore,
     researchConfidence: candidate.researchConfidence,
@@ -74,7 +79,11 @@ export async function planCandidate(candidateId: string): Promise<void> {
     liquidityUsd,
   });
 
-  if (!freshEval.eligible || !utilityGate.passed) {
+  const utilityBypassReason = utilityBypassedForMomentum
+    ? ["momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup"]
+    : [];
+
+  if (!freshEval.eligible || (!utilityGate.passed && !utilityBypassedForMomentum)) {
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
@@ -181,7 +190,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
+      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, utilityBypassedForMomentum, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });
@@ -198,7 +207,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       aiAnalysis: analysis,
-      reasons: analysis.reasoning,
+      reasons: [...freshEval.reasons, ...utilityGate.reasons, ...utilityBypassReason, ...lane.reasons, analysis.reasoning],
     }
   );
 

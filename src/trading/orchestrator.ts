@@ -4,7 +4,7 @@ import { sleep } from "../util/http";
 import { retryAsync } from "../util/retry";
 import { TradeCandidateStatus } from "../generated/prisma";
 import { tradingConfig } from "./config";
-import { generateTradeCandidates } from "./candidates";
+import { generateTradeCandidates, recoverRecentMomentumUtilityRejects } from "./candidates";
 import { planCandidate } from "./planning";
 import { processPendingEntries, recoverStuckPendingEntries, recoverStalledRevalidatingEntries } from "./entryMonitor";
 import { runPositionMonitorTick } from "./positionManager";
@@ -174,6 +174,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     await ensurePaperWalletSeeded();
     await getActiveStrategyVersion(); // ensure a strategy version exists before anything else runs
     await recoverStuckCandidates();
+    await recoverRecentMomentumUtilityRejects();
     await recoverStuckPendingEntries();
     await recordPortfolioSnapshot();
   });
