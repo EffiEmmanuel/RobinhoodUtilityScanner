@@ -31,6 +31,7 @@ import {
   evaluateQuoteAgreement,
   evaluateRealDemand,
   hasPriceStabilized,
+  shouldApplyEntryChaseGuard,
   type ConvictionResult,
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
@@ -474,20 +475,37 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       }
     }
 
-    // Chase guard — every mode, not just conservative (user directive
-    // 2026-09-12): blocks buying a token that's already run up hard in our
-    // OWN recent snapshot history, not DexScreener's lagging 5m change. A
-    // miss defers rather than rejects — a run-up can cool off while the plan
-    // is still live, whereas a rejected candidate is never planned again.
-    const recentRange = await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap);
-    const chase = evaluateChaseGuard(recentRange, {
-      windowMinutes: tradingConfig.conservativeRecentWindowMinutes,
-      minSnapshots: tradingConfig.conservativeMinRecentSnapshots,
-      maxRunUpPercent: tradingConfig.conservativeMaxRecentRunUpPercent,
-    });
-    if (!manualEntryOverride && !chase.passed) {
-      await deferForConviction(entry, candidate.id, chase, conservative);
-      return;
+    const needsRecentRange =
+      !manualEntryOverride &&
+      (conservative ||
+        shouldApplyEntryChaseGuard({
+          action: plan.action,
+          conservative,
+        }));
+    const recentRange = needsRecentRange
+      ? await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap)
+      : undefined;
+
+    // Chase guard — every mode for WAIT_FOR_ENTRY, and conservative mode for
+    // every action. Normal-mode BUY_NOW is already the planner saying "this
+    // move is worth entering now"; blocking it for the same recent run-up is
+    // the contradiction that left BUY_NOW plans mostly unbought.
+    if (
+      !manualEntryOverride &&
+      shouldApplyEntryChaseGuard({
+        action: plan.action,
+        conservative,
+      })
+    ) {
+      const chase = evaluateChaseGuard(recentRange, {
+        windowMinutes: tradingConfig.conservativeRecentWindowMinutes,
+        minSnapshots: tradingConfig.conservativeMinRecentSnapshots,
+        maxRunUpPercent: tradingConfig.conservativeMaxRecentRunUpPercent,
+      });
+      if (!chase.passed) {
+        await deferForConviction(entry, candidate.id, chase, conservative);
+        return;
+      }
     }
 
     // Real trading demand — every mode, not just conservative (user

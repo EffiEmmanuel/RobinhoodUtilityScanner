@@ -118,12 +118,37 @@ describe("evaluateCandidate", () => {
     expect(result.riskBucket).toBe("HIGH");
   });
 
-  it("does not momentum-override when a non-qualityScore gate also fails", () => {
+  it("momentum-overrides marginal liquidity when demand is strong and execution checks can still size down later", () => {
     const result = evaluateCandidate({
       qualityScore: 62,
       researchConfidence: 70,
       contractScore: 100,
-      liquidityUsd: 5_000, // below minTradeLiquidityUsd
+      liquidityUsd: 5_000,
+      hardReject: false,
+      hourlyTxns: 40,
+    });
+    expect(result.eligible).toBe(true);
+    expect(result.riskBucket).toBe("HIGH");
+  });
+
+  it("does not momentum-override below the tactical liquidity floor", () => {
+    const result = evaluateCandidate({
+      qualityScore: 62,
+      researchConfidence: 70,
+      contractScore: 100,
+      liquidityUsd: 4_000,
+      hardReject: false,
+      hourlyTxns: 40,
+    });
+    expect(result.eligible).toBe(false);
+  });
+
+  it("does not momentum-override when contract safety also fails", () => {
+    const result = evaluateCandidate({
+      qualityScore: 62,
+      researchConfidence: 70,
+      contractScore: 50,
+      liquidityUsd: 20_000,
       hardReject: false,
       hourlyTxns: 40,
     });
@@ -249,9 +274,9 @@ describe("validateEntry", () => {
     ).toBe("DEFER");
   });
 
-  it("rejects when there is no sell path", () => {
+  it("defers when there is no sell path yet", () => {
     expect(validateEntry({ ...base, sellQuoteAvailable: false }).decision).toBe(
-      "REJECTED"
+      "DEFER"
     );
   });
 

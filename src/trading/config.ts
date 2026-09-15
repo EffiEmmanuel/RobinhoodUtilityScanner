@@ -66,6 +66,12 @@ export const tradingConfig = {
   minTradeResearchConfidence: num("MIN_TRADE_RESEARCH_CONFIDENCE", 65),
   minTradeContractScore: num("MIN_TRADE_CONTRACT_SCORE", 75),
   minTradeLiquidityUsd: num("MIN_TRADE_LIQUIDITY_USD", 15000),
+  // Momentum/tactical candidates are probe-sized in LIVE mode and still pass
+  // quote, slippage, sell-path, and holder checks right before entry. Let
+  // those final execution checks decide whether a small trade fits the pool
+  // instead of permanently rejecting every fast mover that briefly dips below
+  // the general/verified liquidity floor.
+  momentumTacticalMinLiquidityUsd: num("MOMENTUM_TACTICAL_MIN_LIQUIDITY_USD", 5000),
   utilityOnlyTradingEnabled: bool("UTILITY_ONLY_TRADING_ENABLED", true),
   minTradeUtilityScore: num("MIN_TRADE_UTILITY_SCORE", 70),
   minTradeCredibilityScore: num("MIN_TRADE_CREDIBILITY_SCORE", 50),
@@ -229,12 +235,14 @@ export const tradingConfig = {
   //
   // User directive 2026-09-12: these three (window/snapshots/run-up) also
   // gate conservativeMode.ts's evaluateChaseGuard, which entryMonitor.ts runs
-  // on EVERY entry regardless of circuit-breaker mode, not just conservative
-  // mode — the chase pattern above isn't specific to a tripped breaker. Only
-  // the window/snapshot-count are actually shared, though: the run-up bar
-  // itself is conservativeStrictMaxRunUpPercent below, deliberately a
-  // SEPARATE, stricter number, so raising conservative mode's own bar can
-  // never quietly tighten normal mode's already-tuned chase guard too.
+  // for normal WAIT_FOR_ENTRY plans and all conservative-mode entries. Normal
+  // BUY_NOW bypasses this one guard because the planner has explicitly chosen
+  // to enter a live move immediately; sell-path, honeypot, real-demand,
+  // slippage/impact, quote, holder and portfolio checks still run. Only the
+  // window/snapshot-count are actually shared, though: the run-up bar itself
+  // is conservativeStrictMaxRunUpPercent below, deliberately a SEPARATE,
+  // stricter number, so raising conservative mode's own bar can never quietly
+  // tighten normal mode's already-tuned chase guard too.
   // conservativeMaxRecentDrawdownPercent stays conservative-mode-only.
   conservativeRecentWindowMinutes: num("CONSERVATIVE_RECENT_WINDOW_MINUTES", 10),
   conservativeMinRecentSnapshots: num("CONSERVATIVE_MIN_RECENT_SNAPSHOTS", 3),
@@ -427,6 +435,14 @@ export const tradingConfig = {
   defaultMaxSellSlippageBps: num("DEFAULT_MAX_SELL_SLIPPAGE_BPS", 500),
   emergencyMaxSellSlippageBps: num("EMERGENCY_MAX_SELL_SLIPPAGE_BPS", 1000),
   maxBuyPriceImpactPercent: num("MAX_BUY_PRICE_IMPACT_PERCENT", 3),
+  // Tactical LIVE entries are capped to tiny probe sizes. A $1-$2.50 scout
+  // entry on a 5x runner should tolerate a worse fill than a normal-sized
+  // position, as long as the quote is not suspiciously broken and exits still
+  // simulate. MULTI/Maltese was rejected at 7.25% impact on a probe-sized
+  // BUY_NOW trigger, then kept running; these caps are deliberately below the
+  // suspicious-quote threshold in executionFacade.ts.
+  tacticalProbeMaxBuySlippageBps: num("TACTICAL_PROBE_MAX_BUY_SLIPPAGE_BPS", 1000),
+  tacticalProbeMaxBuyPriceImpactPercent: num("TACTICAL_PROBE_MAX_BUY_PRICE_IMPACT_PERCENT", 10),
   // Confirmed live 2026-09-11: OPAI sat at +322% unrealized while every exit
   // was rejected by the slippage guard and retried every few seconds,
   // indefinitely — its only venue was an 18%-fee pool, so the estimate could

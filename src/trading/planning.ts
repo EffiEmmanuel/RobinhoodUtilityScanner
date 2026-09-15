@@ -95,6 +95,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
           : "momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup",
       ]
     : [];
+  const planningUtilityReasons = utilityBypassedForMomentum ? utilityBypassReason : utilityGate.reasons;
 
   if (!freshEval.eligible || (!utilityGate.passed && !utilityBypassedForMomentum)) {
     if (shouldRetryPlanningForTransientMomentumMarket({ qualificationPath, evaluation: freshEval, pair: market.primaryPair })) {
@@ -243,7 +244,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       technical,
       aiAnalysis: analysis,
       walletSignals,
-      reasons: [...freshEval.reasons, ...utilityGate.reasons, ...utilityBypassReason, ...lane.reasons, analysis.reasoning],
+      reasons: [...freshEval.reasons, ...planningUtilityReasons, ...lane.reasons, analysis.reasoning],
     }
   );
 

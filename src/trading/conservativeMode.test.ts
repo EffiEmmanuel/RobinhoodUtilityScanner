@@ -7,6 +7,7 @@ import {
   evaluateQuoteAgreement,
   evaluateRealDemand,
   hasPriceStabilized,
+  shouldApplyEntryChaseGuard,
   type HighConvictionInput,
   type RealDemandThresholds,
 } from "./conservativeMode";
@@ -263,6 +264,20 @@ describe("evaluateChaseGuard", () => {
 
   it("holds back with no recent-range data at all", () => {
     expect(evaluateChaseGuard(undefined, opts).passed).toBe(false);
+  });
+});
+
+describe("shouldApplyEntryChaseGuard", () => {
+  it("does not apply the recent-run-up guard to normal-mode BUY_NOW plans", () => {
+    expect(shouldApplyEntryChaseGuard({ action: "BUY_NOW", conservative: false })).toBe(false);
+  });
+
+  it("still applies the guard to normal-mode WAIT_FOR_ENTRY plans", () => {
+    expect(shouldApplyEntryChaseGuard({ action: "WAIT_FOR_ENTRY", conservative: false })).toBe(true);
+  });
+
+  it("still applies the guard to BUY_NOW plans in conservative mode", () => {
+    expect(shouldApplyEntryChaseGuard({ action: "BUY_NOW", conservative: true })).toBe(true);
   });
 });
 

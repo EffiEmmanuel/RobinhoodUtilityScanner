@@ -108,10 +108,14 @@ export async function generateTradeCandidates(): Promise<number> {
     });
 
     const strategy = await getActiveStrategyVersion();
+    const bypassedUtilityReasons = utilityBypassedForMomentum
+      ? [
+          "momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup",
+        ]
+      : utilityGate.reasons;
     const finalReasons = [
       ...evaluation.reasons,
-      ...utilityGate.reasons,
-      ...(utilityBypassedForMomentum ? ["momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup"] : []),
+      ...bypassedUtilityReasons,
       ...lane.reasons,
     ];
     await db.tradeDecisionSnapshot.create({

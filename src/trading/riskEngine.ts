@@ -38,6 +38,7 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   const confidenceOk = input.researchConfidence >= tradingConfig.minTradeResearchConfidence;
   const contractScoreOk = input.contractScore >= tradingConfig.minTradeContractScore;
   const liquidityOk = input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
+  const tacticalLiquidityOk = input.liquidityUsd >= tradingConfig.momentumTacticalMinLiquidityUsd;
   if (!qualityScoreOk) {
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }
@@ -70,15 +71,18 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   // the liquidity floor, which stay real, unwaived gates on capital actually
   // at risk — validateEntry still re-checks live buy/sell pressure right
   // before any buy executes).
-  const onlySoftScoresFailing = (!qualityScoreOk || !confidenceOk) && contractScoreOk && liquidityOk;
+  const onlyMomentumWaivableGatesFailing = (!qualityScoreOk || !confidenceOk || !liquidityOk) && contractScoreOk && tacticalLiquidityOk;
   if (
-    onlySoftScoresFailing &&
+    onlyMomentumWaivableGatesFailing &&
     (input.hourlyTxns ?? 0) >= config.momentumOverrideMinHourlyTxns &&
-    input.liquidityUsd >= config.momentumOverrideMinLiquidityUsd
+    input.liquidityUsd >= tradingConfig.momentumTacticalMinLiquidityUsd
   ) {
     const waived = [
       !qualityScoreOk ? `qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}` : null,
       !confidenceOk ? `researchConfidence ${input.researchConfidence} < ${tradingConfig.minTradeResearchConfidence}` : null,
+      !liquidityOk
+        ? `liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd} but >= tactical floor ${tradingConfig.momentumTacticalMinLiquidityUsd}`
+        : null,
     ].filter((r): r is string => r !== null);
     return {
       eligible: true,
@@ -280,6 +284,8 @@ export interface EntryRiskInput {
   priceChange5mPercent: number | undefined;
   estimatedSlippageBps: number;
   estimatedPriceImpactPercent: number;
+  maxBuySlippageBps?: number;
+  maxBuyPriceImpactPercent?: number;
   positionSizeUsd: number;
   availableToDeployUsd: number;
 }
@@ -298,7 +304,10 @@ export function validateEntry(input: EntryRiskInput): EntryRiskResult {
     return { decision: "DEFER", reasons: input.circuitBreakerReasons };
   }
   if (!input.sellQuoteAvailable) {
-    return { decision: "REJECTED", reasons: ["no sell path available — possible honeypot/delisted pool"] };
+    return {
+      decision: "DEFER",
+      reasons: ["no sell path available yet — waiting for a sell quote before risking capital"],
+    };
   }
 
   // §18 catastrophic drop detection: a price that reached the target zone
@@ -315,18 +324,20 @@ export function validateEntry(input: EntryRiskInput): EntryRiskResult {
     return { decision: "REJECTED", reasons: [`sell volume massively exceeds buy volume (buy ratio ${(input.buySellRatio1h * 100).toFixed(0)}%)`] };
   }
 
-  if (input.estimatedSlippageBps > tradingConfig.defaultMaxBuySlippageBps) {
-    reasons.push(`estimated slippage ${input.estimatedSlippageBps}bps exceeds ${tradingConfig.defaultMaxBuySlippageBps}bps limit`);
+  const maxBuySlippageBps = input.maxBuySlippageBps ?? tradingConfig.defaultMaxBuySlippageBps;
+  const maxBuyPriceImpactPercent = input.maxBuyPriceImpactPercent ?? tradingConfig.maxBuyPriceImpactPercent;
+  if (input.estimatedSlippageBps > maxBuySlippageBps) {
+    reasons.push(`estimated slippage ${input.estimatedSlippageBps}bps exceeds ${maxBuySlippageBps}bps limit`);
   }
-  if (input.estimatedPriceImpactPercent > tradingConfig.maxBuyPriceImpactPercent) {
-    reasons.push(`estimated price impact ${input.estimatedPriceImpactPercent.toFixed(2)}% exceeds ${tradingConfig.maxBuyPriceImpactPercent}% limit`);
+  if (input.estimatedPriceImpactPercent > maxBuyPriceImpactPercent) {
+    reasons.push(`estimated price impact ${input.estimatedPriceImpactPercent.toFixed(2)}% exceeds ${maxBuyPriceImpactPercent}% limit`);
   }
   if (input.positionSizeUsd > input.availableToDeployUsd) {
     reasons.push("position size no longer fits within available deployable capital");
   }
 
   if (reasons.length > 0) {
-    return { decision: "REJECTED", reasons };
+    return { decision: "DEFER", reasons };
   }
   return { decision: "APPROVED", reasons: ["all entry checks passed"] };
 }

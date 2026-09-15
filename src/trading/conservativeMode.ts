@@ -7,13 +7,12 @@ import { tradingConfig } from "./config";
  * planning and sniping, but only buy setups we can be very confident in.
  * Exits are untouched.
  *
- * This file also holds two checks that are NOT conservative-only —
- * evaluateChaseGuard and evaluateQuoteAgreement — added to normal-mode
- * entries too on 2026-09-12 (docs/trade-reviews/2026-09-11.md's "still to
- * decide" #1). Both take their threshold as a parameter for exactly that
- * reason: conservative mode calls them stricter than normal mode does.
- * evaluateHighConvictionSetup, the rest of the bundle, stays conservative-
- * mode-only.
+ * This file also holds checks that are NOT conservative-only. evaluateChaseGuard
+ * still protects normal WAIT_FOR_ENTRY plans, while BUY_NOW bypasses only that
+ * one recent-run-up guard in normal mode because its whole purpose is entering
+ * a live move immediately. evaluateQuoteAgreement still applies to every
+ * non-manual entry. evaluateHighConvictionSetup, the rest of the bundle, stays
+ * conservative-mode-only.
  *
  * Everything here is pure (no DB, no network) so the gates can be tested
  * directly; entryMonitor.ts gathers the inputs. The evidence behind each
@@ -132,14 +131,33 @@ export interface ChaseGuardOptions {
   maxRunUpPercent: number;
 }
 
+export interface EntryChaseGuardPolicyInput {
+  action: string;
+  conservative: boolean;
+}
+
+/**
+ * BUY_NOW is the planner's explicit "the move is happening now" action. In
+ * normal mode, blocking it because price has already moved recently directly
+ * contradicts that intent; the later sell-path, honeypot, demand, slippage,
+ * quote, holder and portfolio checks still protect execution. Conservative
+ * mode keeps the chase guard because a tripped loss breaker deliberately asks
+ * for only unusually clean entries.
+ */
+export function shouldApplyEntryChaseGuard(input: EntryChaseGuardPolicyInput): boolean {
+  if (!input.conservative && input.action === "BUY_NOW") return false;
+  return true;
+}
+
 /**
  * Blocks buying a token that's already run up hard in our OWN recent
  * snapshot history — not DexScreener's 5m change, which lags on this chain
  * (see RecentPriceRange's doc comment on marketAnalysis.ts's
- * getRecentMcapRange). Added to EVERY mode on 2026-09-12, not just
- * conservative: BLACKHOLE, PONSIBLE, THREE and MARRONA (-$9.90 combined) were
- * each bought 37-54% above their own 10-minute low, with buyers no more than
- * sellers — this alone would have blocked all four.
+ * getRecentMcapRange). Normal BUY_NOW plans bypass this one guard; normal
+ * WAIT_FOR_ENTRY and all conservative-mode entries still use it. The original
+ * loss pattern was BLACKHOLE, PONSIBLE, THREE and MARRONA (-$9.90 combined):
+ * each bought 37-54% above its own 10-minute low, with buyers no more than
+ * sellers.
  */
 export function evaluateChaseGuard(recent: RecentPriceRange | undefined, opts: ChaseGuardOptions): ConvictionResult {
   if (!recent || recent.snapshotCount < opts.minSnapshots) {
