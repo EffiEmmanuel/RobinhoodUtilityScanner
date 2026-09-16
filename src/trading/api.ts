@@ -8,6 +8,8 @@ import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { getAllowedRouterAddresses } from "./live/contracts";
+import { isSolanaWalletConfigured, getSolanaWalletAddress } from "./live/solana/wallet";
+import { getSolanaWalletGasBalanceSol, isSolanaLiveModeReady } from "./live/solana/executionProvider";
 import { runBacktest, runEntryBacktest } from "./backtest";
 import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
@@ -82,6 +84,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     const unrealizedPnlUsd = portfolio.openPositionValueUsd - portfolio.deployedUsd;
     const totalPnlUsd = realizedPnlUsd + unrealizedPnlUsd;
     const walletConfigured = isWalletConfigured();
+    const solanaWalletConfigured = isSolanaWalletConfigured();
     return {
       mode: tradingConfig.mode,
       tradingEnabled: isTradingEnabled(),
@@ -93,6 +96,16 @@ export function registerTradingRoutes(app: FastifyInstance): void {
         walletGasBalanceEth: walletConfigured ? await getWalletGasBalanceEth().catch(() => null) : null,
         ready: isLiveModeReady(),
         allowedRouterAddresses: getAllowedRouterAddresses(),
+        // Additive — kept separate from the EVM fields above rather than
+        // generalizing them, since ledger/circuit-breaker state is still one
+        // shared pool across chains (no per-chain split exists yet). This is
+        // display-only wallet info for the dashboard's multi-chain footer.
+        solana: {
+          walletConfigured: solanaWalletConfigured,
+          walletAddress: solanaWalletConfigured ? getSolanaWalletAddress() : null,
+          walletGasBalanceSol: solanaWalletConfigured ? await getSolanaWalletGasBalanceSol().catch(() => null) : null,
+          ready: isSolanaLiveModeReady(),
+        },
       },
     };
   });

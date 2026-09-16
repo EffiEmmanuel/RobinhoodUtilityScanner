@@ -29,6 +29,8 @@
         --live: var(--good);
         --live-soft: var(--good-soft);
         --neutral-soft: #eef1ef;
+        --chain-sol: #7c3aed;
+        --chain-sol-soft: #f1e9fe;
         --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
         --font-mono:
           "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -53,6 +55,8 @@
           --live: var(--good);
           --live-soft: var(--good-soft);
           --neutral-soft: #1b2422;
+          --chain-sol: #c4b5fd;
+          --chain-sol-soft: #2f2350;
         }
       }
       :root[data-theme="dark"] {
@@ -74,6 +78,8 @@
         --live: var(--good);
         --live-soft: var(--good-soft);
         --neutral-soft: #1b2422;
+        --chain-sol: #c4b5fd;
+        --chain-sol-soft: #2f2350;
       }
       html {
         color-scheme: light dark;
@@ -466,6 +472,26 @@
       td.token-cell {
         font-family: var(--font-sans);
         font-variant-numeric: normal;
+      }
+      .chain-tag {
+        display: inline-block;
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        padding: 1px 5px;
+        border-radius: 4px;
+        margin-right: 6px;
+        vertical-align: middle;
+        white-space: nowrap;
+      }
+      .chain-tag.robinhood {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .chain-tag.solana {
+        background: var(--chain-sol-soft);
+        color: var(--chain-sol);
       }
       tr:last-child td {
         border-bottom: none;
@@ -869,6 +895,12 @@
         padding-top: 14px;
         border-top: 1px solid var(--border);
       }
+      .wallet-chips {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 14px;
+      }
       .wallet-chip {
         display: inline-flex;
         align-items: center;
@@ -879,6 +911,14 @@
         border: 1px solid var(--border);
         border-radius: 100px;
         padding: 6px 8px 6px 12px;
+      }
+      .wallet-chip .chain-label {
+        font-family: var(--font-sans);
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-muted);
       }
       .wallet-chip button {
         border: none;
@@ -1041,7 +1081,9 @@
           </svg>
           <div>
             <h1>UtilityScout Terminal</h1>
-            <div class="sub">Robinhood Chain &middot; live trading monitor</div>
+            <div class="sub">
+              Robinhood Chain &amp; Solana &middot; live trading monitor
+            </div>
           </div>
         </div>
         <div class="status-cluster">
@@ -1428,19 +1470,7 @@
         </div>
 
         <footer>
-          <span class="wallet-chip" id="wallet-chip" hidden>
-            <a
-              id="wallet-addr"
-              class="addr-link"
-              href="#"
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open on the Robinhood Chain explorer"
-              >&mdash;</a
-            >
-            <button id="copy-addr-btn">copy</button>
-          </span>
-          <span class="pill" id="gas-pill" hidden></span>
+          <div class="wallet-chips" id="wallet-chips"></div>
           <span class="note"
             >The wallet's private key never leaves the server and is never
             exposed by this API.</span
@@ -1571,10 +1601,7 @@
           ),
           ledgerFeed: document.getElementById("ledger-feed"),
           ledgerCount: document.getElementById("ledger-count"),
-          walletChip: document.getElementById("wallet-chip"),
-          walletAddr: document.getElementById("wallet-addr"),
-          copyAddrBtn: document.getElementById("copy-addr-btn"),
-          gasPill: document.getElementById("gas-pill"),
+          walletChips: document.getElementById("wallet-chips"),
           manualInput: document.getElementById("manual-address-input"),
           manualBuyHold: document.getElementById("manual-buy-hold-input"),
           manualBtn: document.getElementById("manual-submit-btn"),
@@ -1736,6 +1763,12 @@
         function explorerLabel(token) {
           return token && token.chain === "solana" ? "Solscan" : "Blockscout";
         }
+        function chainTag(token) {
+          if (!token || !token.chain) return "";
+          var chain = token.chain;
+          var short = chain === "solana" ? "SOL" : chain === "robinhood" ? "RH" : esc(chain).slice(0, 4).toUpperCase();
+          return '<span class="chain-tag ' + esc(chain) + '">' + short + "</span>";
+        }
         function tokenLabel(token) {
           if (!token) return "Unknown token";
           var label = esc(
@@ -1744,14 +1777,14 @@
               (token.address ? fmtAddr(token.address) : "Unknown")
           );
           var url = dexScreenerUrl(token);
-          if (!url) return label;
-          return (
-            '<a class="token-link" href="' +
-            url +
-            '" target="_blank" rel="noopener noreferrer" title="Open on DexScreener">' +
-            label +
-            "</a>"
-          );
+          var linked = !url
+            ? label
+            : '<a class="token-link" href="' +
+              url +
+              '" target="_blank" rel="noopener noreferrer" title="Open on DexScreener">' +
+              label +
+              "</a>";
+          return chainTag(token) + linked;
         }
 
         // ---------- data fetch ----------
@@ -1976,28 +2009,70 @@
             })
             .join("");
 
-          // wallet chip
+          // wallet chips — one per configured chain wallet
           var live = s.live || {};
+          var wallets = [];
           if (live.walletConfigured) {
-            els.walletChip.hidden = false;
-            els.walletAddr.textContent = live.walletAddress || "—";
-            els.walletAddr.href = blockscoutUrl(live.walletAddress) || "#";
-            els.walletAddr.title = live.walletAddress || "";
-            els.gasPill.hidden = false;
             var gasEth = live.walletGasBalanceEth;
-            els.gasPill.innerHTML =
-              '<span class="dot ' +
-              (live.ready ? "good" : "neutral") +
-              '"></span>' +
-              (gasEth !== null && gasEth !== undefined
-                ? Number(gasEth).toFixed(5)
-                : "—") +
-              " ETH gas &middot; " +
-              (live.ready ? "live-ready" : "not live-ready");
-          } else {
-            els.walletChip.hidden = true;
-            els.gasPill.hidden = true;
+            wallets.push({
+              chain: "robinhood",
+              chainLabel: "Robinhood",
+              address: live.walletAddress,
+              explorerUrl: blockscoutUrl(live.walletAddress),
+              ready: live.ready,
+              gasText:
+                (gasEth !== null && gasEth !== undefined
+                  ? Number(gasEth).toFixed(5)
+                  : "—") +
+                " ETH gas &middot; " +
+                (live.ready ? "live-ready" : "not live-ready"),
+            });
           }
+          var liveSolana = live.solana || {};
+          if (liveSolana.walletConfigured) {
+            var gasSol = liveSolana.walletGasBalanceSol;
+            wallets.push({
+              chain: "solana",
+              chainLabel: "Solana",
+              address: liveSolana.walletAddress,
+              explorerUrl: liveSolana.walletAddress
+                ? "https://solscan.io/account/" + liveSolana.walletAddress
+                : null,
+              ready: liveSolana.ready,
+              gasText:
+                (gasSol !== null && gasSol !== undefined
+                  ? Number(gasSol).toFixed(4)
+                  : "—") +
+                " SOL gas &middot; " +
+                (liveSolana.ready ? "live-ready" : "not live-ready"),
+            });
+          }
+          els.walletChips.innerHTML = wallets
+            .map(function (w) {
+              return (
+                '<span class="wallet-chip" data-address="' +
+                esc(w.address || "") +
+                '">' +
+                '<span class="chain-label">' +
+                esc(w.chainLabel) +
+                "</span>" +
+                '<a class="addr-link" href="' +
+                (w.explorerUrl || "#") +
+                '" target="_blank" rel="noopener noreferrer" title="' +
+                esc(w.address || "") +
+                '">' +
+                fmtAddr(w.address) +
+                "</a>" +
+                '<button class="copy-wallet-btn" type="button">copy</button>' +
+                "</span>" +
+                '<span class="pill"><span class="dot ' +
+                (w.ready ? "good" : "neutral") +
+                '"></span>' +
+                w.gasText +
+                "</span>"
+              );
+            })
+            .join("");
 
           renderActivity(data.tokens || []);
           renderNoTradeDiagnostics(data.noTradeDiagnostics || null);
@@ -2556,23 +2631,30 @@
           safeStorage.set("us_api_key", key);
           refreshAll();
         });
-        els.copyAddrBtn.addEventListener("click", function () {
-          var addr = els.walletAddr.textContent;
-          if (!addr || addr === "—") return;
+        els.walletChips.addEventListener("click", function (e) {
+          var btn = e.target.closest && e.target.closest(".copy-wallet-btn");
+          if (!btn) return;
+          var chip = btn.closest(".wallet-chip");
+          var addr = chip && chip.getAttribute("data-address");
+          if (!addr) return;
+          function markCopied() {
+            var original = btn.textContent;
+            btn.textContent = "copied";
+            setTimeout(function () {
+              btn.textContent = original;
+            }, 1400);
+          }
           try {
             navigator.clipboard
               .writeText(addr)
-              .then(function () {
-                els.copyAddrBtn.textContent = "copied";
-                setTimeout(function () {
-                  els.copyAddrBtn.textContent = "copy";
-                }, 1400);
-              })
+              .then(markCopied)
               .catch(function () {
                 fallbackCopy(addr);
+                markCopied();
               });
-          } catch (e) {
+          } catch (e2) {
             fallbackCopy(addr);
+            markCopied();
           }
         });
         function submitManualAddress() {
@@ -2636,11 +2718,16 @@
         });
 
         function fallbackCopy(text) {
-          var range = document.createRange();
-          range.selectNodeContents(els.walletAddr);
-          var sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          try {
+            document.execCommand("copy");
+          } catch (e) {}
+          document.body.removeChild(ta);
         }
 
         // ---------- token detail modal ----------
@@ -2718,6 +2805,7 @@
             token.name ||
             fmtAddr(token.address).replace(/&hellip;/, "…");
           els.tokenModalSub.innerHTML =
+            chainTag(token) +
             esc(token.address) +
             ' <span class="badge ' +
             esc(token.status) +
