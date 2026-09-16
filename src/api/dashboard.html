@@ -367,6 +367,11 @@
         padding: 14px 16px;
         display: flex;
         flex-direction: column;
+        /* same min-width:auto grid-blowout trap as .grid-main/.col/.card
+           below — without this, the fixed 2-col mobile override can't
+           actually shrink a tile below its content's width, and the whole
+           page grows wider than the viewport. */
+        min-width: 0;
         gap: 6px;
       }
       .tile .label {
@@ -425,6 +430,8 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 4px 10px;
         padding: 13px 16px;
         border-bottom: 1px solid var(--border);
       }
@@ -440,6 +447,8 @@
         background: var(--surface-2);
         padding: 2px 8px;
         border-radius: 100px;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .table-scroll {
@@ -886,7 +895,105 @@
         font-weight: 600;
       }
 
-      /* ---- footer / wallet chip ---- */
+      /* ---- wallets card ---- */
+      .wallets-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+        gap: 1px;
+        background: var(--border);
+      }
+      .wallet-card {
+        background: var(--surface);
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        border-left: 3px solid var(--accent);
+        min-width: 0;
+      }
+      .wallet-card.solana {
+        border-left-color: var(--chain-sol);
+      }
+      .wallet-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .wallet-card .chain-name {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+      }
+      .wallet-card .wallet-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .wallet-card .balance-row {
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+        flex-wrap: wrap;
+      }
+      .wallet-card .balance {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .wallet-card .balance-unit {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .wallet-card .balance-usd {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      .wallet-card .wallet-addr-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      .wallet-card .addr-link {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .wallet-card .copy-wallet-btn {
+        flex-shrink: 0;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text-muted);
+        cursor: pointer;
+        font-family: var(--font-sans);
+        font-size: 10.5px;
+        padding: 3px 8px;
+        border-radius: 100px;
+      }
+      .wallet-card .copy-wallet-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .wallets-empty {
+        padding: 26px 16px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 12.5px;
+      }
+
+      /* ---- footer ---- */
       footer {
         display: flex;
         flex-wrap: wrap;
@@ -894,45 +1001,6 @@
         gap: 10px 18px;
         padding-top: 14px;
         border-top: 1px solid var(--border);
-      }
-      .wallet-chips {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 10px 14px;
-      }
-      .wallet-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        font-family: var(--font-mono);
-        font-size: 12px;
-        background: var(--surface-2);
-        border: 1px solid var(--border);
-        border-radius: 100px;
-        padding: 6px 8px 6px 12px;
-      }
-      .wallet-chip .chain-label {
-        font-family: var(--font-sans);
-        font-size: 10.5px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--text-muted);
-      }
-      .wallet-chip button {
-        border: none;
-        background: transparent;
-        color: var(--text-muted);
-        cursor: pointer;
-        font-family: var(--font-sans);
-        font-size: 11px;
-        padding: 3px 8px;
-        border-radius: 100px;
-      }
-      .wallet-chip button:hover {
-        background: var(--surface);
-        color: var(--accent);
       }
       footer .note {
         font-size: 11.5px;
@@ -1036,6 +1104,15 @@
         }
         .stat-grid {
           grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+        }
+        .wallets-grid {
+          grid-template-columns: 1fr;
+        }
+        .wallet-card {
+          padding: 14px 16px;
+        }
+        .wallet-card .balance {
+          font-size: 22px;
         }
         footer {
           flex-direction: column;
@@ -1226,6 +1303,14 @@
             <span id="cb-subtitle">— circuit breaker tripped</span>
             <ul id="cb-reasons"></ul>
           </div>
+        </div>
+
+        <div class="card" id="wallets-card" style="margin-bottom: 18px" hidden>
+          <div class="card-head">
+            <h2>Wallets</h2>
+            <span class="count-chip" id="wallets-count">0</span>
+          </div>
+          <div class="wallets-grid" id="wallets-grid"></div>
         </div>
 
         <div class="tiles" id="tiles" style="margin-bottom: 18px"></div>
@@ -1470,7 +1555,6 @@
         </div>
 
         <footer>
-          <div class="wallet-chips" id="wallet-chips"></div>
           <span class="note"
             >The wallet's private key never leaves the server and is never
             exposed by this API.</span
@@ -1601,7 +1685,9 @@
           ),
           ledgerFeed: document.getElementById("ledger-feed"),
           ledgerCount: document.getElementById("ledger-count"),
-          walletChips: document.getElementById("wallet-chips"),
+          walletsCard: document.getElementById("wallets-card"),
+          walletsCount: document.getElementById("wallets-count"),
+          walletsGrid: document.getElementById("wallets-grid"),
           manualInput: document.getElementById("manual-address-input"),
           manualBuyHold: document.getElementById("manual-buy-hold-input"),
           manualBtn: document.getElementById("manual-submit-btn"),
@@ -2009,23 +2095,30 @@
             })
             .join("");
 
-          // wallet chips — one per configured chain wallet
+          // wallets card — one card per configured chain wallet, front and
+          // center rather than buried in the footer (a small pill down there
+          // was easy to miss entirely, which is exactly what happened with
+          // the Solana wallet balance).
           var live = s.live || {};
           var wallets = [];
           if (live.walletConfigured) {
             var gasEth = live.walletGasBalanceEth;
+            var ethUsd =
+              gasEth !== null && gasEth !== undefined && p.ethPriceUsd
+                ? fmtUsd(gasEth * p.ethPriceUsd)
+                : null;
             wallets.push({
               chain: "robinhood",
-              chainLabel: "Robinhood",
+              chainLabel: "Robinhood Chain",
               address: live.walletAddress,
               explorerUrl: blockscoutUrl(live.walletAddress),
               ready: live.ready,
-              gasText:
-                (gasEth !== null && gasEth !== undefined
+              balance:
+                gasEth !== null && gasEth !== undefined
                   ? Number(gasEth).toFixed(5)
-                  : "—") +
-                " ETH gas &middot; " +
-                (live.ready ? "live-ready" : "not live-ready"),
+                  : "—",
+              unit: "ETH",
+              usd: ethUsd,
             });
           }
           var liveSolana = live.solana || {};
@@ -2039,40 +2132,65 @@
                 ? "https://solscan.io/account/" + liveSolana.walletAddress
                 : null,
               ready: liveSolana.ready,
-              gasText:
-                (gasSol !== null && gasSol !== undefined
+              balance:
+                gasSol !== null && gasSol !== undefined
                   ? Number(gasSol).toFixed(4)
-                  : "—") +
-                " SOL gas &middot; " +
-                (liveSolana.ready ? "live-ready" : "not live-ready"),
+                  : "—",
+              unit: "SOL",
+              // No live SOL/USD rate is wired into the status payload today —
+              // shown blank rather than guessed, same "never fabricate a
+              // rate" rule fmtEthWithUsd already follows for ETH.
+              usd: null,
             });
           }
-          els.walletChips.innerHTML = wallets
-            .map(function (w) {
-              return (
-                '<span class="wallet-chip" data-address="' +
-                esc(w.address || "") +
-                '">' +
-                '<span class="chain-label">' +
-                esc(w.chainLabel) +
-                "</span>" +
-                '<a class="addr-link" href="' +
-                (w.explorerUrl || "#") +
-                '" target="_blank" rel="noopener noreferrer" title="' +
-                esc(w.address || "") +
-                '">' +
-                fmtAddr(w.address) +
-                "</a>" +
-                '<button class="copy-wallet-btn" type="button">copy</button>' +
-                "</span>" +
-                '<span class="pill"><span class="dot ' +
-                (w.ready ? "good" : "neutral") +
-                '"></span>' +
-                w.gasText +
-                "</span>"
-              );
-            })
-            .join("");
+          els.walletsCard.hidden = wallets.length === 0;
+          els.walletsCount.textContent = wallets.length;
+          if (!wallets.length) {
+            els.walletsGrid.innerHTML =
+              '<div class="wallets-empty">No wallet configured — the bot is running in PAPER mode with no live wallet attached.</div>';
+          } else {
+            els.walletsGrid.innerHTML = wallets
+              .map(function (w) {
+                return (
+                  '<div class="wallet-card ' +
+                  esc(w.chain) +
+                  '" data-address="' +
+                  esc(w.address || "") +
+                  '">' +
+                  '<div class="wallet-card-head">' +
+                  '<span class="chain-name">' +
+                  esc(w.chainLabel) +
+                  "</span>" +
+                  '<span class="wallet-status"><span class="dot ' +
+                  (w.ready ? "good" : "neutral") +
+                  '"></span>' +
+                  (w.ready ? "live-ready" : "not live-ready") +
+                  "</span>" +
+                  "</div>" +
+                  '<div class="balance-row"><span class="balance">' +
+                  w.balance +
+                  '</span><span class="balance-unit">' +
+                  w.unit +
+                  " gas</span>" +
+                  (w.usd
+                    ? '<span class="balance-usd">&#8776; ' + w.usd + "</span>"
+                    : "") +
+                  "</div>" +
+                  '<div class="wallet-addr-row">' +
+                  '<a class="addr-link" href="' +
+                  (w.explorerUrl || "#") +
+                  '" target="_blank" rel="noopener noreferrer" title="' +
+                  esc(w.address || "") +
+                  '">' +
+                  fmtAddr(w.address) +
+                  "</a>" +
+                  '<button class="copy-wallet-btn" type="button">copy</button>' +
+                  "</div>" +
+                  "</div>"
+                );
+              })
+              .join("");
+          }
 
           renderActivity(data.tokens || []);
           renderNoTradeDiagnostics(data.noTradeDiagnostics || null);
@@ -2631,10 +2749,10 @@
           safeStorage.set("us_api_key", key);
           refreshAll();
         });
-        els.walletChips.addEventListener("click", function (e) {
+        els.walletsGrid.addEventListener("click", function (e) {
           var btn = e.target.closest && e.target.closest(".copy-wallet-btn");
           if (!btn) return;
-          var chip = btn.closest(".wallet-chip");
+          var chip = btn.closest(".wallet-card");
           var addr = chip && chip.getAttribute("data-address");
           if (!addr) return;
           function markCopied() {
