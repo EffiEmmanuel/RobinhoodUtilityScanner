@@ -7,6 +7,7 @@ import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionPro
 import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
 import { isNativeSolQuoted } from "./executionFacade";
 import { summarizeError } from "../util/errors";
+import { withTimeout } from "../util/http";
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
 const PAPER_WALLET_ADDRESS = "paper";
@@ -77,7 +78,13 @@ export async function getEthPriceUsd(): Promise<number | undefined> {
   });
   for (const token of recentTokens) {
     try {
-      const market = await fetchMarketForToken(token.chain, token.address);
+      // Confirmed live 2026-09-16: fetchMarketForToken's own retry/backoff
+      // can take 30s+ per candidate under rate-limiting, and this loop tries
+      // up to ETH_PRICE_CANDIDATE_TOKENS of them sequentially — unbounded,
+      // this hung /trading/status for minutes. Bounding each candidate
+      // individually keeps a single slow one from blocking the rest; a
+      // timeout is treated exactly like any other fetch failure below.
+      const market = await withTimeout(fetchMarketForToken(token.chain, token.address), 3000, "ETH price candidate fetch");
       // dex/client.ts's fetchMarketForToken prefers an ETH-quoted primaryPair
       // when one exists, but this token's only pair(s) could all be quoted in
       // something else (a tokenized stock, a stablecoin) — this guard is what
@@ -121,7 +128,8 @@ export async function getSolPriceUsd(): Promise<number | undefined> {
   });
   for (const token of recentTokens) {
     try {
-      const market = await fetchMarketForToken(token.chain, token.address);
+      // See getEthPriceUsd's identical timeout comment — same fix, same reason.
+      const market = await withTimeout(fetchMarketForToken(token.chain, token.address), 3000, "SOL price candidate fetch");
       const pair = market.primaryPair;
       if (!pair || !isNativeSolQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) continue;
       const rate = pair.priceUsd / pair.priceNative;

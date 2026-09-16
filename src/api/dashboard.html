@@ -1794,40 +1794,6 @@
           var decimals = Math.min(leadingZeros + 4, 18); // ~4 significant digits past the leading zeros
           return sign + "$" + abs.toFixed(decimals);
         }
-        function fmtEth(n) {
-          if (n === null || n === undefined || isNaN(n)) return "&mdash;";
-          return (
-            "ETH " +
-            n.toLocaleString(undefined, {
-              minimumFractionDigits: 4,
-              maximumFractionDigits: 5,
-            })
-          );
-        }
-        // ETH is the volatile native asset here — a bare USD figure implies
-        // more stability/precision than a fluctuating balance actually has.
-        // Shows the real ETH amount first, with the current USD equivalent
-        // (derived from a live on-chain-data rate, not a fixed/stale one) in
-        // brackets — falls back to plain USD if no current rate is available,
-        // never fabricates a rate.
-        function fmtEthWithUsd(usdValue, ethPriceUsd, ethValue) {
-          if (
-            ethPriceUsd === null ||
-            ethPriceUsd === undefined ||
-            ethPriceUsd <= 0
-          )
-            return fmtUsd(usdValue);
-          var eth =
-            ethValue !== undefined && ethValue !== null
-              ? ethValue
-              : usdValue / ethPriceUsd;
-          return (
-            fmtEth(eth) +
-            ' <span style="color:var(--text-muted);font-size:0.75em;">(~' +
-            fmtUsd(usdValue) +
-            ")</span>"
-          );
-        }
         function fmtPercentSpan(n) {
           if (n === null || n === undefined || isNaN(n)) return "&mdash;";
           var cls = n > 0 ? "num-good" : n < 0 ? "num-bad" : "";
@@ -2160,14 +2126,16 @@
             els.cbBanner.hidden = true;
           }
 
-          // portfolio tiles — ETH-primary with a live USD equivalent in
-          // brackets (see fmtEthWithUsd) whenever a current ETH/USD rate is
-          // available; falls back to plain USD otherwise.
+          // portfolio tiles — USD only. This pool is combined across chains
+          // (Robinhood's ETH and Solana's SOL both feed the same cash/equity
+          // figures, see portfolio.ts), so labeling it with either native
+          // asset's unit would misrepresent what's actually held — plain USD
+          // is the only honest unit for a figure that spans two assets.
           var p = s.portfolio || {};
           var tiles = [
             {
               label: "Total Equity",
-              value: fmtEthWithUsd(p.totalEquityUsd, p.ethPriceUsd),
+              value: fmtUsd(p.totalEquityUsd),
             },
             {
               // User directive 2026-09-12: account-health-at-a-glance —
@@ -2184,19 +2152,19 @@
             },
             {
               label: "Cash",
-              value: fmtEthWithUsd(p.cashUsd, p.ethPriceUsd, p.cashEth),
+              value: fmtUsd(p.cashUsd),
             },
             {
               label: "Deployed",
-              value: fmtEthWithUsd(p.deployedUsd, p.ethPriceUsd),
+              value: fmtUsd(p.deployedUsd),
             },
             {
               label: "Available to Deploy",
-              value: fmtEthWithUsd(p.availableToDeployUsd, p.ethPriceUsd),
+              value: fmtUsd(p.availableToDeployUsd),
             },
             {
               label: "Reserve Target",
-              value: fmtEthWithUsd(p.reserveTargetUsd, p.ethPriceUsd),
+              value: fmtUsd(p.reserveTargetUsd),
             },
             {
               label: "Open Positions",
