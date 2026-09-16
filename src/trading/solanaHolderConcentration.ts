@@ -31,10 +31,20 @@ import type { HolderSnapshot } from "./holderConcentration";
  *    count would need a specialized indexer API (e.g. Helius's
  *    getTokenAccounts/DAS), not raw getProgramAccounts — a real follow-up if
  *    this metric turns out to matter, not assumed solvable by "pay for a
- *    better RPC plan." On failure this falls back to counting only the
- *    top-10 largest accounts (from getTokenLargestAccounts, which is
- *    reliable) — an undercount, which again only makes minHolderCount fail
- *    harder, never laxer.
+ *    better RPC plan." On failure this falls back to a count derived from
+ *    getTokenLargestAccounts, which actually returns up to 100 (confirmed
+ *    live — not the 10 an earlier version of this file wrongly assumed, a
+ *    bug that meant holderCount could never exceed 10 and
+ *    tradingConfig.minHolderCountForEntry's default of 15 would have failed
+ *    every single Solana token, forever, regardless of real distribution).
+ *    That fallback count is the raw non-zero-balance count across all ~100,
+ *    NOT narrowed by pool exclusion (see POOL_EXCLUSION_WINDOW below) —
+ *    a live timing test resolving pool ownership for all 100 top accounts
+ *    took 16-28s per check (40 RPC calls, hitting this free-tier RPC's rate
+ *    limit repeatedly) for a metric that only needs "are there at least N
+ *    holders," not an exact count. A handful of pool vaults miscounted as
+ *    "holders" among ~100 doesn't meaningfully change whether that floor is
+ *    cleared, so this trades a small, safe overcount for an 5x cheaper call.
  */
 
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -61,14 +71,38 @@ function getSolanaConnection(): Connection {
 // endpoint: getMultipleAccounts (which both getMultipleParsedAccounts and
 // getMultipleAccountsInfo call under the hood) 413s above a batch of 5 on
 // that plan. Batching at 5 keeps this working on the cheapest tier most
-// providers offer, at the cost of one extra round-trip per 10 top holders —
-// negligible next to the RPC calls this function already makes.
+// providers offer.
 const MAX_ACCOUNTS_PER_BATCH = 5;
+
+// Confirmed live: bounding concurrency (tried 3 and 4) didn't fix the
+// latency — total call COUNT was the actual bottleneck, not burst size.
+// Resolving pool ownership for a 100-account window took 16-28s per check
+// regardless of concurrency setting. Narrowing to POOL_EXCLUSION_WINDOW
+// below (top1Percent/top10Percent only ever need the top 10 anyway, so 20
+// gives ample margin for the realistic 1-4-pools case) cuts this from 40
+// RPC calls to 8. Concurrency stays bounded rather than fully parallel
+// since a plain Promise.all across even the smaller batch count still
+// visibly 429s and retries.
+const BATCH_CONCURRENCY = 4;
+const POOL_EXCLUSION_WINDOW = 20;
 
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
 }
 
 async function bestEffortHolderCount(conn: Connection, mint: PublicKey, fallback: number): Promise<number> {
@@ -79,7 +113,7 @@ async function bestEffortHolderCount(conn: Connection, mint: PublicKey, fallback
     ]);
     return legacy.length + token2022.length;
   } catch (err) {
-    logger.warn({ mint: mint.toBase58(), err: String(err) }, "solana holder count scan unavailable (RPC provider commonly excludes the Token program from secondary indexes) — falling back to top-10-only count");
+    logger.warn({ mint: mint.toBase58(), err: String(err) }, "solana holder count scan unavailable (RPC provider commonly excludes the Token program from secondary indexes) — falling back to the getTokenLargestAccounts-derived count");
     return fallback;
   }
 }
@@ -93,15 +127,25 @@ export async function getSolanaHolderSnapshot(mintAddress: string): Promise<Hold
     const totalSupply = BigInt(supplyResp.value.amount);
     if (totalSupply <= 0n) return undefined;
 
-    const topAccounts = largestResp.value.slice(0, 10);
+    // Everything getTokenLargestAccounts returns — confirmed live this is
+    // 100 (its documented max), not the 10 this file used to slice to. Used
+    // as-is (raw, no pool exclusion) for the holderCount fallback below; only
+    // the narrower POOL_EXCLUSION_WINDOW slice gets the expensive
+    // per-account ownership resolution, since that's the only place it
+    // actually needs to be exact (top1Percent/top10Percent).
+    const topAccounts = largestResp.value;
     if (topAccounts.length === 0) return undefined;
+    const exclusionCandidates = topAccounts.slice(0, POOL_EXCLUSION_WINDOW);
 
-    // Resolve each top account's owning wallet/authority, then check whether
+    // Resolve each candidate's owning wallet/authority, then check whether
     // THAT authority is itself a PDA controlled by a known pool program —
     // a pool's vault token account is "owned" (in the SPL sense) by a
-    // program-derived address, not a human wallet. Batched at
-    // MAX_ACCOUNTS_PER_BATCH to stay within free-tier RPC limits.
-    const parsedBatches = await Promise.all(chunk(topAccounts, MAX_ACCOUNTS_PER_BATCH).map((batch) => conn.getMultipleParsedAccounts(batch.map((a) => a.address))));
+    // program-derived address, not a human wallet. Batched and
+    // concurrency-bounded to stay within free-tier RPC limits (see
+    // MAX_ACCOUNTS_PER_BATCH/BATCH_CONCURRENCY doc comments).
+    const parsedBatches = await mapWithConcurrency(chunk(exclusionCandidates, MAX_ACCOUNTS_PER_BATCH), BATCH_CONCURRENCY, (batch) =>
+      conn.getMultipleParsedAccounts(batch.map((a) => a.address))
+    );
     const parsedAccounts = parsedBatches.flatMap((batch) => batch.value);
     const ownerPubkeys = parsedAccounts.map((acc) => {
       const data = acc?.data;
@@ -109,15 +153,17 @@ export async function getSolanaHolderSnapshot(mintAddress: string): Promise<Hold
       const owner = (data.parsed as { info?: { owner?: string } })?.info?.owner;
       return owner ? new PublicKey(owner) : undefined;
     });
-    const ownerBatches = await Promise.all(
+    const ownerBatches = await mapWithConcurrency(
       chunk(
         ownerPubkeys.map((pk) => pk ?? PublicKey.default),
         MAX_ACCOUNTS_PER_BATCH
-      ).map((batch) => conn.getMultipleAccountsInfo(batch))
+      ),
+      BATCH_CONCURRENCY,
+      (batch) => conn.getMultipleAccountsInfo(batch)
     );
     const ownerAccountInfos = ownerBatches.flat();
 
-    const holders = topAccounts.map((acct, i) => {
+    const holders = exclusionCandidates.map((acct, i) => {
       const ownerProgram = ownerAccountInfos[i]?.owner.toBase58();
       const isPool = ownerProgram !== undefined && KNOWN_POOL_PROGRAM_IDS.has(ownerProgram);
       return { balance: BigInt(acct.amount), isPool };
@@ -129,7 +175,11 @@ export async function getSolanaHolderSnapshot(mintAddress: string): Promise<Hold
 
     const top1 = ranked.slice(0, 1).reduce((sum, h) => sum + h.balance, 0n);
     const top10 = ranked.slice(0, 10).reduce((sum, h) => sum + h.balance, 0n);
-    const holderCount = await bestEffortHolderCount(conn, mint, ranked.length);
+    // Fallback count if getProgramAccounts is unavailable (see module doc
+    // comment on why this is a deliberately cheap approximation, not the
+    // pool-excluded `ranked` list).
+    const rawNonZeroCount = topAccounts.filter((a) => BigInt(a.amount) > 0n).length;
+    const holderCount = await bestEffortHolderCount(conn, mint, rawNonZeroCount);
 
     return {
       totalSupply,
