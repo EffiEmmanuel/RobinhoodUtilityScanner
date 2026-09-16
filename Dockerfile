@@ -9,13 +9,6 @@ RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists
 WORKDIR /app
 COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile
-# chartVisionGate.ts screenshots DexScreener's chart widget with Playwright —
-# node:22-slim has neither the Chromium binary nor the OS libs it needs
-# (fonts, libnss3, libatk, ...); --with-deps installs both via apt. Without
-# this, chromium.launch() throws at runtime and the gate silently fails open
-# on every trailing exit (caught in screenshotChart, logged as a warning) —
-# not unsafe, but a silently inert feature rather than a working one.
-RUN npx playwright install --with-deps chromium
 
 COPY . .
 RUN yarn db:generate && yarn build

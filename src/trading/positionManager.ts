@@ -227,20 +227,18 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // TIME_EXIT are deliberately left ungated (never delay profit-taking or a
   // hold-time exit waiting on a vision call).
   //
-  // Latency tradeoff, measured live 2026-09-16: a real chart screenshot
-  // takes ~9-11s (DexScreener's embed needs that long to paint real OHLC
-  // data — see chartScreenshotSettleMs's doc comment), plus the vision call.
-  // runPositionMonitorTick's loop over open trades is sequential by design
-  // (see its own doc comment), so a tick where THIS trade's trailing exit
-  // fires delays — never skips — every other open trade's check later in
-  // that same tick, and pushes the start of the next tick out by the same
-  // amount. At the position counts a circuit breaker allows (~2 open), this
-  // is a bounded, known cost, not an open-ended one; chartScreenshotTimeoutMs
-  // keeps the worst case (a stuck page load) from being unbounded.
+  // Renders the chart from this trade's own PositionSnapshot history (see
+  // chartVisionGate.ts's doc comment) rather than screenshotting a
+  // third-party page — a DB query + in-process render, not a browser, so the
+  // added latency here is the vision call itself (typically low single-digit
+  // seconds), not the ~9-11s a live DexScreener screenshot measured at.
+  // runPositionMonitorTick's loop over open trades is still sequential by
+  // design (see its own doc comment), so this still delays — never skips —
+  // other open trades' checks later in the same tick; just a much smaller,
+  // bounded delay than the screenshot approach carried.
   if (tradingConfig.chartVisionGateEnabled && decision.type === "TRAILING_EXIT" && !decision.isEmergency) {
     const gate = await evaluateChartVisionGate({
       tradeId: trade.id,
-      pairUrl: pair.url,
       symbol: token.symbol,
       retracePercent: decision.retracePercent ?? 0,
       peakMultiple: decision.peakMultiple ?? 1,

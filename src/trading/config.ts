@@ -131,24 +131,16 @@ export const tradingConfig = {
   // intact uptrend; read the actual chart instead of price % alone.
   chartVisionGateEnabled: bool("CHART_VISION_GATE_ENABLED", true),
   chartVisionModel: str("CHART_VISION_MODEL", "gemini-flash-lite-latest"),
-  // 2026-09-16 manual verification: DexScreener's embed never fires
-  // Playwright's "networkidle" (a persistent websocket/polling connection
-  // keeps it busy), and the chart's actual OHLC data visibly takes several
-  // seconds to arrive after domcontentloaded even once the widget chrome has
-  // rendered — a short networkidle-style wait reliably screenshots an empty
-  // "No data here" placeholder instead of a real chart. Nav uses
-  // domcontentloaded (fast, reliable); chartScreenshotSettleMs below is the
-  // separate fixed wait for the data itself to paint.
-  // Nav-only ceiling (page.goto) — kept tight since domcontentloaded is
-  // normally sub-second; this mostly bounds the worst case of a genuinely
-  // stuck/unreachable page, not the normal path.
-  chartScreenshotTimeoutMs: num("CHART_SCREENSHOT_TIMEOUT_MS", 6000),
-  // Fixed wait for the chart's actual OHLC data to paint after
-  // domcontentloaded — this is the dominant, deterministic cost of a
-  // screenshot (~9-11s typical total including the vision call). See
-  // positionManager.ts's chart-vision-gate call site for why this is safe
-  // to spend given the position-monitor loop is sequential.
-  chartScreenshotSettleMs: num("CHART_SCREENSHOT_SETTLE_MS", 9000),
+  // Rendered from this trade's own PositionSnapshot history (chartVisionGate.ts) —
+  // below this many snapshots there's too little price/volume shape to
+  // classify meaningfully, so the gate fails open instead of rendering a
+  // near-empty chart. A screenshot-of-DexScreener approach was tried first
+  // and dropped: measured live 2026-09-16 at ~9-11s per screenshot (and
+  // sometimes still not loaded by then), and GeckoTerminal's free OHLCV API
+  // (considered as a faster alternative) doesn't index Robinhood Chain at
+  // all. Self-rendering needs no external fetch and is exactly as fresh as
+  // the trigger itself.
+  chartRenderMinSnapshots: num("CHART_RENDER_MIN_SNAPSHOTS", 5),
   // Only defer the exit when the model is this sure it's a retracement, not a
   // reversal — anything less confident falls through to today's behavior.
   chartVisionMinConfidenceToDefer: num("CHART_VISION_MIN_CONFIDENCE_TO_DEFER", 0.65),

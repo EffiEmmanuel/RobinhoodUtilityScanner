@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { tradingConfig } from "./config";
-import { decideGateOutcome } from "./chartVisionGate";
+import { decideGateOutcome, buildChartSvg, type ChartPoint } from "./chartVisionGate";
 import type { ChartVisionVerdict } from "../ai/schemas";
 
 function verdict(overrides: Partial<ChartVisionVerdict> = {}): ChartVisionVerdict {
@@ -41,6 +41,32 @@ describe("decideGateOutcome", () => {
   it("still allows a defer one tick below the cap", () => {
     const result = decideGateOutcome(verdict({ confidence: 0.99 }), tradingConfig.chartVisionMaxConsecutiveDefers - 1);
     expect(result.defer).toBe(true);
+  });
+
+  describe("buildChartSvg", () => {
+    // Rendered from this trade's own PositionSnapshot history instead of a
+    // DexScreener screenshot (measured live 2026-09-16 at ~9-11s and
+    // sometimes still incomplete by then) — these just check the pure
+    // render step produces sane, valid SVG, not that sharp rasterizes it
+    // correctly (verified manually against a real Gemini vision call).
+    function points(prices: number[]): ChartPoint[] {
+      const now = Date.now();
+      return prices.map((priceUsd, i) => ({ capturedAt: new Date(now - (prices.length - i) * 60_000), priceUsd, volume5m: 1000 }));
+    }
+
+    it("produces a well-formed SVG document", () => {
+      const svg = buildChartSvg(points([1, 1.2, 1.5, 1.3]));
+      expect(svg).toContain("<svg");
+      expect(svg).toContain("</svg>");
+    });
+
+    it("does not throw on a single data point (avoids a division by zero)", () => {
+      expect(() => buildChartSvg(points([1.5]))).not.toThrow();
+    });
+
+    it("does not throw when every price is identical (zero range)", () => {
+      expect(() => buildChartSvg(points([1, 1, 1, 1]))).not.toThrow();
+    });
   });
 
   describe("config sensitivity", () => {
