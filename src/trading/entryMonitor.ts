@@ -35,6 +35,7 @@ import {
   type ConvictionResult,
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
+import { getCohortSizeMultiplier } from "./cohortStats";
 import { getPublicClient } from "./live/wallet";
 import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
 import { isPoolDiscoveryInconclusiveError } from "./live/poolDiscovery";
@@ -318,7 +319,7 @@ function serializeBuyDecision<T>(fn: () => Promise<T>): Promise<T> {
 async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
   const plan = await db.tradePlan.findUniqueOrThrow({
     where: { id: entry.tradePlanId },
-    include: { candidate: { include: { token: true } } },
+    include: { candidate: { include: { token: true, narrativeSnapshot: { select: { metaSlug: true } } } } },
   });
   const candidate = plan.candidate;
 
@@ -476,14 +477,13 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       }
     }
 
-    const needsRecentRange =
-      !manualEntryOverride &&
-      (conservative ||
-        shouldApplyEntryChaseGuard({
-          action: plan.action,
-          conservative,
-        }));
-    const recentRange = needsRecentRange
+    // Fetched for every non-manual entry now, not only conservative-mode or
+    // chase-guard triggers — evaluateHighConvictionSetup below also feeds the
+    // high-conviction sizing tier (calculatePositionSize) outside conservative
+    // mode, so it needs recentRange available whenever a real entry decision
+    // is being made. Cheap, indexed, single-token query — not the hot
+    // exit-monitoring loop.
+    const recentRange = !manualEntryOverride
       ? await getRecentMcapRange(candidate.tokenId, tradingConfig.conservativeRecentWindowMinutes, mcap)
       : undefined;
 
@@ -533,29 +533,38 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       return;
     }
 
-    // Conservative mode: a loss breaker tripped, so this entry only goes ahead
-    // on a high-conviction setup on top of the chase guard above.
-    if (!manualEntryOverride && conservative) {
-      const conviction = evaluateHighConvictionSetup({
-        tokenAgeMinutes: estimateTokenAgeMinutes(candidate.token.firstSeenAt, pair.pairCreatedAt),
-        liquidityUsd: pair.liquidityUsd,
-        buys1h: pair.buys1h,
-        sells1h: pair.sells1h,
-        volume1hUsd: pair.volume1h,
-        priceChange5mPercent: pair.priceChange5m,
-        priceChange1hPercent: pair.priceChange1h,
-        recent: recentRange,
-        marketRegime: planData.analysis?.marketRegime,
-        planRiskScore: plan.riskScore,
-      });
-      if (!conviction.passed) {
-        await deferForConviction(entry, candidate.id, conviction, conservative);
-        return;
-      }
+    // Computed for every non-manual entry — gates entry outright in
+    // conservative mode (a loss breaker tripped, so only a high-conviction
+    // setup goes ahead on top of the chase guard above), and separately feeds
+    // calculatePositionSize's high-conviction sizing tier in every mode (a
+    // trade the system is this sure about shouldn't be capped the same as a
+    // probe).
+    const conviction: ConvictionResult | undefined = manualEntryOverride
+      ? undefined
+      : evaluateHighConvictionSetup({
+          tokenAgeMinutes: estimateTokenAgeMinutes(candidate.token.firstSeenAt, pair.pairCreatedAt),
+          liquidityUsd: pair.liquidityUsd,
+          buys1h: pair.buys1h,
+          sells1h: pair.sells1h,
+          volume1hUsd: pair.volume1h,
+          priceChange5mPercent: pair.priceChange5m,
+          priceChange1hPercent: pair.priceChange1h,
+          recent: recentRange,
+          marketRegime: planData.analysis?.marketRegime,
+          planRiskScore: plan.riskScore,
+        });
+    if (!manualEntryOverride && conservative && conviction && !conviction.passed) {
+      await deferForConviction(entry, candidate.id, conviction, conservative);
+      return;
     }
 
     const riskBucket: RiskBucket = planData.freshEval?.riskBucket ?? "MEDIUM";
     const strategy = await getActiveStrategyVersion();
+    const cohortSizeMultiplier = await getCohortSizeMultiplier({
+      tradeLane,
+      qualificationPath: candidate.qualificationPath,
+      metaSlug: candidate.narrativeSnapshot?.metaSlug,
+    });
     const sizing = calculatePositionSize({
       portfolio,
       sizingRules: strategy.sizingRules as unknown as SizingRules,
@@ -566,6 +575,8 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       entryRiskScore: plan.riskScore,
       currentMcapUsd: mcap,
       tradeLane,
+      highConviction: conviction?.passed ?? false,
+      cohortSizeMultiplier,
     });
 
     if (!sizing.approved) {
@@ -584,12 +595,11 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // floor — never sized below what's worth paying gas for.
     const sizeFloorUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
     let positionSizeUsd = sizing.positionSizeUsd;
-    const tacticalProbeCapUsd =
-      tradeLane === "MOMENTUM_TACTICAL"
-        ? tradingConfig.tacticalLiveMaxPositionUsd
-        : tradeLane === "NARRATIVE_TACTICAL"
-          ? tradingConfig.narrativeLiveMaxPositionUsd
-          : 0;
+    // sizing.appliedProbeCapUsd already reflects whichever tier fired (base
+    // probe or high-conviction) — deriving the cap again here from config
+    // would drift out of sync with calculatePositionSize's own tier choice
+    // the moment a high-conviction trade sizes above the base $2.50 probe.
+    const tacticalProbeCapUsd = sizing.appliedProbeCapUsd ?? 0;
     const usesTacticalProbeLimits =
       tradingConfig.mode === "LIVE" &&
       tacticalProbeCapUsd > 0 &&

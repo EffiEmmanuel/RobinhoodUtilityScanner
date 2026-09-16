@@ -14,10 +14,15 @@ import { ensurePaperWalletSeeded, recordPortfolioSnapshot, checkCircuitBreakers 
 import { checkForCircuitBreakerTransition } from "./circuitBreakerAlerts";
 import { getActiveStrategyVersion } from "./strategy";
 import { checkPortfolioMilestones } from "./milestones";
+import { rebuildCohortStats } from "./cohortStats";
 
 const CANDIDATE_GENERATION_INTERVAL_SECONDS = 30;
 const OUTCOME_POLL_INTERVAL_SECONDS = 300; // 5 min — this is 15m/1h/6h/24h/48h bucketed data, no need to hammer it
 const MILESTONE_POLL_INTERVAL_SECONDS = 60;
+// Cohort hit-rates change slowly (they're built from 15m-48h outcome
+// buckets) — hourly keeps calculatePositionSize's point-lookup fresh without
+// re-aggregating on anything close to the hot path.
+const COHORT_STATS_REBUILD_INTERVAL_SECONDS = 3600;
 // checkCircuitBreakers() is already called from several other places
 // (entryMonitor.ts only once a pending entry is actually in-zone, the
 // dashboard's /trading/status only while someone has it open) — neither is
@@ -214,6 +219,17 @@ async function milestoneLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
+async function cohortStatsLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      await rebuildCohortStats();
+    } catch (err) {
+      logger.error({ err: String(err) }, "cohort stats rebuild failed");
+    }
+    await sleep(COHORT_STATS_REBUILD_INTERVAL_SECONDS * 1000);
+  }
+}
+
 export async function startTradingOrchestrator(): Promise<() => void> {
   if (tradingConfig.mode === "DISABLED") {
     logger.info("trading extension is DISABLED (TRADING_MODE=DISABLED) — not starting any trading loops");
@@ -242,6 +258,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     outcomePollLoop(signal),
     circuitBreakerAlertLoop(signal),
     milestoneLoop(signal),
+    cohortStatsLoop(signal),
   ];
   Promise.allSettled(loops);
 

@@ -96,6 +96,11 @@ export const tradingConfig = {
   // utility/honeypot gates.
   tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.2),
   tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 2.5),
+  // Second, higher ceiling for candidates that clear evaluateHighConvictionSetup
+  // (conservativeMode.ts) — already computed pre-entry, so this costs nothing
+  // extra. Still a hardcoded ceiling, not an unbounded "size by AI confidence"
+  // formula: the probe-tier cap above stays the default for everything else.
+  tacticalLiveMaxPositionUsdHighConviction: num("TACTICAL_LIVE_MAX_POSITION_USD_HIGH_CONVICTION", 10),
   narrativeTradingEnabled: bool("NARRATIVE_TRADING_ENABLED", true),
   narrativePollIntervalSeconds: num("NARRATIVE_POLL_INTERVAL_SECONDS", 180),
   narrativeMaxMetasPerPoll: num("NARRATIVE_MAX_METAS_PER_POLL", 8),
@@ -112,6 +117,44 @@ export const tradingConfig = {
   narrativeMinTokenCount: num("NARRATIVE_MIN_TOKEN_COUNT", 3),
   narrativeLaneSizeMultiplier: num("NARRATIVE_LANE_SIZE_MULTIPLIER", 0.15),
   narrativeLiveMaxPositionUsd: num("NARRATIVE_LIVE_MAX_POSITION_USD", 2.5),
+  // See tacticalLiveMaxPositionUsdHighConviction — same idea for the narrative lane.
+  narrativeLiveMaxPositionUsdHighConviction: num("NARRATIVE_LIVE_MAX_POSITION_USD_HIGH_CONVICTION", 10),
+  // Bounded nudge applied by the CohortStats "similar past projects" lookup in
+  // calculatePositionSize — never enough on its own to cross a tier ceiling.
+  cohortSizeMultiplierMax: num("COHORT_SIZE_MULTIPLIER_MAX", 1.25),
+  cohortSizeMultiplierMin: num("COHORT_SIZE_MULTIPLIER_MIN", 0.75),
+  cohortSizeMultiplierMinSampleSize: num("COHORT_SIZE_MULTIPLIER_MIN_SAMPLE_SIZE", 20),
+
+  // Chart-vision gate on TRAILING_EXIT only (positionManager.ts) — never on
+  // RISK_EXIT/INVALIDATION_EXIT, which return before this gate ever runs.
+  // User directive 2026-09-16: don't panic-sell a retracement inside an
+  // intact uptrend; read the actual chart instead of price % alone.
+  chartVisionGateEnabled: bool("CHART_VISION_GATE_ENABLED", true),
+  chartVisionModel: str("CHART_VISION_MODEL", "gemini-flash-lite-latest"),
+  // 2026-09-16 manual verification: DexScreener's embed never fires
+  // Playwright's "networkidle" (a persistent websocket/polling connection
+  // keeps it busy), and the chart's actual OHLC data visibly takes several
+  // seconds to arrive after domcontentloaded even once the widget chrome has
+  // rendered — a short networkidle-style wait reliably screenshots an empty
+  // "No data here" placeholder instead of a real chart. Nav uses
+  // domcontentloaded (fast, reliable); chartScreenshotSettleMs below is the
+  // separate fixed wait for the data itself to paint.
+  // Nav-only ceiling (page.goto) — kept tight since domcontentloaded is
+  // normally sub-second; this mostly bounds the worst case of a genuinely
+  // stuck/unreachable page, not the normal path.
+  chartScreenshotTimeoutMs: num("CHART_SCREENSHOT_TIMEOUT_MS", 6000),
+  // Fixed wait for the chart's actual OHLC data to paint after
+  // domcontentloaded — this is the dominant, deterministic cost of a
+  // screenshot (~9-11s typical total including the vision call). See
+  // positionManager.ts's chart-vision-gate call site for why this is safe
+  // to spend given the position-monitor loop is sequential.
+  chartScreenshotSettleMs: num("CHART_SCREENSHOT_SETTLE_MS", 9000),
+  // Only defer the exit when the model is this sure it's a retracement, not a
+  // reversal — anything less confident falls through to today's behavior.
+  chartVisionMinConfidenceToDefer: num("CHART_VISION_MIN_CONFIDENCE_TO_DEFER", 0.65),
+  // Caps how many consecutive ticks a single trade's trailing exit can be
+  // deferred — a wrong read can delay an exit, never suppress it indefinitely.
+  chartVisionMaxConsecutiveDefers: num("CHART_VISION_MAX_CONSECUTIVE_DEFERS", 2),
   narrativeMaxLossPercent: num("NARRATIVE_MAX_LOSS_PERCENT", 10),
   narrativeCatastrophicLossPercent: num("NARRATIVE_CATASTROPHIC_LOSS_PERCENT", 22),
   narrativeTrailingActivationMultiple: num("NARRATIVE_TRAILING_ACTIVATION_MULTIPLE", 1.15),

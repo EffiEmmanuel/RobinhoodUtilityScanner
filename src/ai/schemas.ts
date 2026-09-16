@@ -132,6 +132,29 @@ export const POSITION_STRATEGY_JSON_SCHEMA = {
   required: ["action", "reasoning", "confidence"],
 } as const;
 
+// Chart-vision gate on the trailing-stop exit (positionManager.ts /
+// chartVisionGate.ts) — reads the actual candlestick structure instead of
+// trusting a raw price-drop % alone. Deliberately a binary verdict, not a
+// free HOLD/SELL recommendation: the gate only ever uses this to defer a
+// trailing exit by a bounded number of ticks, never to cancel a hard
+// stop-loss/catastrophic exit, which never reaches this code path at all.
+export const ChartVisionVerdictSchema = z.object({
+  verdict: z.enum(["RETRACEMENT_IN_UPTREND", "TREND_REVERSAL"]),
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string(),
+});
+export type ChartVisionVerdict = z.infer<typeof ChartVisionVerdictSchema>;
+
+export const CHART_VISION_VERDICT_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["RETRACEMENT_IN_UPTREND", "TREND_REVERSAL"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    reasoning: { type: "string" },
+  },
+  required: ["verdict", "confidence", "reasoning"],
+} as const;
+
 export const RESEARCH_SYNTHESIS_JSON_SCHEMA = {
   type: "object",
   properties: {

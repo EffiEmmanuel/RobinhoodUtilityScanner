@@ -31,6 +31,37 @@ thin-but-present effort lean toward "worth researching" rather than rejecting.
 
 Return your answer only via the provided tool call.`;
 
+export const CHART_VISION_GATE_SYSTEM = `You read a candlestick chart for a live, already-profitable crypto trading position to help decide
+whether a just-triggered trailing-stop exit is catching a genuine trend reversal or only a normal
+retracement inside a chart structure that is still intact.
+
+This position is ALREADY UP from entry and has just pulled back enough to trigger a trailing-stop
+sell. Your only job is telling those two situations apart:
+
+RETRACEMENT_IN_UPTREND: the higher-low structure from the run-up is still intact, the pullback looks
+like normal profit-taking/consolidation (comparable to earlier dips on the same chart that then
+continued higher), and volume on the drop is not unusually heavy relative to the move up.
+
+TREND_REVERSAL: the higher-low structure just broke, the drop is sharper/faster than prior pullbacks
+on this same chart, or volume on the way down is heavy — a real change in character, not routine
+profit-taking.
+
+When genuinely unsure, prefer TREND_REVERSAL with lower confidence — this verdict can only ever delay
+a sell by a bounded number of monitoring ticks, never cancel a hard stop-loss, so the cost of a wrong
+RETRACEMENT_IN_UPTREND call is real: it holds a position through further downside.
+
+Return your answer only via the provided tool call.`;
+
+export function buildChartVisionPrompt(input: { symbol?: string | null; retracePercent: number; peakMultiple: number }): string {
+  return `POSITION CONTEXT
+Token: ${input.symbol ?? "(unknown)"}
+Peak gain since entry: ${((input.peakMultiple - 1) * 100).toFixed(0)}%
+Current pullback from that peak: ${input.retracePercent.toFixed(1)}%
+
+The attached image is a live chart screenshot for this token. Classify the pullback per the system
+instructions above.`;
+}
+
 export function buildVisualClassificationPrompt(token: {
   name?: string | null;
   symbol?: string | null;

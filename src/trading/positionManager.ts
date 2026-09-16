@@ -17,6 +17,7 @@ import { recordSellFailure, recordSellSuccess, getSellFailureMinutes } from "./e
 import { normalizeTradeLane } from "./tradeLane";
 import { recordExecutionQuality } from "./executionQuality";
 import type { PositionStrategyDecision } from "../ai/schemas";
+import { evaluateChartVisionGate, resetChartVisionDeferStreak } from "./chartVisionGate";
 
 // When an exit first started being refused by the slippage guard, per trade —
 // drives tradingConfig.stuckExitEscalateAfterMinutes. In memory on purpose:
@@ -50,6 +51,10 @@ interface ExitDecision {
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
   isEmergency: boolean;
+  // Set only for TRAILING_EXIT — feeds the chart-vision gate in
+  // monitorOneTrade so it doesn't have to recompute peak/retrace itself.
+  peakMultiple?: number;
+  retracePercent?: number;
 }
 
 /** Single sequential loop over all open trades — deliberately not parallelized
@@ -212,6 +217,46 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   if (!pair) {
     logger.warn({ tradeId: trade.id }, "exit triggered but no market data to fill against — will retry next tick");
     return;
+  }
+
+  // Chart-vision gate — only the soft, retracement-driven trailing exit is
+  // eligible. RISK_EXIT/INVALIDATION_EXIT (the hard stop-loss/catastrophic
+  // paths) are returned by evaluateExits before the TRAILING_EXIT branch ever
+  // runs, so a decision only reaches this check once those have already NOT
+  // fired this tick — structurally unreachable by this gate. PROFIT_TARGET/
+  // TIME_EXIT are deliberately left ungated (never delay profit-taking or a
+  // hold-time exit waiting on a vision call).
+  //
+  // Latency tradeoff, measured live 2026-09-16: a real chart screenshot
+  // takes ~9-11s (DexScreener's embed needs that long to paint real OHLC
+  // data — see chartScreenshotSettleMs's doc comment), plus the vision call.
+  // runPositionMonitorTick's loop over open trades is sequential by design
+  // (see its own doc comment), so a tick where THIS trade's trailing exit
+  // fires delays — never skips — every other open trade's check later in
+  // that same tick, and pushes the start of the next tick out by the same
+  // amount. At the position counts a circuit breaker allows (~2 open), this
+  // is a bounded, known cost, not an open-ended one; chartScreenshotTimeoutMs
+  // keeps the worst case (a stuck page load) from being unbounded.
+  if (tradingConfig.chartVisionGateEnabled && decision.type === "TRAILING_EXIT" && !decision.isEmergency) {
+    const gate = await evaluateChartVisionGate({
+      tradeId: trade.id,
+      pairUrl: pair.url,
+      symbol: token.symbol,
+      retracePercent: decision.retracePercent ?? 0,
+      peakMultiple: decision.peakMultiple ?? 1,
+    }).catch((err) => {
+      logger.warn({ tradeId: trade.id, err: String(err) }, "chart vision gate threw unexpectedly — trailing exit proceeds unchanged");
+      return { defer: false, reason: "gate threw" } as const;
+    });
+    if (gate.defer) {
+      await db.exitSignal.create({
+        data: { tradeId: trade.id, type: "TRAILING_EXIT", severity: "INFO", triggered: false, evidence: { vetoedBy: "chartVisionGate", ...gate } },
+      });
+      logger.info({ tradeId: trade.id, reason: gate.reason }, "trailing exit deferred by chart vision gate");
+      return;
+    }
+  } else {
+    resetChartVisionDeferStreak(trade.id);
   }
 
   await executeSell(trade, token.address, remainingTokens, decision, pair);
@@ -467,6 +512,8 @@ export function evaluateExits(ctx: {
           sellPercentOfRemaining: 100,
           reason: `retraced ${retracePercent.toFixed(1)}% from peak ${peakMultiple.toFixed(2)}x (trail ${exitRules.trailingPercent}%)`,
           isEmergency: false,
+          peakMultiple,
+          retracePercent,
         },
       });
     }

@@ -486,6 +486,7 @@ model TradeCandidate {
   @@index([createdAt])
   @@index([status, createdAt])
   @@index([narrativeSnapshotId])
+  @@index([tradeLane, qualificationPath])
 }
 
 model TradePlan {
@@ -828,6 +829,32 @@ model CandidateOutcome {
   updatedAt DateTime @updatedAt
 
   @@index([updatedAt])
+}
+
+// Precomputed, periodically-refreshed "how did similar past projects do"
+// hit-rate per (tradeLane, qualificationPath, metaSlug) cohort — read by
+// calculatePositionSize (riskEngine.ts) as a cheap indexed point-lookup, not
+// a live join, so sizing a new candidate never waits on an aggregation query.
+// Built from feasibleHit500x/feasibleHit1000x on CandidateOutcome only — raw
+// maxMultiple is dominated by $0-liquidity dead wicks that were never
+// actually exitable by this bot (2026-09-16 analysis, see rh-intelligence-c0).
+model CohortStats {
+  id String @id @default(cuid())
+
+  tradeLane         String
+  qualificationPath String
+  // NarrativeSnapshot.metaSlug for narrative-lane cohorts; "" for lanes with
+  // no narrative tag, so the unique key stays a plain 3-tuple.
+  metaSlug String @default("")
+
+  sampleSize          Int
+  feasibleHit500xRate  Float // fraction of the cohort that fed a feasible 5x
+  feasibleHit1000xRate Float // fraction of the cohort that fed a feasible 10x
+
+  computedAt DateTime @default(now())
+
+  @@unique([tradeLane, qualificationPath, metaSlug])
+  @@index([computedAt])
 }
 
 // Every trade/plan/decision references a strategyVersionId — rules never

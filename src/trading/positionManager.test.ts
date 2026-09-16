@@ -91,4 +91,52 @@ describe("evaluateExits", () => {
 
     expect(result).toBeNull();
   });
+
+  it("carries peakMultiple/retracePercent on a TRAILING_EXIT decision, for the chart-vision gate in monitorOneTrade to read", () => {
+    const result = evaluateExits({
+      trade: trade({ mfePercent: 100, openedAt: new Date(Date.now() - 5 * 60_000) }), // peak 2x
+      plan: null,
+      exitRules,
+      currentMcap: 150_000,
+      currentMultiple: 1.5, // retraced 25% from the 2x peak, >= the 20% trail
+      unrealizedPnlPercent: 50,
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.55,
+      totalTxns5m: 8,
+      sellQuoteAvailable: true,
+      profitStepsTaken: 0,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+    });
+
+    expect(result).toMatchObject({ type: "TRAILING_EXIT", peakMultiple: 2 });
+    expect(result?.retracePercent).toBeCloseTo(25, 5);
+  });
+
+  it("returns RISK_EXIT before ever reaching the trailing-exit branch, structurally unreachable by the chart-vision gate", () => {
+    // Same peak/retrace shape as the TRAILING_EXIT case above, but also
+    // catastrophically underwater — validatePosition's CRITICAL check must
+    // win, and the decision it returns must carry no peakMultiple/
+    // retracePercent (those are only ever set in the TRAILING_EXIT branch),
+    // which is what lets monitorOneTrade gate strictly on decision.type.
+    const result = evaluateExits({
+      trade: trade({ mfePercent: 100, openedAt: new Date(Date.now() - 5 * 60_000) }),
+      plan: null,
+      exitRules,
+      currentMcap: 50_000,
+      currentMultiple: 0.5,
+      unrealizedPnlPercent: -50, // beyond catastrophicLossPercent (40)
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.55,
+      totalTxns5m: 8,
+      sellQuoteAvailable: true,
+      profitStepsTaken: 0,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+    });
+
+    expect(result).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+    expect(result?.peakMultiple).toBeUndefined();
+    expect(result?.retracePercent).toBeUndefined();
+  });
 });

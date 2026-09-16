@@ -137,12 +137,27 @@ export interface PositionSizingInput {
   // below. Undefined gets no boost (1x), never a penalty.
   currentMcapUsd?: number;
   tradeLane?: TradeLane;
+  // Whether this candidate cleared evaluateHighConvictionSetup
+  // (conservativeMode.ts) — already computed by the caller pre-entry, so
+  // checking it here costs nothing extra. Only changes the LIVE
+  // tactical/narrative probe ceiling below; never affects VERIFIED_PROJECT
+  // sizing, which was never flat-capped in the first place.
+  highConviction?: boolean;
+  // Bounded "how did similar past projects do" nudge from cohortStats.ts —
+  // 1 means no data/effect. Defaults to 1 so every existing caller/test that
+  // doesn't pass it keeps today's behavior unchanged.
+  cohortSizeMultiplier?: number;
 }
 
 export interface PositionSizingResult {
   approved: boolean;
   positionSizeUsd: number;
   reasons: string[];
+  // Whichever LIVE tactical/narrative probe ceiling actually applied (base or
+  // high-conviction), so callers can key slippage/impact tolerance off it
+  // instead of re-deriving the tier themselves. Undefined outside LIVE
+  // tactical/narrative lanes.
+  appliedProbeCapUsd?: number;
 }
 
 function lerp(min: number, max: number, t: number): number {
@@ -201,7 +216,12 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
         ? tradingConfig.tacticalLaneSizeMultiplier
         : 1;
 
-  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult * laneMult;
+  // Cohort multiplier folds in right alongside the other multipliers, before
+  // any hard cap — small and bounded (cohortSizeMultiplierMin/Max), never
+  // itself the reason a trade crosses a tier ceiling below.
+  const cohortMult = input.cohortSizeMultiplier ?? 1;
+
+  let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult * laneMult * cohortMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
   const maxBySinglePositionCap = portfolio.totalEquityUsd * (tradingConfig.maxSinglePositionPercent / 100);
@@ -213,23 +233,29 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
     positionSizeUsd = portfolio.availableToDeployUsd;
     reasons.push("capped at remaining deployable capital");
   }
-  if (
-    tradingConfig.mode === "LIVE" &&
-    input.tradeLane === "MOMENTUM_TACTICAL" &&
-    tradingConfig.tacticalLiveMaxPositionUsd > 0 &&
-    positionSizeUsd > tradingConfig.tacticalLiveMaxPositionUsd
-  ) {
-    positionSizeUsd = tradingConfig.tacticalLiveMaxPositionUsd;
-    reasons.push(`capped tactical LIVE probe at $${tradingConfig.tacticalLiveMaxPositionUsd.toFixed(2)} until this lane proves positive expectancy`);
+
+  let appliedProbeCapUsd: number | undefined;
+  if (tradingConfig.mode === "LIVE" && input.tradeLane === "MOMENTUM_TACTICAL" && tradingConfig.tacticalLiveMaxPositionUsd > 0) {
+    appliedProbeCapUsd = input.highConviction
+      ? tradingConfig.tacticalLiveMaxPositionUsdHighConviction
+      : tradingConfig.tacticalLiveMaxPositionUsd;
+    if (positionSizeUsd > appliedProbeCapUsd) {
+      positionSizeUsd = appliedProbeCapUsd;
+      reasons.push(
+        `capped tactical LIVE probe at $${appliedProbeCapUsd.toFixed(2)}${input.highConviction ? " (high-conviction tier)" : " until this lane proves positive expectancy"}`
+      );
+    }
   }
-  if (
-    tradingConfig.mode === "LIVE" &&
-    input.tradeLane === "NARRATIVE_TACTICAL" &&
-    tradingConfig.narrativeLiveMaxPositionUsd > 0 &&
-    positionSizeUsd > tradingConfig.narrativeLiveMaxPositionUsd
-  ) {
-    positionSizeUsd = tradingConfig.narrativeLiveMaxPositionUsd;
-    reasons.push(`capped narrative LIVE probe at $${tradingConfig.narrativeLiveMaxPositionUsd.toFixed(2)} until this lane proves positive expectancy`);
+  if (tradingConfig.mode === "LIVE" && input.tradeLane === "NARRATIVE_TACTICAL" && tradingConfig.narrativeLiveMaxPositionUsd > 0) {
+    appliedProbeCapUsd = input.highConviction
+      ? tradingConfig.narrativeLiveMaxPositionUsdHighConviction
+      : tradingConfig.narrativeLiveMaxPositionUsd;
+    if (positionSizeUsd > appliedProbeCapUsd) {
+      positionSizeUsd = appliedProbeCapUsd;
+      reasons.push(
+        `capped narrative LIVE probe at $${appliedProbeCapUsd.toFixed(2)}${input.highConviction ? " (high-conviction tier)" : " until this lane proves positive expectancy"}`
+      );
+    }
   }
 
   // Small-account gas check (§23). Below this size, gas alone exceeds
@@ -271,9 +297,9 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   }
 
   reasons.push(
-    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x mcap=${marketCapMult.toFixed(2)} x lane=${laneMult.toFixed(2)}`
+    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x mcap=${marketCapMult.toFixed(2)} x lane=${laneMult.toFixed(2)} x cohort=${cohortMult.toFixed(2)}`
   );
-  return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons };
+  return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons, appliedProbeCapUsd };
 }
 
 // ---------------------------------------------------------------------------

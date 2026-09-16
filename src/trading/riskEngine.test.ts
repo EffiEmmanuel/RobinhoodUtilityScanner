@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
@@ -246,6 +246,77 @@ describe("calculatePositionSize", () => {
       liquidityUsd: 100_000,
     });
     expect(result.approved).toBe(false);
+  });
+
+  describe("LIVE tactical/narrative probe ceiling tiers", () => {
+    // tradingConfig.mode is normally fixed at module load from TRADING_MODE
+    // (default SHADOW) — mutated directly here (and restored) since these
+    // tiers only apply in LIVE mode, matching how calculatePositionSize
+    // itself reads tradingConfig.mode live rather than via a passed-in flag.
+    const originalMode = tradingConfig.mode;
+    afterEach(() => {
+      tradingConfig.mode = originalMode;
+    });
+
+    const richBase = {
+      portfolio: portfolio({ availableToDeployUsd: 100_000, totalEquityUsd: 100_000 }),
+      sizingRules: { ...sizingRules, baseAllocationPercent: 90 },
+      qualityScore: 100,
+      confidence: 100,
+      riskBucket: "LOW" as const,
+      liquidityUsd: 1_000_000,
+      tradeLane: "MOMENTUM_TACTICAL" as const,
+    };
+
+    it("caps a non-high-conviction LIVE tactical trade at the base probe ceiling", () => {
+      tradingConfig.mode = "LIVE";
+      const result = calculatePositionSize({ ...richBase, highConviction: false });
+      expect(result.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(result.appliedProbeCapUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsd);
+    });
+
+    it("raises the ceiling for a high-conviction LIVE tactical trade", () => {
+      tradingConfig.mode = "LIVE";
+      const result = calculatePositionSize({ ...richBase, highConviction: true });
+      expect(result.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
+      expect(result.appliedProbeCapUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
+      expect(result.positionSizeUsd).toBeGreaterThan(tradingConfig.tacticalLiveMaxPositionUsd);
+    });
+
+    it("does not apply the LIVE probe ceiling outside LIVE mode", () => {
+      tradingConfig.mode = "SHADOW";
+      const result = calculatePositionSize({ ...richBase, highConviction: false });
+      expect(result.positionSizeUsd).toBeGreaterThan(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(result.appliedProbeCapUsd).toBeUndefined();
+    });
+
+    it("bounds the cohort multiplier's effect and never lets it breach the tier ceiling", () => {
+      tradingConfig.mode = "LIVE";
+      const withoutCohortData = calculatePositionSize({ ...richBase, highConviction: true, cohortSizeMultiplier: 1 });
+      const withStrongCohort = calculatePositionSize({ ...richBase, highConviction: true, cohortSizeMultiplier: tradingConfig.cohortSizeMultiplierMax });
+      // Both still clamp at the same high-conviction ceiling — the cohort
+      // multiplier moves the pre-cap formula, not the cap itself.
+      expect(withoutCohortData.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
+      expect(withStrongCohort.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
+    });
+
+    it("a weak cohort multiplier sizes smaller than a neutral one, still within the same tier", () => {
+      tradingConfig.mode = "LIVE";
+      // Tuned so the pre-cap formula lands well under both the $2.50 base
+      // probe ceiling and the $1 gas-viability floor's raise-up, so the
+      // cohort multiplier's effect is actually visible instead of being
+      // swallowed by either clamp.
+      const leanBase = {
+        ...richBase,
+        portfolio: portfolio({ availableToDeployUsd: 100, totalEquityUsd: 100 }),
+        sizingRules: { ...sizingRules, baseAllocationPercent: 4.45 },
+      };
+      const neutral = calculatePositionSize({ ...leanBase, highConviction: false, cohortSizeMultiplier: 1 });
+      const weakCohort = calculatePositionSize({ ...leanBase, highConviction: false, cohortSizeMultiplier: tradingConfig.cohortSizeMultiplierMin });
+      expect(neutral.positionSizeUsd).toBeGreaterThan(1);
+      expect(neutral.positionSizeUsd).toBeLessThan(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(weakCohort.positionSizeUsd).toBeLessThan(neutral.positionSizeUsd);
+    });
   });
 });
 
