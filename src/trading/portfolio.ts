@@ -5,9 +5,11 @@ import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
-import { isNativeSolQuoted } from "./executionFacade";
+import { getJupiterQuote, SOL_MINT } from "./live/solana/jupiterClient";
 import { summarizeError } from "../util/errors";
 import { withTimeout } from "../util/http";
+
+const LAMPORTS_PER_SOL = 1_000_000_000;
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
 const PAPER_WALLET_ADDRESS = "paper";
@@ -111,38 +113,46 @@ export async function getEthPriceUsd(): Promise<number | undefined> {
   return undefined;
 }
 
-const SOL_PRICE_CANDIDATE_TOKENS = 10;
 const SOL_PRICE_CACHE_MAX_AGE_MS = 30 * 60_000;
 let cachedSolPriceUsd: { rate: number; at: number } | undefined;
 
+// USDC on Solana — a fixed, always-liquid quote target, not derived from
+// whatever tokens happen to be recently active.
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+// 1 SOL, in lamports — arbitrary but large enough that Jupiter's route isn't
+// dominated by a single pool's minimum-size quirks.
+const SOL_PRICE_PROBE_LAMPORTS = 1_000_000_000n;
+const USDC_DECIMALS = 6;
+
 /**
- * SOL/USD counterpart to getEthPriceUsd above — same rationale (a rate
- * derived from this deployment's own recently active Solana tokens, cached
- * rather than fabricated when nothing fresh is available).
+ * SOL/USD counterpart to getEthPriceUsd above. Deliberately NOT the same
+ * "hunt through recently active tokens' DexScreener pairs" approach —
+ * confirmed live 2026-09-16: it never once succeeded that way. Robinhood
+ * Chain's recently-active tokens trade directly against ETH, but Solana's
+ * most recently discovered tokens are fresh pump.fun launches, which
+ * essentially never have a clean SOL-quoted DexScreener pair — so that
+ * loop always exhausted all 10 candidates and cost 30s+ per call for
+ * nothing. Asking Jupiter for a direct SOL->USDC quote is fast (sub-second,
+ * verified live), reliable, and doesn't depend on any particular token's
+ * data being available.
  */
 export async function getSolPriceUsd(): Promise<number | undefined> {
-  const recentTokens = await db.token.findMany({
-    where: { chain: "solana", marketSnapshots: { some: {} } },
-    orderBy: { lastSeenAt: "desc" },
-    take: SOL_PRICE_CANDIDATE_TOKENS,
-  });
-  for (const token of recentTokens) {
-    try {
-      // See getEthPriceUsd's identical timeout comment — same fix, same reason.
-      const market = await withTimeout(fetchMarketForToken(token.chain, token.address), 3000, "SOL price candidate fetch");
-      const pair = market.primaryPair;
-      if (!pair || !isNativeSolQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) continue;
-      const rate = pair.priceUsd / pair.priceNative;
+  try {
+    const quote = await withTimeout(getJupiterQuote(SOL_MINT, USDC_MINT, SOL_PRICE_PROBE_LAMPORTS, 50), 5000, "SOL/USDC price quote");
+    if (quote && quote.inAmount > 0n) {
+      const solAmount = Number(quote.inAmount) / LAMPORTS_PER_SOL;
+      const usdcAmount = Number(quote.outAmount) / 10 ** USDC_DECIMALS;
+      const rate = usdcAmount / solAmount;
       cachedSolPriceUsd = { rate, at: Date.now() };
       return rate;
-    } catch {
-      continue;
     }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "SOL/USDC price quote failed");
   }
   if (cachedSolPriceUsd && Date.now() - cachedSolPriceUsd.at <= SOL_PRICE_CACHE_MAX_AGE_MS) {
     logger.warn(
       { cachedAt: new Date(cachedSolPriceUsd.at).toISOString(), rate: cachedSolPriceUsd.rate },
-      `no fresh SOL/USD rate from any of the ${SOL_PRICE_CANDIDATE_TOKENS} most recently active Solana tokens — reusing the last known rate`
+      "no fresh SOL/USD rate from Jupiter — reusing the last known rate"
     );
     return cachedSolPriceUsd.rate;
   }
