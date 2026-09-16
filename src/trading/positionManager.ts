@@ -25,6 +25,13 @@ import type { PositionStrategyDecision } from "../ai/schemas";
 // genuinely unsellable will re-accumulate the time within minutes anyway.
 const exitBlockedSince = new Map<string, number>();
 
+// reconcileExternalWalletExit's zero-balance read must be confirmed on a
+// second, independently-fetched tick before it force-closes a position — a
+// single lagging/load-balanced RPC read of 0 right after a fresh buy would
+// otherwise permanently write off a genuinely open live position. Cleared
+// the moment any tick sees a real balance.
+const zeroWalletBalanceFirstSeenAt = new Map<string, number>();
+
 function markExitBlocked(tradeId: string): void {
   if (!exitBlockedSince.has(tradeId)) exitBlockedSince.set(tradeId, Date.now());
 }
@@ -418,15 +425,6 @@ export function evaluateExits(ctx: {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
-  if (holdingMinutes >= exitRules.maxHoldMinutes) {
-    return {
-      type: "TIME_EXIT",
-      sellPercentOfRemaining: 100,
-      reason: `max hold reached: ${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m`,
-      isEmergency: false,
-    };
-  }
-
   // Priority 3: staged profit-taking (§35/§36) — only the next step not yet
   // taken, in ascending order. ctx.profitStepsTaken counts prior PROFIT_TARGET
   // ExitSignal rows for this trade (see monitorOneTrade).
@@ -474,6 +472,26 @@ export function evaluateExits(ctx: {
     }
   }
 
+  // Priority 5: max hold time — checked last, after profit-taking and the
+  // trailing exit, and routed through the same verified-runner guard they
+  // use. Otherwise a VERIFIED_PROJECT position sitting on an unclaimed
+  // profit step or an armed trailing stop would get fully liquidated the
+  // instant it hits maxHoldMinutes instead of retaining moonbagRetainPercent
+  // like every other discretionary exit does for that lane.
+  if (holdingMinutes >= exitRules.maxHoldMinutes) {
+    return applyVerifiedRunnerGuard({
+      trade,
+      remainingTokens: ctx.remainingTokens,
+      totalBoughtTokens: ctx.totalBoughtTokens,
+      decision: {
+        type: "TIME_EXIT",
+        sellPercentOfRemaining: 100,
+        reason: `max hold reached: ${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m`,
+        isEmergency: false,
+      },
+    });
+  }
+
   return null;
 }
 
@@ -488,12 +506,30 @@ async function reconcileExternalWalletExit(trade: Trade, tokenAddress: string, r
   if (walletTokens === undefined) return false;
 
   const negligibleDust = Math.max(remainingTokens * 0.000001, 1e-12);
-  if (walletTokens > negligibleDust) return false;
+  if (walletTokens > negligibleDust) {
+    zeroWalletBalanceFirstSeenAt.delete(trade.id);
+    return false;
+  }
+
+  const firstSeenAt = zeroWalletBalanceFirstSeenAt.get(trade.id);
+  if (firstSeenAt === undefined) {
+    zeroWalletBalanceFirstSeenAt.set(trade.id, Date.now());
+    logger.warn(
+      { tradeId: trade.id, tokenAddress, dbRemainingTokens: remainingTokens, walletTokens },
+      "live wallet balance read as zero for an open position — awaiting a second confirming read before treating it as an external exit"
+    );
+    return false;
+  }
+  // A single lagging RPC node can read 0 right after a fresh buy; require the
+  // zero reading to hold across at least one full monitor interval, from an
+  // independently-fetched balance, before trusting it.
+  if (Date.now() - firstSeenAt < tradingConfig.positionMonitorIntervalSeconds * 1000) return false;
 
   logger.error(
     { tradeId: trade.id, tokenAddress, dbRemainingTokens: remainingTokens, walletTokens },
-    "open trade has no tokens left in the live wallet — closing as an external/manual wallet exit with unknown proceeds"
+    "open trade has no tokens left in the live wallet on two confirming reads — closing as an external/manual wallet exit with unknown proceeds"
   );
+  zeroWalletBalanceFirstSeenAt.delete(trade.id);
   await closeTrade(trade, "external/manual wallet exit detected: bot wallet token balance is zero", { realizedPnlUnknown: true });
   recordSellSuccess(tokenAddress);
   clearExitBlocked(trade.id);

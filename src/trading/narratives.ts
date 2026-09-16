@@ -5,7 +5,7 @@ import { fetchTrendingMetas, searchPairs } from "../dex/client";
 import type { MarketPair, TrendingMeta } from "../dex/types";
 import { logger } from "../logger";
 import { searchXForNarrative, type XNarrativeSearchResult } from "../research/xSearch";
-import { evaluateHoneypotRisk } from "./honeypotCheck";
+import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
@@ -213,7 +213,20 @@ async function createNarrativeCandidate(input: {
   if (!token) return false;
   if (await findRecentNarrativeCandidate(token.id, input.meta.slug)) return false;
 
-  const honeypot = await evaluateHoneypotRisk(token.address);
+  // An infra-inconclusive result (RPC blip) must not crash the whole
+  // per-meta batch loop in generateNarrativeTradeCandidates, nor hard-reject
+  // a real candidate off one bad network call — skip it for this poll and
+  // let the next poll's fresh fetch try again.
+  let honeypot;
+  try {
+    honeypot = await evaluateHoneypotRisk(token.address);
+  } catch (err) {
+    if (isHoneypotCheckInconclusiveError(err)) {
+      logger.warn({ tokenAddress: token.address, err: String(err) }, "narrative honeypot check inconclusive — skipping this poll");
+      return false;
+    }
+    throw err;
+  }
   const hardReject = !honeypot.passed;
   const contractScore = honeypot.passed ? 85 : 0;
   const liquidityUsd = input.pair.liquidityUsd ?? 0;

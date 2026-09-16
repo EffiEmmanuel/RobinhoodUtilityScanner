@@ -39,12 +39,15 @@ export async function checkPortfolioMilestones(): Promise<void> {
       where: { id: milestone.id },
       data: { reached: true, reachedAt: new Date(), equityAtReach: state.totalEquityUsd },
     });
-    try {
-      await sendMilestoneEmail({ targetUsd: milestone.targetUsd, portfolio: state });
-      await db.portfolioMilestone.update({ where: { id: milestone.id }, data: { notificationSent: true } });
-    } catch (err) {
-      logger.error({ targetUsd: milestone.targetUsd, err: String(err) }, "failed to send milestone email");
-    }
+    // Fire-and-forget, same fix as a469a8c applied everywhere else: this is
+    // awaited from positionManager.ts's closeTrade/executeSell, and an SMTP
+    // hang here would stall the trading loop exactly like the double-buy bug
+    // did before that sweep — this call site was missed because it's one
+    // layer removed (checkPortfolioMilestones -> sendMilestoneEmail), not a
+    // direct send*Email call.
+    void sendMilestoneEmail({ targetUsd: milestone.targetUsd, portfolio: state })
+      .then(() => db.portfolioMilestone.update({ where: { id: milestone.id }, data: { notificationSent: true } }))
+      .catch((err) => logger.error({ targetUsd: milestone.targetUsd, err: String(err) }, "failed to send milestone email"));
     logger.info({ targetUsd: milestone.targetUsd, equity: state.totalEquityUsd }, "portfolio milestone reached");
   }
 }

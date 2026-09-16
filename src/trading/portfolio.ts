@@ -281,6 +281,22 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     }
   }
 
+  const { dailyRealizedLossPercent, consecutiveLosses } = await getLossBreakerCounts(state.totalEquityUsd);
+  const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
+  return { paused: mode === "PAUSED", mode, reasons };
+}
+
+/**
+ * The daily-realized-loss-percent and consecutive-loss counts that feed
+ * resolveEntryMode's two LOSS breakers — the exact arithmetic checkCircuitBreakers
+ * uses, extracted so a cheaper caller (api.ts's dashboard "why no trades"
+ * snapshot, which can't afford checkCircuitBreakers' own getPortfolioState/gas
+ * RPC calls) can reuse the real day-boundary/reset-scoping/streak logic
+ * instead of re-deriving it — that reimplementation had already drifted once
+ * (see the 2026-09-16 review) after the "scope to today" fix below only
+ * landed here.
+ */
+export async function getLossBreakerCounts(equityUsd: number): Promise<{ dailyRealizedLossPercent: number; consecutiveLosses: number }> {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   // User directive 2026-09-12, needed three times in one night: a manual
@@ -297,8 +313,7 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: countingSince } },
   });
   const todaysRealizedPnl = todaysPnl.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
-  const dailyRealizedLossPercent =
-    todaysRealizedPnl < 0 && state.totalEquityUsd > 0 ? (Math.abs(todaysRealizedPnl) / state.totalEquityUsd) * 100 : 0;
+  const dailyRealizedLossPercent = todaysRealizedPnl < 0 && equityUsd > 0 ? (Math.abs(todaysRealizedPnl) / equityUsd) * 100 : 0;
 
   // User directive 2026-09-12: scoped to today, the same day boundary as the
   // daily-loss-percent breaker just above — previously this had NO day
@@ -319,8 +334,7 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   const firstNonLoss = recentClosed.findIndex((t) => (t.realizedPnlUsd ?? 0) >= 0);
   const consecutiveLosses = firstNonLoss === -1 ? recentClosed.length : firstNonLoss;
 
-  const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
-  return { paused: mode === "PAUSED", mode, reasons };
+  return { dailyRealizedLossPercent, consecutiveLosses };
 }
 
 /**

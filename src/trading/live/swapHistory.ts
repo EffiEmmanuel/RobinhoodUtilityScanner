@@ -39,10 +39,16 @@ interface SwapLog {
 const swapHistoryCache = new Map<`0x${string}`, CachedSwapHistory>();
 
 // price of the token (currency1) in ETH (currency0), decimals-adjusted
-function sqrtPriceX96ToTokenPriceInEth(sqrtPriceX96: bigint, tokenDecimals: number): number {
+export function sqrtPriceX96ToTokenPriceInEth(sqrtPriceX96: bigint, tokenDecimals: number): number {
   const Q96 = 2 ** 96;
+  // raw = (sqrtPriceX96/Q96)^2 = rawToken1/rawToken0 = "raw tokens per raw ETH
+  // wei", not ETH per token — it has to be inverted before the decimals
+  // adjustment gives ETH per token. Confirmed by units: rawToken1 = token *
+  // 10^tokenDecimals, rawToken0 = eth * 10^18, so raw = (token/eth) *
+  // 10^(tokenDecimals-18), and ETH-per-token = eth/token = (1/raw) *
+  // 10^(tokenDecimals-18).
   const raw = (Number(sqrtPriceX96) / Q96) ** 2;
-  return raw * 10 ** (tokenDecimals - 18); // currency0 (ETH) is always 18 decimals
+  return (1 / raw) * 10 ** (tokenDecimals - 18); // currency0 (ETH) is always 18 decimals
 }
 
 export async function getOnChainSwapHistory(

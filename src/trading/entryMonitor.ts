@@ -36,7 +36,7 @@ import {
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
 import { getPublicClient } from "./live/wallet";
-import { evaluateHoneypotRisk } from "./honeypotCheck";
+import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
 import { isPoolDiscoveryInconclusiveError } from "./live/poolDiscovery";
 import { summarizeError } from "../util/errors";
 
@@ -161,6 +161,7 @@ function isTransientEntryInfraError(err: unknown): boolean {
   const message = String(err).toLowerCase();
   return (
     isPoolDiscoveryInconclusiveError(err) ||
+    isHoneypotCheckInconclusiveError(err) ||
     message.includes("too many requests") ||
     message.includes("http 429") ||
     message.includes("status: 429") ||
@@ -817,7 +818,22 @@ async function openTrade(input: {
   try {
     fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair, { maxSlippageBps: input.maxSlippageBps });
   } catch (err) {
-    logger.error({ tokenAddress: input.tokenAddress, err: String(err) }, "buy execution failed — no trade created; pending entry will retry if the candidate is still waiting");
+    // A non-transient failure here (bad routing, an allowance edge case, a
+    // token that reverts every transfer) must not be retried: without this,
+    // the pending entry resets to ACTIVE and the next tick resubmits the same
+    // real on-chain buy within seconds, burning gas on every repeat attempt
+    // until evaluateExecutionQualityForEntry's failure-rate gate eventually
+    // catches it several attempts later. Reject immediately instead, same as
+    // every other terminal entry failure. A genuinely transient infra error
+    // (RPC timeout, rate limit) still gets a real retry — the outer
+    // processOnePendingEntry catch classifies it and skips this rejection.
+    const transientInfra = isTransientEntryInfraError(err);
+    logger.error(
+      { tokenAddress: input.tokenAddress, err: String(err), transientInfra },
+      transientInfra
+        ? "buy execution failed on transient infra error — no trade created; pending entry will retry"
+        : "buy execution failed — no trade created; candidate rejected to avoid repeat gas spend"
+    );
     void recordExecutionQuality({
       tokenAddress: input.tokenAddress,
       pair: input.pair,
@@ -830,6 +846,9 @@ async function openTrade(input: {
       tokenLabel: input.pair.baseTokenSymbol ?? input.pair.baseTokenName ?? input.tokenAddress.slice(0, 10),
       error: String(err),
     });
+    if (!transientInfra) {
+      await db.tradeCandidate.update({ where: { id: input.candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
+    }
     throw err;
   }
   recordBuySuccess();

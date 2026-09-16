@@ -66,11 +66,16 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   // contract (contractScore 100) and was hard-REJECTED outright, because this
   // override previously only ever waived qualityScore alone — reasons.length
   // === 1 required confidence to already be passing. It went on to run 4x+
-  // from its detection mcap. Widened to waive qualityScore and/or
-  // researchConfidence together (never both at once with contract safety or
-  // the liquidity floor, which stay real, unwaived gates on capital actually
-  // at risk — validateEntry still re-checks live buy/sell pressure right
-  // before any buy executes).
+  // from its detection mcap. Widened to waive qualityScore, researchConfidence
+  // and/or the liquidity floor together — never contract safety, which stays
+  // a real, unwaived gate on capital actually at risk. A liquidity waiver
+  // only ever brings the floor down to momentumTacticalMinLiquidityUsd (a
+  // separate, tighter-managed floor than minTradeLiquidityUsd — see
+  // MOMENTUM_TACTICAL_MIN_LIQUIDITY_USD in config.ts, not to be confused with
+  // the older MOMENTUM_OVERRIDE_MIN_LIQUIDITY_USD still used by classify.ts
+  // and research.ts's earlier-stage momentum checks), never all the way to
+  // zero — validateEntry still re-checks live buy/sell pressure right before
+  // any buy executes.
   const onlyMomentumWaivableGatesFailing = (!qualityScoreOk || !confidenceOk || !liquidityOk) && contractScoreOk && tacticalLiquidityOk;
   if (
     onlyMomentumWaivableGatesFailing &&

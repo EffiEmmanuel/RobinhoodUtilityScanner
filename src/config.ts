@@ -138,6 +138,12 @@ export const config = {
   // with hundreds of real traders. Mirrors the same philosophy already used
   // for AWAITING_DEX_PROFILE promotion (awaitingProfileMin* below), applied
   // one stage later at the actual pass/fail decision.
+  // This gates the earlier pipeline stage only (classify.ts/research.ts,
+  // before a TradeCandidate even exists). It is a DIFFERENT, higher floor
+  // than tradingConfig.momentumTacticalMinLiquidityUsd ($5,000 default),
+  // which independently gates the later riskEngine.ts momentum-override
+  // waiver right before a trade is sized — tuning one does not affect the
+  // other.
   momentumOverrideMinLiquidityUsd: num("MOMENTUM_OVERRIDE_MIN_LIQUIDITY_USD", 15000),
   momentumOverrideMinHourlyTxns: num("MOMENTUM_OVERRIDE_MIN_HOURLY_TXNS", 20),
 

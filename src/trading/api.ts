@@ -3,7 +3,7 @@ import { db } from "../db";
 import { rawQuery } from "../rawDb";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
-import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd } from "./portfolio";
+import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd, getLossBreakerCounts } from "./portfolio";
 import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
@@ -50,24 +50,14 @@ async function getCheapCircuitBreakerSnapshot(): Promise<{
     hardPauseReasons.push(`max open positions reached (${openPositions}/${tradingConfig.maxOpenPositions})`);
   }
 
-  const startOfDay = startOfLocalDay();
-  const lastReset = await db.circuitBreakerReset.findFirst({ orderBy: { resetAt: "desc" }, select: { resetAt: true } });
-  const countingSince = lastReset && lastReset.resetAt > startOfDay ? lastReset.resetAt : startOfDay;
-  const [todaysPnlEntries, recentClosed, latestSnapshot] = await Promise.all([
-    db.ledgerEntry.findMany({ where: { type: LedgerEntryType.REALIZED_PNL, occurredAt: { gte: countingSince } }, select: { amountUsd: true } }),
-    db.trade.findMany({
-      where: { status: TradeStatus.CLOSED, closedAt: { gte: countingSince } },
-      orderBy: { closedAt: "desc" },
-      take: Math.max(tradingConfig.maxConsecutiveLosses, tradingConfig.conservativeHardStopConsecutiveLosses),
-      select: { realizedPnlUsd: true },
-    }),
-    db.portfolioSnapshot.findFirst({ orderBy: { capturedAt: "desc" }, select: { totalEquityUsd: true } }),
-  ]);
-  const todaysRealizedPnl = todaysPnlEntries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
+  const latestSnapshot = await db.portfolioSnapshot.findFirst({ orderBy: { capturedAt: "desc" }, select: { totalEquityUsd: true } });
   const equity = latestSnapshot?.totalEquityUsd ?? tradingConfig.paperStartingBalanceUsd;
-  const dailyRealizedLossPercent = todaysRealizedPnl < 0 && equity > 0 ? (Math.abs(todaysRealizedPnl) / equity) * 100 : 0;
-  const firstNonLoss = recentClosed.findIndex((t) => (t.realizedPnlUsd ?? 0) >= 0);
-  const consecutiveLosses = firstNonLoss === -1 ? recentClosed.length : firstNonLoss;
+  // Reuses checkCircuitBreakers' own day-boundary/reset-scoping/streak
+  // arithmetic (portfolio.ts's getLossBreakerCounts) instead of a second,
+  // independently-drifting copy of it — this "cheap" snapshot only still
+  // diverges from the real breaker in the inputs it can't afford (a live
+  // getPortfolioState/gas-balance RPC call), not in the loss-counting logic.
+  const { dailyRealizedLossPercent, consecutiveLosses } = await getLossBreakerCounts(equity);
   const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
   return { openPositions, circuitBreakers: { paused: mode === "PAUSED", mode, reasons } };
 }

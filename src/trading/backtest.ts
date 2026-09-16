@@ -69,6 +69,18 @@ function simulateExitUnderRules(
       }
     }
 
+    // Live positionManager.ts still force-closes at exitRules.maxHoldMinutes
+    // (TIME_EXIT) — this branch was missing here, so a backtest could let a
+    // simulated position ride indefinitely past the same time limit a live
+    // position can't, overstating what live trading would actually realize
+    // under this exitRules config.
+    if (remainingFraction > 0 && holdingMinutes >= exitRules.maxHoldMinutes) {
+      realizedMultiple += remainingFraction * multiple;
+      remainingFraction = 0;
+      exitReason = `time exit (${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m)`;
+      break;
+    }
+
     if (remainingFraction > 0 && (pnlPercent <= -exitRules.catastrophicLossPercent || pnlPercent <= -exitRules.maxLossPercent)) {
       realizedMultiple += remainingFraction * multiple;
       remainingFraction = 0;
@@ -168,6 +180,20 @@ export async function runBacktest(input: BacktestInput) {
   return run;
 }
 
+/**
+ * Known gap, same spirit as runBacktest's doc comment above: this only
+ * replays the market-microstructure rules (liquidity/txns/buy-ratio/
+ * volume-to-liquidity/run-up) that conservativeMode.ts's gate is built from.
+ * It does NOT run honeypotCheck.ts, holderConcentration.ts, utilityGate.ts,
+ * or tradeLane.ts's REJECT path, all of which entryMonitor.ts/candidates.ts
+ * require before a live entry. Those checks depend on CURRENT on-chain state
+ * (bytecode, live holder distribution) that can't be replayed historically
+ * for an old candidate — even if it could, a token's contract/holders today
+ * don't reflect what they were at the historical decision point. A win-rate
+ * from this backtest is therefore an upper bound on what live trading would
+ * have realized under the same rules, not a direct prediction — live trading
+ * additionally rejects/defers whatever those four checks would have caught.
+ */
 export interface EntryBacktestRules {
   minLiquidityUsd: number;
   minHourlyTxns: number;

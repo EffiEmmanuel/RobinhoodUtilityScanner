@@ -210,31 +210,37 @@ export async function researchToken(tokenId: string): Promise<void> {
 
   if ((newStatus === TokenStatus.ALERTED || newStatus === TokenStatus.WATCHLISTED) && config.alertEmailTo) {
     const emailKind = newStatus === TokenStatus.ALERTED ? "ALERT" : "WATCHLIST";
-    try {
-      const providerId = await sendAlertEmail({
-        kind: emailKind,
-        tokenName: token.name,
-        tokenSymbol: token.symbol,
-        tokenAddress: token.address,
-        detectedAt: token.firstSeenAt,
-        researchCompletedAt: completedAt,
-        score,
-        synthesis,
-        links: linkList,
-        marketSummaryText: formatMarketForPrompt(market),
+    const alertEmailTo = config.alertEmailTo; // narrowed const — TS can't carry the if-check's narrowing into the async callback below
+    // Fire-and-forget, same class of fix as a469a8c's "double-buy" sweep:
+    // WORKER_CONCURRENCY is 2, so an SMTP hang here stalls one of only two
+    // research workers for as long as the mail server misbehaves, starving
+    // discovery/research of new-token throughput during any hiccup.
+    void sendAlertEmail({
+      kind: emailKind,
+      tokenName: token.name,
+      tokenSymbol: token.symbol,
+      tokenAddress: token.address,
+      detectedAt: token.firstSeenAt,
+      researchCompletedAt: completedAt,
+      score,
+      synthesis,
+      links: linkList,
+      marketSummaryText: formatMarketForPrompt(market),
+    })
+      .then(async (providerId) => {
+        await db.alert.create({
+          data: {
+            tokenId,
+            type: emailKind,
+            score: score.finalScore,
+            recipient: alertEmailTo,
+            providerId,
+          },
+        });
+        logger.info({ tokenId, address: token.address, type: emailKind }, "research notification email sent");
+      })
+      .catch((err) => {
+        logger.error({ tokenId, type: emailKind, err: String(err) }, "failed to send research notification email");
       });
-      await db.alert.create({
-        data: {
-          tokenId,
-          type: emailKind,
-          score: score.finalScore,
-          recipient: config.alertEmailTo,
-          providerId,
-        },
-      });
-      logger.info({ tokenId, address: token.address, type: emailKind }, "research notification email sent");
-    } catch (err) {
-      logger.error({ tokenId, type: emailKind, err: String(err) }, "failed to send research notification email");
-    }
   }
 }
