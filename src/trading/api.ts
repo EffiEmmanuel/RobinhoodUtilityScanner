@@ -1,9 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db";
 import { rawQuery } from "../rawDb";
+import { withTimeout } from "../util/http";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
-import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd, getLossBreakerCounts } from "./portfolio";
+import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd, getLossBreakerCounts, getPortfolioByChain, getSolPriceUsd } from "./portfolio";
 import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
@@ -72,10 +73,12 @@ async function getCheapCircuitBreakerSnapshot(): Promise<{
  * reachable from any module this file imports. */
 export function registerTradingRoutes(app: FastifyInstance): void {
   app.get("/trading/status", async () => {
-    const [portfolio, circuitBreakers, realizedPnlUsd] = await Promise.all([
+    const [portfolio, circuitBreakers, realizedPnlUsd, byChain, solPriceUsd] = await Promise.all([
       getPortfolioState(),
       checkCircuitBreakers(),
       getTotalRealizedPnlUsd(),
+      getPortfolioByChain(),
+      getSolPriceUsd().catch(() => undefined),
     ]);
     // User directive 2026-09-12: the dashboard's account-health stat card.
     // unrealizedPnlUsd is derived the same way recordPortfolioSnapshot
@@ -85,15 +88,34 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     const totalPnlUsd = realizedPnlUsd + unrealizedPnlUsd;
     const walletConfigured = isWalletConfigured();
     const solanaWalletConfigured = isSolanaWalletConfigured();
+    // Confirmed live 2026-09-16: a Solana RPC balance read with no
+    // request-level timeout hung this whole endpoint for minutes — the
+    // dashboard "takes so much time to load" bug. A `.catch()` alone doesn't
+    // bound a promise that never settles, only one that actually rejects, so
+    // both live-balance reads are wrapped in withTimeout (and run in
+    // parallel rather than sequentially) — a display-only figure should
+    // never be able to block the whole status response.
+    const WALLET_BALANCE_TIMEOUT_MS = 5000;
+    const [walletGasBalanceEth, solanaWalletGasBalanceSol] = await Promise.all([
+      walletConfigured ? withTimeout(getWalletGasBalanceEth(), WALLET_BALANCE_TIMEOUT_MS, "EVM wallet balance read").catch(() => null) : Promise.resolve(null),
+      solanaWalletConfigured
+        ? withTimeout(getSolanaWalletGasBalanceSol(), WALLET_BALANCE_TIMEOUT_MS, "Solana wallet balance read").catch(() => null)
+        : Promise.resolve(null),
+    ]);
     return {
       mode: tradingConfig.mode,
       tradingEnabled: isTradingEnabled(),
       circuitBreakers,
       portfolio: { ...portfolio, realizedPnlUsd, unrealizedPnlUsd, totalPnlUsd },
+      // Per-chain position/PnL breakdown (see portfolio.ts's
+      // getPortfolioByChain) — cash/equity above stays combined-only, this is
+      // the subset that's honestly splittable straight from Trade rows.
+      byChain,
+      solPriceUsd: solPriceUsd ?? null,
       live: {
         walletConfigured,
         walletAddress: walletConfigured ? getWalletAddress() : null,
-        walletGasBalanceEth: walletConfigured ? await getWalletGasBalanceEth().catch(() => null) : null,
+        walletGasBalanceEth,
         ready: isLiveModeReady(),
         allowedRouterAddresses: getAllowedRouterAddresses(),
         // Additive — kept separate from the EVM fields above rather than
@@ -103,7 +125,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
         solana: {
           walletConfigured: solanaWalletConfigured,
           walletAddress: solanaWalletConfigured ? getSolanaWalletAddress() : null,
-          walletGasBalanceSol: solanaWalletConfigured ? await getSolanaWalletGasBalanceSol().catch(() => null) : null,
+          walletGasBalanceSol: solanaWalletGasBalanceSol,
           ready: isSolanaLiveModeReady(),
         },
       },

@@ -5,6 +5,7 @@ import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
+import { isNativeSolQuoted } from "./executionFacade";
 import { summarizeError } from "../util/errors";
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
@@ -103,6 +104,43 @@ export async function getEthPriceUsd(): Promise<number | undefined> {
   return undefined;
 }
 
+const SOL_PRICE_CANDIDATE_TOKENS = 10;
+const SOL_PRICE_CACHE_MAX_AGE_MS = 30 * 60_000;
+let cachedSolPriceUsd: { rate: number; at: number } | undefined;
+
+/**
+ * SOL/USD counterpart to getEthPriceUsd above — same rationale (a rate
+ * derived from this deployment's own recently active Solana tokens, cached
+ * rather than fabricated when nothing fresh is available).
+ */
+export async function getSolPriceUsd(): Promise<number | undefined> {
+  const recentTokens = await db.token.findMany({
+    where: { chain: "solana", marketSnapshots: { some: {} } },
+    orderBy: { lastSeenAt: "desc" },
+    take: SOL_PRICE_CANDIDATE_TOKENS,
+  });
+  for (const token of recentTokens) {
+    try {
+      const market = await fetchMarketForToken(token.chain, token.address);
+      const pair = market.primaryPair;
+      if (!pair || !isNativeSolQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) continue;
+      const rate = pair.priceUsd / pair.priceNative;
+      cachedSolPriceUsd = { rate, at: Date.now() };
+      return rate;
+    } catch {
+      continue;
+    }
+  }
+  if (cachedSolPriceUsd && Date.now() - cachedSolPriceUsd.at <= SOL_PRICE_CACHE_MAX_AGE_MS) {
+    logger.warn(
+      { cachedAt: new Date(cachedSolPriceUsd.at).toISOString(), rate: cachedSolPriceUsd.rate },
+      `no fresh SOL/USD rate from any of the ${SOL_PRICE_CANDIDATE_TOKENS} most recently active Solana tokens — reusing the last known rate`
+    );
+    return cachedSolPriceUsd.rate;
+  }
+  return undefined;
+}
+
 /**
  * In LIVE mode, cash comes from the REAL on-chain wallet balance, not summed
  * historical ledger entries — confirmed live: the ledger sums each entry's
@@ -128,9 +166,12 @@ async function getCashUsd(ethPriceUsd: number | undefined): Promise<{ cashUsd: n
   return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth: undefined };
 }
 
-async function getOpenPositionValueUsd(): Promise<{ valueUsd: number; costBasisUsd: number; openCount: number }> {
+async function getOpenPositionValueUsd(chain?: string): Promise<{ valueUsd: number; costBasisUsd: number; openCount: number }> {
   const openTrades = await db.trade.findMany({
-    where: { status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] } },
+    where: {
+      status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] },
+      ...(chain ? { token: { chain } } : {}),
+    },
     include: { snapshots: { orderBy: { capturedAt: "desc" }, take: 1 } },
   });
   let valueUsd = 0;
@@ -240,6 +281,48 @@ export async function recordPortfolioSnapshot(state?: PortfolioState): Promise<v
 export async function getTotalRealizedPnlUsd(): Promise<number> {
   const entries = await db.ledgerEntry.findMany({ where: { type: LedgerEntryType.REALIZED_PNL } });
   return entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0);
+}
+
+export interface ChainPortfolioStats {
+  chain: string;
+  openPositionCount: number;
+  openPositionValueUsd: number;
+  deployedUsd: number;
+  unrealizedPnlUsd: number;
+  // Summed straight from Trade.realizedPnlUsd (each trade carries its own
+  // token -> chain), NOT from the ledger — the ledger's REALIZED_PNL entries
+  // (see getTotalRealizedPnlUsd above) have no chain column and are the
+  // authoritative all-chain total, but this is the one figure that CAN
+  // honestly be split per chain, so it exists only for that.
+  realizedPnlUsd: number;
+  closedTradeCount: number;
+}
+
+async function getChainStats(chain: string): Promise<ChainPortfolioStats> {
+  const [{ valueUsd, costBasisUsd, openCount }, closedAgg] = await Promise.all([
+    getOpenPositionValueUsd(chain),
+    db.trade.aggregate({
+      where: { status: TradeStatus.CLOSED, token: { chain } },
+      _sum: { realizedPnlUsd: true },
+      _count: { _all: true },
+    }),
+  ]);
+  return {
+    chain,
+    openPositionCount: openCount,
+    openPositionValueUsd: valueUsd,
+    deployedUsd: costBasisUsd,
+    unrealizedPnlUsd: valueUsd - costBasisUsd,
+    realizedPnlUsd: closedAgg._sum.realizedPnlUsd ?? 0,
+    closedTradeCount: closedAgg._count._all,
+  };
+}
+
+/** Per-chain position/PnL breakdown for the dashboard's chain panels —
+ * unlike PortfolioState above (one shared cash/equity pool by design), this
+ * is genuinely splittable straight from Trade rows. */
+export async function getPortfolioByChain(): Promise<ChainPortfolioStats[]> {
+  return Promise.all([getChainStats("robinhood"), getChainStats("solana")]);
 }
 
 /** §25 account circuit breakers — checked before every new entry. */

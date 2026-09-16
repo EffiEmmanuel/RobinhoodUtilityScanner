@@ -23,7 +23,7 @@ const LAMPORTS_PER_SOL = 1_000_000_000;
 // Solana counterpart to isNativeEthQuoted/deriveEthPriceUsd below — same
 // rationale (never misread a pair quoted in something else as a native-token
 // rate), just keyed on wSOL's mint instead of the EVM zero address.
-function isNativeSolQuoted(pair: Pick<MarketPair, "quoteTokenAddress">): boolean {
+export function isNativeSolQuoted(pair: Pick<MarketPair, "quoteTokenAddress">): boolean {
   return pair.quoteTokenAddress === SOL_MINT;
 }
 

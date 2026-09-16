@@ -84,3 +84,25 @@ export async function fetchJsonWithRetry<T>(
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Bounds a promise that might never settle — a `.catch()` alone doesn't
+ * help against a hang (nothing to catch if the promise never rejects), only
+ * against a genuine rejection. Confirmed live 2026-09-16: a Solana RPC
+ * balance read with no request-level timeout hung /trading/status for
+ * minutes, blocking the whole dashboard from loading, even though the call
+ * was already wrapped in `.catch(() => null)`. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
