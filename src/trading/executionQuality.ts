@@ -1,8 +1,14 @@
 import { db } from "../db";
+import { config } from "../config";
 import type { MarketPair } from "../dex/types";
 
 export interface ExecutionQualityInput {
   tokenAddress: string;
+  // Optional and defaults to the EVM chain: every existing caller today
+  // (executionFacade.ts) is EVM-only, so this default keeps their behavior
+  // unchanged. Callers that already have a chain in scope (entryMonitor.ts)
+  // should pass it explicitly.
+  chain?: string;
   pair?: Pick<MarketPair, "dexId" | "pairAddress">;
   direction: "BUY" | "SELL" | "QUOTE_BUY" | "QUOTE_SELL";
   success?: boolean;
@@ -12,9 +18,18 @@ export interface ExecutionQualityInput {
   error?: string;
 }
 
+// EVM addresses are case-insensitive (checksummed casing varies by source),
+// so lowercasing gives a stable dedup key. Solana addresses are case-sensitive
+// base58 — lowercasing would silently merge/corrupt distinct mint addresses.
+function normalizeAddress(address: string, chain: string): string {
+  return chain === config.targetChainId ? address.toLowerCase() : address;
+}
+
 function statKey(input: ExecutionQualityInput) {
+  const chain = input.chain ?? config.targetChainId;
   return {
-    tokenAddress: input.tokenAddress.toLowerCase(),
+    chain,
+    tokenAddress: normalizeAddress(input.tokenAddress, chain),
     dexId: input.pair?.dexId ?? "unknown",
     pairAddress: input.pair?.pairAddress ?? "unknown",
     direction: input.direction,
@@ -30,7 +45,7 @@ function rollingAverage(previous: number | null | undefined, countBefore: number
 export async function recordExecutionQuality(input: ExecutionQualityInput): Promise<void> {
   const key = statKey(input);
   const existing = await db.executionQualityStat.findUnique({
-    where: { tokenAddress_dexId_pairAddress_direction: key },
+    where: { chain_tokenAddress_dexId_pairAddress_direction: key },
   });
   const attempts = existing?.attempts ?? 0;
   const successes = existing?.successes ?? 0;
@@ -38,7 +53,7 @@ export async function recordExecutionQuality(input: ExecutionQualityInput): Prom
   const suspiciousQuotes = existing?.suspiciousQuotes ?? 0;
 
   await db.executionQualityStat.upsert({
-    where: { tokenAddress_dexId_pairAddress_direction: key },
+    where: { chain_tokenAddress_dexId_pairAddress_direction: key },
     create: {
       ...key,
       attempts: 1,
@@ -80,9 +95,9 @@ export interface ExecutionQualityRisk {
   };
 }
 
-export async function evaluateExecutionQualityForEntry(tokenAddress: string): Promise<ExecutionQualityRisk> {
+export async function evaluateExecutionQualityForEntry(tokenAddress: string, chain: string): Promise<ExecutionQualityRisk> {
   const rows = await db.executionQualityStat.findMany({
-    where: { tokenAddress: tokenAddress.toLowerCase() },
+    where: { chain, tokenAddress: normalizeAddress(tokenAddress, chain) },
   });
   const attempts = rows.reduce((sum, row) => sum + row.attempts, 0);
   const failures = rows.reduce((sum, row) => sum + row.failures, 0);

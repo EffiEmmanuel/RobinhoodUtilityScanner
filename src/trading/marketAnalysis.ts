@@ -1,5 +1,6 @@
 import { getAddress } from "viem";
 import { db } from "../db";
+import { config } from "../config";
 import { logger } from "../logger";
 import { captureMarketSnapshot } from "../research/market";
 import type { MarketPair } from "../dex/types";
@@ -170,7 +171,7 @@ function numericTrend(values: number[]): Trend | undefined {
   return "FLAT";
 }
 
-export async function computeTechnicalFeatures(tokenId: string, latestPair: MarketPair | undefined, tokenAddress: string): Promise<TechnicalFeatures> {
+export async function computeTechnicalFeatures(tokenId: string, latestPair: MarketPair | undefined, tokenAddress: string, chain: string): Promise<TechnicalFeatures> {
   const series = await getSnapshotSeries(tokenId);
   const mcaps = series.map((s) => s.mcap);
   const volumes = series.map((s) => s.volume5m).filter((v): v is number => v !== null);
@@ -228,18 +229,23 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
   features.ema20 = ema(mcaps, 20);
   features.rsi14Like = simpleRsi(mcaps, 14);
 
-  try {
-    const onchain = await getOnChainSwapHistory(getPublicClient(), getAddress(tokenAddress), features.currentMcap, latestPair?.priceUsd);
-    if (onchain?.swingLowMcap !== undefined && onchain?.swingHighMcap !== undefined) {
-      features.swingHighMcap = onchain.swingHighMcap;
-      features.swingLowMcap = onchain.swingLowMcap;
-      applySwingDerivedPercentages(features, features.currentMcap);
-      features.supportResistanceSource = "ONCHAIN_HISTORY";
-      features.onchainSupportStale = onchain.stale;
-      features.onchainDataPoints = onchain.dataPoints;
+  // getOnChainSwapHistory reads via viem/EVM RPC — only meaningful for the
+  // EVM chain today. Other chains fall through to the snapshot-derived
+  // support/resistance already computed above, same as any lookup failure.
+  if (chain === config.targetChainId) {
+    try {
+      const onchain = await getOnChainSwapHistory(getPublicClient(), getAddress(tokenAddress), features.currentMcap, latestPair?.priceUsd);
+      if (onchain?.swingLowMcap !== undefined && onchain?.swingHighMcap !== undefined) {
+        features.swingHighMcap = onchain.swingHighMcap;
+        features.swingLowMcap = onchain.swingLowMcap;
+        applySwingDerivedPercentages(features, features.currentMcap);
+        features.supportResistanceSource = "ONCHAIN_HISTORY";
+        features.onchainSupportStale = onchain.stale;
+        features.onchainDataPoints = onchain.dataPoints;
+      }
+    } catch (err) {
+      logger.warn({ tokenAddress, err: String(err) }, "on-chain swap-history lookup failed — falling back to snapshot-derived support/resistance");
     }
-  } catch (err) {
-    logger.warn({ tokenAddress, err: String(err) }, "on-chain swap-history lookup failed — falling back to snapshot-derived support/resistance");
   }
 
   return features;

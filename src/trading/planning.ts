@@ -45,7 +45,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
   const strategy = await getActiveStrategyVersion();
   const market = await pollCandidateMarket(candidate.tokenId, candidate.token.chain, candidate.token.address);
-  const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair, candidate.token.address);
+  const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair, candidate.token.address, candidate.token.chain);
   const walletSignals = await getWalletSignalsForToken(candidate.tokenId, candidate.token.address);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;

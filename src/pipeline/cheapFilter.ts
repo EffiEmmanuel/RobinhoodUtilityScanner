@@ -1,4 +1,5 @@
 import type { DiscoveredTokenProfile } from "../dex/types";
+import { config } from "../config";
 
 // FR-004: inexpensive checks that run before any AI/vision call. Intentionally
 // conservative — a single meme-ish keyword must never reject on its own.
@@ -9,12 +10,20 @@ export interface CheapFilterResult {
   reasons: string[];
 }
 
-function nameAndAddressReasons(name: string | null | undefined, address: string): string[] {
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+// Base58, no 0/O/I/l — matches Solana's alphabet and typical pubkey length.
+const SOLANA_ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function isValidAddressForChain(address: string, chain: string): boolean {
+  return chain === "solana" ? SOLANA_ADDRESS_RE.test(address) : EVM_ADDRESS_RE.test(address);
+}
+
+function nameAndAddressReasons(name: string | null | undefined, address: string, chain: string): string[] {
   const reasons: string[] = [];
   if (!name || SPAM_NAME_PATTERNS.some((p) => p.test(name))) {
     reasons.push("missing or placeholder token name");
   }
-  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+  if (!isValidAddressForChain(address, chain)) {
     reasons.push("invalid contract address format");
   }
   return reasons;
@@ -34,7 +43,7 @@ function supplyReason(adjustedTotalSupply: number | undefined): string[] {
 }
 
 export function cheapFilter(profile: DiscoveredTokenProfile, name?: string | null, adjustedTotalSupply?: number): CheapFilterResult {
-  const reasons = [...nameAndAddressReasons(name, profile.tokenAddress), ...supplyReason(adjustedTotalSupply)];
+  const reasons = [...nameAndAddressReasons(name, profile.tokenAddress, profile.chainId), ...supplyReason(adjustedTotalSupply)];
   if (!profile.icon) {
     reasons.push("missing icon");
   }
@@ -52,6 +61,7 @@ export function cheapFilter(profile: DiscoveredTokenProfile, name?: string | nul
  * costing an AI call in the first place.
  */
 export function cheapFilterOnchain(address: string, name?: string | null, adjustedTotalSupply?: number): CheapFilterResult {
-  const reasons = [...nameAndAddressReasons(name, address), ...supplyReason(adjustedTotalSupply)];
+  // Only ever called from onchainDiscovery.ts's EVM pool-creation watcher.
+  const reasons = [...nameAndAddressReasons(name, address, config.targetChainId), ...supplyReason(adjustedTotalSupply)];
   return { passed: reasons.length === 0, reasons };
 }

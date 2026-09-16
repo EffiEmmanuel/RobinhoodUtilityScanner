@@ -219,7 +219,7 @@ async function createNarrativeCandidate(input: {
   // let the next poll's fresh fetch try again.
   let honeypot;
   try {
-    honeypot = await evaluateHoneypotRisk(token.address);
+    honeypot = await evaluateHoneypotRisk(token.address, token.chain);
   } catch (err) {
     if (isHoneypotCheckInconclusiveError(err)) {
       logger.warn({ tokenAddress: token.address, err: String(err) }, "narrative honeypot check inconclusive — skipping this poll");
@@ -398,8 +398,9 @@ export async function generateNarrativeTradeCandidates(): Promise<number> {
       continue;
     }
 
+    const enabledChainsLower = config.enabledChains.map((c) => c.toLowerCase());
     const targetPairs = pairs
-      .filter((p) => (p.chainId ?? "").toLowerCase() === config.targetChainId.toLowerCase())
+      .filter((p) => enabledChainsLower.includes((p.chainId ?? "").toLowerCase()))
       .filter((p) => tokenAddress(p))
       .filter((p) => matchesMetaToken(meta, p))
       .sort((a, b) => (b.volume1h ?? 0) - (a.volume1h ?? 0) || (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))

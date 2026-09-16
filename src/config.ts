@@ -42,6 +42,14 @@ export const config = {
 
   dexscreenerBaseUrl: str("DEXSCREENER_BASE_URL", "https://api.dexscreener.com"),
   targetChainId: str("TARGET_CHAIN_ID", "robinhood"),
+  // Chains DexScreener-poll discovery and narrative generation should look
+  // at. Deliberately separate from targetChainId (which every EVM-only
+  // module below still keys off) rather than a rename/repurpose of it — most
+  // existing call sites (onchainDiscovery.ts, manualSubmit.ts, poller.ts)
+  // write/read a single EVM chain id and have no Solana counterpart yet, so
+  // changing what targetChainId means there would be a behavior change, not
+  // a no-op. This is additive: defaults to just [targetChainId].
+  enabledChains: csv("ENABLED_CHAINS", [str("TARGET_CHAIN_ID", "robinhood")]),
   discoveryIntervalSeconds: num("DISCOVERY_INTERVAL_SECONDS", 15),
   // Direct on-chain pool-creation watching (onchainDiscovery.ts) — far tighter
   // than the DexScreener poll above since it reads chain state directly
@@ -94,6 +102,31 @@ export const config = {
   rhRpcFallbackUrl: str("RH_RPC_FALLBACK_URL", "https://rpc.nodeflare.app/robinhood/public"),
   rhRpcExtraUrls: csv("RH_RPC_EXTRA_URLS"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
+
+  // Reserved for the Solana discovery/risk/execution work (unused until those
+  // land) — kept alongside the EVM config above rather than mixed into it,
+  // since none of this is read yet. SOLANA_WALLET_PRIVATE_KEY intentionally
+  // isn't here: BOT_WALLET_PRIVATE_KEY (wallet.ts) isn't part of this object
+  // either, so secrets never end up in a loggable config dump.
+  solanaRpcUrl: optStr("SOLANA_RPC_URL"),
+  solanaRpcFallbackUrl: optStr("SOLANA_RPC_FALLBACK_URL"),
+  solanaRpcExtraUrls: csv("SOLANA_RPC_EXTRA_URLS"),
+  solanaExplorerApiUrl: optStr("SOLANA_EXPLORER_API_URL"),
+  solanaDiscoveryIntervalSeconds: num("SOLANA_DISCOVERY_INTERVAL_SECONDS", 15),
+  // Verified current and correct against Jupiter's live API docs/swagger
+  // spec as of 2026-09-16 (GET /quote, POST /swap, both under this base) —
+  // lite-api.jup.ag is the free no-API-key tier; api.jup.ag is the paid tier
+  // requiring an x-api-key header. Jupiter's hosted API has moved hosts/tiers
+  // before (quote-api.jup.ag -> lite-api.jup.ag), so this stays configurable
+  // rather than hardcoded in case it moves again — re-verify if a long time
+  // has passed since the date above.
+  solanaJupiterBaseUrl: str("SOLANA_JUPITER_BASE_URL", "https://lite-api.jup.ag/swap/v1"),
+  // Hard off by default and independent of TRADING_MODE (which today only
+  // governs the EVM path) — flipping EVM to LIVE must never silently also
+  // enable live Solana trading. See live/solana/wallet.ts's doc comment:
+  // the shared circuit-breaker/capital ledger doesn't account for Solana
+  // positions yet, so this is a deliberately separate, narrower gate.
+  solanaTradingEnabled: bool("SOLANA_TRADING_ENABLED", false),
 
   walletTrackingEnabled: bool("WALLET_TRACKING_ENABLED", true),
   walletTrackingIntervalSeconds: num("WALLET_TRACKING_INTERVAL_SECONDS", 15),

@@ -10,6 +10,7 @@ import { ResearchSynthesisSchema, RESEARCH_SYNTHESIS_JSON_SCHEMA } from "../ai/s
 import { RESEARCH_SYNTHESIZER_SYSTEM, buildResearchSynthesisPrompt } from "../ai/prompts";
 import { computeScore } from "../scoring";
 import { getHolderSnapshot } from "../trading/holderConcentration";
+import { getSolanaHolderSnapshot } from "../trading/solanaHolderConcentration";
 import { getPublicClient } from "../trading/live/wallet";
 import { sendAlertEmail } from "../notify/email";
 import type { DiscoveredTokenProfile } from "../dex/types";
@@ -82,10 +83,23 @@ export async function researchToken(tokenId: string): Promise<void> {
 
   const profile = (token.rawProfile as unknown as DiscoveredTokenProfile) ?? null;
 
+  // researchOnchain reads via viem/EVM RPC — no Solana equivalent yet (its
+  // mint/freeze-authority checks live in solanaHoneypotCheck.ts's honeypot
+  // gate instead, not reshaped into OnchainResearchResult for the AI
+  // synthesis stage). Skipped rather than attempted-and-failed for other
+  // chains: it already degrades to UNAVAILABLE on any failure, but skipping
+  // avoids a doomed RPC round-trip and a misleading "RPC unreachable"
+  // warning log for every non-EVM token. getHolderSnapshot does have a
+  // Solana counterpart (getSolanaHolderSnapshot) and is dispatched below.
+  const isEvmChain = token.chain === config.targetChainId;
   const [marketSettled, onchainSettled, holdersSettled] = await Promise.allSettled([
     captureMarketSnapshot(tokenId, token.chain, token.address),
-    researchOnchain(token.address),
-    getHolderSnapshot(getPublicClient(), token.address as `0x${string}`),
+    isEvmChain ? researchOnchain(token.address) : Promise.resolve(UNAVAILABLE_ONCHAIN),
+    token.chain === "solana"
+      ? getSolanaHolderSnapshot(token.address)
+      : isEvmChain
+        ? getHolderSnapshot(getPublicClient(), token.address as `0x${string}`)
+        : Promise.resolve(undefined),
   ]);
   const market = marketSettled.status === "fulfilled" ? marketSettled.value : { pairs: [] };
   const onchain = onchainSettled.status === "fulfilled" ? onchainSettled.value : UNAVAILABLE_ONCHAIN;

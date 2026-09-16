@@ -33,17 +33,29 @@ const ACTIVE_TRADE_STATUSES = new Set<TradeStatus>([
   TradeStatus.EXIT_SUBMITTED,
 ]);
 
-/** Pulls a 0x address out of raw input — accepts a bare address or something
- * like a pasted DexScreener/explorer URL with the address in the path.
- * Lowercased (not EIP-55 checksummed) to match discover.ts/onchainDiscovery.ts
- * — our own dedup constraint is a case-sensitive string compare, so a mixed
+// Base58, no 0/O/I/l — matches Solana's alphabet and typical pubkey length.
+const SOLANA_ADDRESS_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/;
+
+/** Pulls a contract/mint address out of raw input — accepts a bare address or
+ * something like a pasted DexScreener/explorer URL with the address in the
+ * path. Chain is inferred from the address's own format (0x-prefixed hex vs.
+ * base58), same distinction DexScreener itself uses, so no explicit chain
+ * selector is needed from the caller. EVM addresses are lowercased (not
+ * EIP-55 checksummed) to match discover.ts/onchainDiscovery.ts — our own
+ * dedup constraint is a case-sensitive string compare, so a mixed
  * check-summed address here would silently create a duplicate row instead of
- * finding the real one. */
-function extractAddress(input: string): `0x${string}` {
+ * finding the real one. Solana addresses are case-sensitive and must not be
+ * touched. Solana is only recognized once ENABLED_CHAINS actually includes
+ * it — until then this behaves exactly as before. */
+function extractAddress(input: string): { chain: string; address: string } {
   const trimmed = input.trim();
-  if (isAddress(trimmed)) return getAddress(trimmed).toLowerCase() as `0x${string}`;
-  const match = trimmed.match(/0x[a-fA-F0-9]{40}/);
-  if (match && isAddress(match[0])) return getAddress(match[0]).toLowerCase() as `0x${string}`;
+  if (isAddress(trimmed)) return { chain: config.targetChainId, address: getAddress(trimmed).toLowerCase() };
+  const evmMatch = trimmed.match(/0x[a-fA-F0-9]{40}/);
+  if (evmMatch && isAddress(evmMatch[0])) return { chain: config.targetChainId, address: getAddress(evmMatch[0]).toLowerCase() };
+  if (config.enabledChains.includes("solana")) {
+    const solanaMatch = trimmed.match(SOLANA_ADDRESS_RE);
+    if (solanaMatch) return { chain: "solana", address: solanaMatch[0] };
+  }
   throw new Error(`"${input}" doesn't contain a valid contract address`);
 }
 
@@ -142,11 +154,11 @@ async function queueManualBuyAndHold(token: Token): Promise<void> {
 }
 
 export async function submitManualToken(rawAddress: string, options: { buyAndHold?: boolean } = {}): Promise<ManualSubmitResult> {
-  const address = extractAddress(rawAddress);
+  const { chain, address } = extractAddress(rawAddress);
   const buyAndHold = options.buyAndHold === true;
 
   const existing = await db.token.findUnique({
-    where: { chain_address: { chain: config.targetChainId, address } },
+    where: { chain_address: { chain, address } },
     include: {
       tradeCandidates: { orderBy: { createdAt: "desc" }, take: 1 },
       trades: { where: { status: { in: Array.from(ACTIVE_TRADE_STATUSES) } }, orderBy: { createdAt: "desc" }, take: 1 },
@@ -180,22 +192,28 @@ export async function submitManualToken(rawAddress: string, options: { buyAndHol
 
   let name: string | undefined;
   let symbol: string | undefined;
-  try {
-    const info = await getTokenNameSymbol(getPublicClient(), address);
-    name = info.name;
-    symbol = info.symbol;
-  } catch (err) {
-    logger.warn({ address, err: String(err) }, "manual submission: could not read token name/symbol");
+  // getTokenNameSymbol reads via viem/EVM RPC — no Solana equivalent yet
+  // (see src/trading/live/tokenUtils.ts). Left undefined for Solana for now;
+  // researchMarket below still supplies icon/header for classification, and
+  // the classifier itself sources a name from DexScreener metadata too.
+  if (chain === config.targetChainId) {
+    try {
+      const info = await getTokenNameSymbol(getPublicClient(), address as `0x${string}`);
+      name = info.name;
+      symbol = info.symbol;
+    } catch (err) {
+      logger.warn({ address, err: String(err) }, "manual submission: could not read token name/symbol");
+    }
   }
 
   // A manually-submitted CA otherwise skips DexScreener entirely, so the
   // classifier saw no icon/header/description regardless of what DexScreener
   // actually shows for the token — same fallback source discover.ts uses.
-  const market = await researchMarket(config.targetChainId, address);
+  const market = await researchMarket(chain, address);
 
   const created = await db.token.create({
     data: {
-      chain: config.targetChainId,
+      chain,
       address,
       name,
       symbol,

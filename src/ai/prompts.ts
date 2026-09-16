@@ -120,8 +120,15 @@ Answer specifically:
 Return your answer only via the provided tool call, with a 0-100 score and a confidence level
 (LOW/MEDIUM/HIGH based on how much real evidence you actually had) for each scored factor.`;
 
+// Solana calls this a "mint address," not a "contract" — worth using
+// chain-appropriate terminology since it's fed to an AI model that may reason
+// about it.
+function addressLabel(chain: string): string {
+  return chain === "solana" ? "Mint" : "Contract";
+}
+
 export interface ResearchSynthesisInputs {
-  token: { name?: string | null; symbol?: string | null; address: string; description?: string | null };
+  token: { name?: string | null; symbol?: string | null; address: string; description?: string | null; chain: string };
   market: string;
   website: string;
   onchain: string;
@@ -134,7 +141,7 @@ export function buildResearchSynthesisPrompt(inputs: ResearchSynthesisInputs): s
   return `TOKEN
 Name: ${inputs.token.name ?? "(missing)"}
 Symbol: ${inputs.token.symbol ?? "(missing)"}
-Contract: ${inputs.token.address}
+${addressLabel(inputs.token.chain)}: ${inputs.token.address}
 Description: ${inputs.token.description ?? "(missing)"}
 
 PROJECT LINKS FOUND
@@ -189,7 +196,7 @@ or ambiguous, HOLD with LOW confidence is the honest answer, not a guess dressed
 Return your answer only via the provided tool call.`;
 
 export interface PositionStrategyInputs {
-  token: { name?: string | null; symbol?: string | null; address: string };
+  token: { name?: string | null; symbol?: string | null; address: string; chain: string };
   researchSummary: string;
   positionState: string;
   exitRulesState: string;
@@ -214,7 +221,7 @@ export function buildPositionStrategyPrompt(inputs: PositionStrategyInputs): str
 TOKEN
 Name: ${inputs.token.name ?? "(missing)"}
 Symbol: ${inputs.token.symbol ?? "(missing)"}
-Contract: ${inputs.token.address}
+${addressLabel(inputs.token.chain)}: ${inputs.token.address}
 
 WHY WE ENTERED (from original research)
 ${inputs.researchSummary}

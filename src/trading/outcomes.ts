@@ -42,6 +42,7 @@ function hitFlags(existing: { [K in HitField]?: boolean | null } | undefined, be
 
 async function evaluateFeasiblePeak(input: {
   tokenAddress: string;
+  chain: string;
   pair: MarketPair | undefined;
   marketCapAtDetection: number;
   currentMarketCap: number;
@@ -72,7 +73,7 @@ async function evaluateFeasiblePeak(input: {
       const probeUsd = Math.min(tradingConfig.outcomeFeasibleProbeUsd, liquidityUsd * 0.005);
       const probeTokens = probeUsd / priceUsd;
       try {
-        const quote = await getSellEstimate(input.tokenAddress, probeTokens, pair);
+        const quote = await getSellEstimate(input.tokenAddress, probeTokens, pair, input.chain);
         if (quote.priceUsd <= 0) reasons.push("sell probe returned no proceeds");
         if (quote.estimatedPriceImpactPercent > tradingConfig.outcomeFeasibleMaxSellImpactPercent) {
           reasons.push(`sell impact ${quote.estimatedPriceImpactPercent.toFixed(1)}% > ${tradingConfig.outcomeFeasibleMaxSellImpactPercent}%`);
@@ -157,6 +158,7 @@ async function updateOutcomeForCandidate(
   const rawHits = hitFlags(existing ?? undefined, bestMultipleSoFar);
   const feasiblePeak = await evaluateFeasiblePeak({
     tokenAddress: candidate.token.address,
+    chain: candidate.token.chain,
     pair: market.primaryPair,
     marketCapAtDetection,
     currentMarketCap: mcap,

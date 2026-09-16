@@ -62,7 +62,10 @@ export interface HolderSnapshot {
   logScanComplete: boolean; // false if LOG_SCAN_MAX_CHUNKS was hit before reaching genesis
 }
 
-function percentOfSupply(raw: bigint, totalSupply: bigint): number {
+// Exported for solanaHolderConcentration.ts, which produces the same
+// HolderSnapshot shape from a completely different data source (SPL RPC
+// methods, not an ERC20 Transfer-log scan) but shares this percentage math.
+export function percentOfSupply(raw: bigint, totalSupply: bigint): number {
   if (totalSupply <= 0n) return 0;
   return Number((raw * 1_000_000n) / totalSupply) / 10_000;
 }

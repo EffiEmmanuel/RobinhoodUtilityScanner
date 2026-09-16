@@ -94,7 +94,7 @@ export async function runPositionStrategyReview(input: {
 
   const strategy = await getActiveStrategyVersion();
   const exitRules = strategy.exitRules as unknown as ExitRules;
-  const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair, token.address);
+  const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair, token.address, token.chain);
   const researchSummary = await fetchResearchSummary(trade);
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
 
@@ -104,7 +104,7 @@ export async function runPositionStrategyReview(input: {
       model: config.researchModel,
       system: POSITION_STRATEGY_SYSTEM,
       prompt: buildPositionStrategyPrompt({
-        token: { name: token.name, symbol: token.symbol, address: token.address },
+        token: { name: token.name, symbol: token.symbol, address: token.address, chain: token.chain },
         researchSummary,
         positionState: formatPositionState({
           currentMultiple: input.currentMultiple,
@@ -218,8 +218,8 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   const [circuitBreakers, portfolio, sellQuoteAvailable, buyEstimate] = await Promise.all([
     checkCircuitBreakers(),
     getPortfolioState(),
-    isSellable(token.address, pair, undefined),
-    getBuyEstimate(token.address, trade.pendingReentryUsd, pair),
+    isSellable(token.address, pair, token.chain, undefined),
+    getBuyEstimate(token.address, trade.pendingReentryUsd, pair, token.chain),
   ]);
   // A re-entry adds to a position without facing the high-conviction gate a
   // fresh conservative-mode entry has to clear, so it waits until the loss
@@ -249,7 +249,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
 
   let fill: FillResult;
   try {
-    fill = await executeBuyFill(token.address, trade.pendingReentryUsd, pair);
+    fill = await executeBuyFill(token.address, trade.pendingReentryUsd, pair, token.chain);
   } catch (err) {
     logger.error({ tradeId: trade.id, err: String(err) }, "re-entry buy execution failed — will retry next tick");
     return;

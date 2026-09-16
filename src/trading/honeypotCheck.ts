@@ -1,7 +1,12 @@
 import { toFunctionSelector, parseAbi } from "viem";
 import { logger } from "../logger";
+import { config } from "../config";
 import { tradingConfig } from "./config";
 import { getPublicClient, getWalletAddress, isWalletConfigured } from "./live/wallet";
+import { evaluateSolanaHoneypotRisk } from "./solanaHoneypotCheck";
+import { HoneypotCheckInconclusiveError, isHoneypotCheckInconclusiveError, type HoneypotRiskResult } from "./honeypotTypes";
+
+export { HoneypotCheckInconclusiveError, isHoneypotCheckInconclusiveError, type HoneypotRiskResult };
 
 const TRANSFER_ABI = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
 const PROBE_RECIPIENT = "0x000000000000000000000000000000000000dEaD" as const;
@@ -43,28 +48,6 @@ const HONEYPOT_SIGNATURES = {
   ],
 } as const;
 
-export interface HoneypotRiskResult {
-  passed: boolean;
-  reasons: string[];
-  flags: string[];
-}
-
-// Same shape as poolDiscovery.ts's PoolDiscoveryInconclusiveError: a network
-// or RPC-level failure here proves nothing about the token itself, but was
-// previously folded into a hard "honeypot risk" reject with no retry. Callers
-// should treat this the same way they treat pool-discovery-inconclusive —
-// entryMonitor.ts's isTransientEntryInfraError already checks for it.
-export class HoneypotCheckInconclusiveError extends Error {
-  constructor(message: string) {
-    super(`honeypot check inconclusive: ${message}`);
-    this.name = "HoneypotCheckInconclusiveError";
-  }
-}
-
-export function isHoneypotCheckInconclusiveError(err: unknown): boolean {
-  return err instanceof HoneypotCheckInconclusiveError || String(err).includes("honeypot check inconclusive");
-}
-
 function isLikelyInfraError(err: unknown): boolean {
   const message = String(err).toLowerCase();
   return (
@@ -105,7 +88,15 @@ export function isBenignZeroTransferProbeFailure(err: unknown): boolean {
   );
 }
 
-export async function evaluateHoneypotRisk(tokenAddress: string): Promise<HoneypotRiskResult> {
+export async function evaluateHoneypotRisk(tokenAddress: string, chain: string): Promise<HoneypotRiskResult> {
+  if (chain === "solana") return evaluateSolanaHoneypotRisk(tokenAddress);
+  // This check is bytecode/ABI probing — an EVM-only mechanism. Any other
+  // not-yet-implemented chain fails closed rather than silently skipping: a
+  // permanent reject here, not a retried InconclusiveError, since no future
+  // retry will make an unimplemented chain's check exist.
+  if (chain !== config.targetChainId) {
+    return { passed: false, reasons: [`honeypot check not yet implemented for chain "${chain}"`], flags: ["CHAIN_NOT_SUPPORTED"] };
+  }
   if (!tradingConfig.honeypotBytecodeCheckEnabled) return { passed: true, reasons: ["honeypot bytecode check disabled"], flags: [] };
 
   const client = getPublicClient();

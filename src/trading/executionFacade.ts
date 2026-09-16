@@ -1,5 +1,7 @@
 import { parseEther, formatUnits } from "viem";
+import { PublicKey } from "@solana/web3.js";
 import { logger } from "../logger";
+import { config } from "../config";
 import { sleep } from "../util/http";
 import type { MarketPair } from "../dex/types";
 import { isNativeEthQuoted } from "../dex/client";
@@ -11,6 +13,25 @@ import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
 import { ensureSellApprovals } from "./live/permit2Approvals";
 import { recordExecutionQuality } from "./executionQuality";
+import { isSolanaLiveModeReady, getSolanaLiveQuote, executeSolanaLiveBuy, executeSolanaLiveSell, canSolanaWalletTransferToken } from "./live/solana/executionProvider";
+import { getSolanaConnection, getSolanaWalletPublicKey } from "./live/solana/wallet";
+import { getSolanaMintDecimals, getSolanaTokenBalance } from "./live/solana/tokenUtils";
+import { SOL_MINT } from "./live/solana/jupiterClient";
+
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+// Solana counterpart to isNativeEthQuoted/deriveEthPriceUsd below — same
+// rationale (never misread a pair quoted in something else as a native-token
+// rate), just keyed on wSOL's mint instead of the EVM zero address.
+function isNativeSolQuoted(pair: Pick<MarketPair, "quoteTokenAddress">): boolean {
+  return pair.quoteTokenAddress === SOL_MINT;
+}
+
+function deriveSolPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative" | "quoteTokenAddress">): number | undefined {
+  if (!isNativeSolQuoted(pair)) return undefined;
+  if (!pair.priceUsd || !pair.priceNative || pair.priceNative === 0) return undefined;
+  return pair.priceUsd / pair.priceNative;
+}
 
 /**
  * The one seam entryMonitor.ts and positionManager.ts call through — neither
@@ -20,7 +41,11 @@ import { recordExecutionQuality } from "./executionQuality";
  */
 export interface FillResult extends PaperQuote {
   provider: "paper" | "live";
-  txHash?: `0x${string}`;
+  // Plain string, not `0x${string}` — Solana transaction signatures are
+  // base58, not EVM hex. Nothing outside the EVM branch below needs the
+  // narrower type; every downstream consumer (notifications, ledger notes,
+  // logging) only ever stores/displays this.
+  txHash?: string;
   approvalTxHashes?: string[];
 }
 
@@ -79,11 +104,18 @@ function logSuspiciousQuote(
  * deciding whether to actually call executeBuyFill/executeSellFill (§17: a
  * fresh quote must exist and be acceptable before a real buy is ever signed).
  */
-export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "tokenAmount">> {
-  if (!isLiveModeReady()) {
+export async function getBuyEstimate(
+  tokenAddress: string,
+  positionSizeUsd: number,
+  pair: MarketPair,
+  chain: string
+): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "tokenAmount">> {
+  const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
+  if (!liveReady) {
     const quote = getPaperQuote(positionSizeUsd, pair);
     void recordExecutionQuality({
       tokenAddress,
+      chain,
       pair,
       direction: "QUOTE_BUY",
       success: true,
@@ -92,6 +124,31 @@ export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: numb
       suspiciousQuote: quote.estimatedPriceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
     });
     return quote;
+  }
+
+  if (chain === "solana") {
+    const solPriceUsd = deriveSolPriceUsd(pair);
+    if (!solPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
+    const amountInLamports = BigInt(Math.floor((positionSizeUsd / solPriceUsd) * LAMPORTS_PER_SOL));
+    const quote = await getSolanaLiveQuote(tokenAddress, true, amountInLamports, tradingConfig.defaultMaxBuySlippageBps);
+    if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
+
+    const decimals = await getSolanaMintDecimals(getSolanaConnection(), new PublicKey(tokenAddress));
+    const tokenOut = Number(quote.outAmount) / 10 ** decimals;
+    const effectivePriceUsd = tokenOut > 0 ? positionSizeUsd / tokenOut : Infinity;
+    const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
+    const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((effectivePriceUsd - spotPriceUsd) / spotPriceUsd) * 100) : 0;
+    void recordExecutionQuality({
+      tokenAddress,
+      chain,
+      pair,
+      direction: "QUOTE_BUY",
+      success: true,
+      slippageBps: Math.round(priceImpactPercent * 100),
+      priceImpactPercent,
+      suspiciousQuote: priceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+    });
+    return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
   }
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
@@ -108,6 +165,7 @@ export async function getBuyEstimate(tokenAddress: string, positionSizeUsd: numb
   logSuspiciousQuote("buy", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
   void recordExecutionQuality({
     tokenAddress,
+    chain,
     pair,
     direction: "QUOTE_BUY",
     success: true,
@@ -122,12 +180,15 @@ export async function executeBuyFill(
   tokenAddress: string,
   positionSizeUsd: number,
   pair: MarketPair,
+  chain: string,
   options: { maxSlippageBps?: number } = {}
 ): Promise<FillResult> {
-  if (!isLiveModeReady()) {
+  const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
+  if (!liveReady) {
     const fill = { ...getPaperQuote(positionSizeUsd, pair), provider: "paper" as const };
     void recordExecutionQuality({
       tokenAddress,
+      chain,
       pair,
       direction: "BUY",
       success: true,
@@ -136,6 +197,8 @@ export async function executeBuyFill(
     });
     return fill;
   }
+
+  if (chain === "solana") return executeSolanaBuyFill(tokenAddress, positionSizeUsd, pair, chain, options);
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
   if (!ethPriceUsd) throw new Error("cannot determine ETH/USD price for live buy sizing (missing priceNative)");
@@ -184,7 +247,7 @@ export async function executeBuyFill(
   const gasCostUsd = gasCostEth * ethPriceUsd;
 
   logger.info({ tokenAddress, txHash: result.txHash, tokenAmount, gasCostUsd }, "live buy confirmed");
-  void recordExecutionQuality({ tokenAddress, pair, direction: "BUY", success: true, slippageBps: 0, priceImpactPercent: 0 });
+  void recordExecutionQuality({ tokenAddress, chain, pair, direction: "BUY", success: true, slippageBps: 0, priceImpactPercent: 0 });
 
   // Desk review D8: Permit2 approvals were only ever requested at SELL time,
   // so a stop-loss or profit-target exit had to wait on 1-2 approval
@@ -214,6 +277,58 @@ export async function executeBuyFill(
   };
 }
 
+/** Solana branch of executeBuyFill — same balance-delta-based fill accounting
+ * as the EVM path above (never trust the swap result's own "amount out" as
+ * the recorded fill; read the wallet's actual before/after balance), just
+ * against an ATA instead of an ERC20 balanceOf, and no approval step (SPL
+ * has no allowance model — Jupiter's transaction already handles ATA
+ * creation). No RPC read-after-write retry loop here — unlike Robinhood
+ * Chain's ~100ms blocks, this hasn't been exercised against real Solana RPC
+ * behavior yet, so this may need the same defensive backoff once it has. */
+async function executeSolanaBuyFill(
+  tokenAddress: string,
+  positionSizeUsd: number,
+  pair: MarketPair,
+  chain: string,
+  options: { maxSlippageBps?: number }
+): Promise<FillResult> {
+  const solPriceUsd = deriveSolPriceUsd(pair);
+  if (!solPriceUsd) throw new Error("cannot determine SOL/USD price for live buy sizing (missing priceNative)");
+  const amountInLamports = BigInt(Math.floor((positionSizeUsd / solPriceUsd) * LAMPORTS_PER_SOL));
+
+  const conn = getSolanaConnection();
+  const wallet = getSolanaWalletPublicKey();
+  const mint = new PublicKey(tokenAddress);
+
+  const balanceBefore = await getSolanaTokenBalance(conn, mint, wallet);
+  const result = await executeSolanaLiveBuy(tokenAddress, amountInLamports, options.maxSlippageBps ?? tradingConfig.defaultMaxBuySlippageBps);
+  const balanceAfter = await getSolanaTokenBalance(conn, mint, wallet);
+  if (balanceAfter <= balanceBefore) {
+    throw new Error(
+      `live solana buy tx ${result.signature} confirmed but the wallet's token balance didn't increase — refusing to record a phantom buy. Verify the wallet's actual token balance and reconcile manually.`
+    );
+  }
+
+  const decimals = await getSolanaMintDecimals(conn, mint);
+  const boughtRaw = balanceAfter - balanceBefore;
+  const tokenAmount = Number(boughtRaw) / 10 ** decimals;
+  const gasCostSol = (result.feeLamports ?? 0) / LAMPORTS_PER_SOL;
+  const gasCostUsd = gasCostSol * solPriceUsd;
+
+  logger.info({ tokenAddress, signature: result.signature, tokenAmount, gasCostUsd }, "live solana buy confirmed");
+  void recordExecutionQuality({ tokenAddress, chain, pair, direction: "BUY", success: true, slippageBps: 0, priceImpactPercent: 0 });
+
+  return {
+    priceUsd: tokenAmount > 0 ? positionSizeUsd / tokenAmount : 0,
+    tokenAmount,
+    estimatedSlippageBps: 0,
+    estimatedPriceImpactPercent: 0,
+    gasCostUsd,
+    provider: "live",
+    txHash: result.signature,
+  };
+}
+
 /**
  * Sell-side counterpart to getBuyEstimate — quote-only, never executes.
  * Also positionManager.ts's source of truth for mark-to-market pricing on an
@@ -226,11 +341,18 @@ export async function executeBuyFill(
  * failure branch (no quote, no ETH rate) — callers must treat 0 as "no mark
  * available" and fall back, never as a real $0 price.
  */
-export async function getSellEstimate(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "priceUsd">> {
-  if (!isLiveModeReady()) {
+export async function getSellEstimate(
+  tokenAddress: string,
+  tokenAmount: number,
+  pair: MarketPair,
+  chain: string
+): Promise<Pick<PaperQuote, "estimatedSlippageBps" | "estimatedPriceImpactPercent" | "priceUsd">> {
+  const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
+  if (!liveReady) {
     const quote = getPaperSellQuote(tokenAmount, pair);
     void recordExecutionQuality({
       tokenAddress,
+      chain,
       pair,
       direction: "QUOTE_SELL",
       success: quote.priceUsd > 0,
@@ -240,6 +362,31 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
       error: quote.priceUsd > 0 ? undefined : "paper sell quote unavailable",
     });
     return quote;
+  }
+
+  if (chain === "solana") {
+    const decimals = await getSolanaMintDecimals(getSolanaConnection(), new PublicKey(tokenAddress));
+    const tokenAmountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+    const quote = await getSolanaLiveQuote(tokenAddress, false, tokenAmountRaw, tradingConfig.defaultMaxSellSlippageBps);
+    if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
+
+    const solPriceUsd = deriveSolPriceUsd(pair);
+    if (!solPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
+    const proceedsUsd = (Number(quote.outAmount) / LAMPORTS_PER_SOL) * solPriceUsd;
+    const effectivePriceUsd = tokenAmount > 0 ? proceedsUsd / tokenAmount : 0;
+    const spotPriceUsd = pair.priceUsd ?? effectivePriceUsd;
+    const priceImpactPercent = spotPriceUsd > 0 ? Math.max(0, ((spotPriceUsd - effectivePriceUsd) / spotPriceUsd) * 100) : 0;
+    void recordExecutionQuality({
+      tokenAddress,
+      chain,
+      pair,
+      direction: "QUOTE_SELL",
+      success: true,
+      slippageBps: Math.round(priceImpactPercent * 100),
+      priceImpactPercent,
+      suspiciousQuote: priceImpactPercent >= SUSPICIOUS_PRICE_IMPACT_PERCENT,
+    });
+    return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, priceUsd: effectivePriceUsd };
   }
 
   const client = getPublicClient();
@@ -261,6 +408,7 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   logSuspiciousQuote("sell", tokenAddress, quote, priceImpactPercent, spotPriceUsd, effectivePriceUsd);
   void recordExecutionQuality({
     tokenAddress,
+    chain,
     pair,
     direction: "QUOTE_SELL",
     success: true,
@@ -271,11 +419,13 @@ export async function getSellEstimate(tokenAddress: string, tokenAmount: number,
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, priceUsd: effectivePriceUsd };
 }
 
-export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair): Promise<FillResult> {
-  if (!isLiveModeReady()) {
+export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string): Promise<FillResult> {
+  const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
+  if (!liveReady) {
     const fill = { ...getPaperSellQuote(tokenAmount, pair), provider: "paper" as const };
     void recordExecutionQuality({
       tokenAddress,
+      chain,
       pair,
       direction: "SELL",
       success: fill.priceUsd > 0,
@@ -285,6 +435,8 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
     });
     return fill;
   }
+
+  if (chain === "solana") return executeSolanaSellFill(tokenAddress, tokenAmount, pair, chain);
 
   const ethPriceUsd = deriveEthPriceUsd(pair);
   if (!ethPriceUsd) throw new Error("cannot determine ETH/USD price for live sell sizing (missing priceNative)");
@@ -344,7 +496,7 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const proceedsUsd = ethReceived * ethPriceUsd;
 
   logger.info({ tokenAddress, txHash: result.txHash, soldTokens, proceedsUsd, gasCostUsd }, "live sell confirmed");
-  void recordExecutionQuality({ tokenAddress, pair, direction: "SELL", success: true, slippageBps: 0, priceImpactPercent: 0 });
+  void recordExecutionQuality({ tokenAddress, chain, pair, direction: "SELL", success: true, slippageBps: 0, priceImpactPercent: 0 });
 
   return {
     priceUsd: soldTokens > 0 ? proceedsUsd / soldTokens : 0,
@@ -358,6 +510,51 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   };
 }
 
+/** Solana branch of executeSellFill — same clamp-to-real-balance rationale as
+ * the EVM path (the caller's requested amount is a JS Number that can drift
+ * from the wallet's true raw balance; never let that cause a revert-forever
+ * loop, clamp and sell what's actually there). */
+async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string): Promise<FillResult> {
+  const solPriceUsd = deriveSolPriceUsd(pair);
+  if (!solPriceUsd) throw new Error("cannot determine SOL/USD price for live sell sizing (missing priceNative)");
+
+  const conn = getSolanaConnection();
+  const wallet = getSolanaWalletPublicKey();
+  const mint = new PublicKey(tokenAddress);
+  const [decimals, tokenBalanceRaw] = await Promise.all([getSolanaMintDecimals(conn, mint), getSolanaTokenBalance(conn, mint, wallet)]);
+
+  const requestedRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
+  const tokenAmountRaw = requestedRaw > tokenBalanceRaw ? tokenBalanceRaw : requestedRaw;
+  if (tokenAmountRaw <= 0n) {
+    throw new Error(`refusing to sell ${tokenAddress}: wallet holds no tokens (requested ${requestedRaw} raw units)`);
+  }
+  if (requestedRaw > tokenBalanceRaw) {
+    logger.warn(
+      { tokenAddress, requestedRaw: requestedRaw.toString(), tokenBalanceRaw: tokenBalanceRaw.toString(), excessRaw: (requestedRaw - tokenBalanceRaw).toString() },
+      "sell amount exceeded the wallet's real token balance — clamped to the actual balance"
+    );
+  }
+  const soldTokens = Number(tokenAmountRaw) / 10 ** decimals;
+
+  const result = await executeSolanaLiveSell(tokenAddress, tokenAmountRaw, tradingConfig.defaultMaxSellSlippageBps);
+  const proceedsUsd = (Number(result.amountOut) / LAMPORTS_PER_SOL) * solPriceUsd;
+  const gasCostSol = (result.feeLamports ?? 0) / LAMPORTS_PER_SOL;
+  const gasCostUsd = gasCostSol * solPriceUsd;
+
+  logger.info({ tokenAddress, signature: result.signature, soldTokens, proceedsUsd, gasCostUsd }, "live solana sell confirmed");
+  void recordExecutionQuality({ tokenAddress, chain, pair, direction: "SELL", success: true, slippageBps: 0, priceImpactPercent: 0 });
+
+  return {
+    priceUsd: soldTokens > 0 ? proceedsUsd / soldTokens : 0,
+    tokenAmount: soldTokens,
+    estimatedSlippageBps: 0,
+    estimatedPriceImpactPercent: 0,
+    gasCostUsd,
+    provider: "live",
+    txHash: result.signature,
+  };
+}
+
 /**
  * LIVE-only reconciliation read: how many of this token the bot wallet
  * actually holds right now. Used by the position monitor to notice an
@@ -365,7 +562,14 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
  * forever. Returns undefined outside LIVE mode so paper/shadow accounting
  * stays purely ledger-driven.
  */
-export async function getLiveWalletTokenBalance(tokenAddress: string): Promise<number | undefined> {
+export async function getLiveWalletTokenBalance(tokenAddress: string, chain: string): Promise<number | undefined> {
+  if (chain === "solana") {
+    if (!isSolanaLiveModeReady()) return undefined;
+    const conn = getSolanaConnection();
+    const mint = new PublicKey(tokenAddress);
+    const [decimals, rawBalance] = await Promise.all([getSolanaMintDecimals(conn, mint), getSolanaTokenBalance(conn, mint, getSolanaWalletPublicKey())]);
+    return Number(rawBalance) / 10 ** decimals;
+  }
   if (!isLiveModeReady()) return undefined;
   const client = getPublicClient();
   const token = tokenAddress as `0x${string}`;
@@ -385,9 +589,28 @@ export async function getLiveWalletTokenBalance(tokenAddress: string): Promise<n
  * without a size yet (nothing built on this token so far) still get the
  * dust-amount fallback, which is still strictly better than no check.
  */
-export async function isSellable(tokenAddress: string, pair: MarketPair | undefined, realisticTokenAmount?: number): Promise<boolean> {
-  if (!isLiveModeReady()) return isPaperSellQuoteAvailable(pair);
+export async function isSellable(tokenAddress: string, pair: MarketPair | undefined, chain: string, realisticTokenAmount?: number): Promise<boolean> {
+  const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
+  if (!liveReady) return isPaperSellQuoteAvailable(pair);
   if (!pair) return false;
+
+  if (chain === "solana") {
+    let amountToSimulate = 1n;
+    if (realisticTokenAmount && realisticTokenAmount > 0) {
+      try {
+        const decimals = await getSolanaMintDecimals(getSolanaConnection(), new PublicKey(tokenAddress));
+        amountToSimulate = BigInt(Math.floor(realisticTokenAmount * 10 ** decimals));
+      } catch {
+        amountToSimulate = 1n;
+      }
+    }
+    // Jupiter returning a route at all is the Solana analog of the EVM
+    // check's pool-quote probe — a token with no sellable route (no venue
+    // will quote it) is the aggregator equivalent of "no live pool found."
+    const quote = await getSolanaLiveQuote(tokenAddress, false, amountToSimulate, tradingConfig.defaultMaxSellSlippageBps);
+    return quote !== undefined;
+  }
+
   let amountToSimulate = 1n;
   if (realisticTokenAmount && realisticTokenAmount > 0) {
     try {
@@ -420,7 +643,11 @@ const TRANSFERABILITY_PROBE_RECIPIENT = "0x000000000000000000000000000000000000d
  * should treat a `false` here as grounds to write the position off
  * immediately rather than let positionManager retry it forever.
  */
-export async function canWalletTransferToken(tokenAddress: string, tokenAmount: number): Promise<boolean> {
+export async function canWalletTransferToken(tokenAddress: string, tokenAmount: number, chain: string): Promise<boolean> {
+  if (chain === "solana") {
+    if (!isSolanaLiveModeReady() || tokenAmount <= 0) return true;
+    return canSolanaWalletTransferToken(tokenAddress, tokenAmount);
+  }
   if (!isLiveModeReady() || tokenAmount <= 0) return true;
   let amountRaw: bigint;
   try {

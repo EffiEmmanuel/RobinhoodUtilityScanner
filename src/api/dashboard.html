@@ -1723,6 +1723,19 @@
           if (!address) return null;
           return "https://robinhoodchain.blockscout.com/address/" + address;
         }
+        // Per-token explorer link — chain-dispatched, unlike blockscoutUrl
+        // above (which is only ever used for the bot's own EVM wallet address
+        // and should stay Robinhood-specific).
+        function explorerUrl(token) {
+          if (!token || !token.address) return null;
+          if (token.chain === "solana") {
+            return "https://solscan.io/token/" + token.address;
+          }
+          return blockscoutUrl(token.address);
+        }
+        function explorerLabel(token) {
+          return token && token.chain === "solana" ? "Solscan" : "Blockscout";
+        }
         function tokenLabel(token) {
           if (!token) return "Unknown token";
           var label = esc(
@@ -3059,12 +3072,14 @@
                 dexUrl +
                 '" target="_blank" rel="noopener noreferrer">DexScreener</a>'
             );
-          var blockUrl = blockscoutUrl(token.address);
+          var blockUrl = explorerUrl(token);
           if (blockUrl)
             links.push(
               '<a href="' +
                 blockUrl +
-                '" target="_blank" rel="noopener noreferrer">Blockscout</a>'
+                '" target="_blank" rel="noopener noreferrer">' +
+                explorerLabel(token) +
+                "</a>"
             );
           if (links.length) {
             sections.push(

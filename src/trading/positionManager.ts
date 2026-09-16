@@ -107,7 +107,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     return;
   }
 
-  if (await reconcileExternalWalletExit(trade, token.address, remainingTokens)) return;
+  if (await reconcileExternalWalletExit(trade, token.address, token.chain, remainingTokens)) return;
 
   const market = await pollCandidateMarket(trade.tokenId, token.chain, token.address);
   const pair = market.primaryPair;
@@ -127,7 +127,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // ETH rate) and PAPER/SHADOW's paper quote can legitimately be a real 0
   // only when priceUsd/liquidity are themselves 0 — either way, > 0 is the
   // right test for "this mark is usable," never trust a bare 0 as a fill.
-  const markQuote = pair ? await getSellEstimate(token.address, remainingTokens, pair).catch(() => undefined) : undefined;
+  const markQuote = pair ? await getSellEstimate(token.address, remainingTokens, pair, token.chain).catch(() => undefined) : undefined;
   const priceUsd = markQuote && markQuote.priceUsd > 0 ? markQuote.priceUsd : (pair?.priceUsd ?? trade.entryPriceUsd ?? 0);
   const entryPriceUsd = trade.entryPriceUsd ?? 0;
   const currentMultiple = entryPriceUsd > 0 ? priceUsd / entryPriceUsd : 1;
@@ -149,7 +149,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // Continuous, free, deterministic technical read — computed every tick
   // regardless of whether an AI strategy review runs this cycle, so the
   // stored PositionSnapshot history is always complete for later analysis.
-  const technical = await computeTechnicalFeatures(trade.tokenId, pair, token.address);
+  const technical = await computeTechnicalFeatures(trade.tokenId, pair, token.address, token.chain);
 
   await db.positionSnapshot.create({
     data: {
@@ -192,7 +192,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
     }
     if (aiDecision) {
-      const acted = await applyAiStrategyDecision(trade, token.address, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision);
+      const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision);
       if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
     }
   }
@@ -207,7 +207,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     liquidityUsd: pair?.liquidityUsd ?? 0,
     buySellRatio5m,
     totalTxns5m,
-    sellQuoteAvailable: await isSellable(token.address, pair, remainingTokens),
+    sellQuoteAvailable: await isSellable(token.address, pair, token.chain, remainingTokens),
     profitStepsTaken,
     remainingTokens,
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
@@ -257,7 +257,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     resetChartVisionDeferStreak(trade.id);
   }
 
-  await executeSell(trade, token.address, remainingTokens, decision, pair);
+  await executeSell(trade, token.address, remainingTokens, decision, pair, token.chain);
 }
 
 /**
@@ -269,6 +269,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
 async function applyAiStrategyDecision(
   trade: Trade,
   tokenAddress: string,
+  tokenChain: string,
   pair: MarketPair | undefined,
   remainingTokens: number,
   totalBoughtTokens: number,
@@ -298,7 +299,7 @@ async function applyAiStrategyDecision(
   const runnerAwareDecision = applyVerifiedRunnerGuard({ trade, decision: exitDecision, remainingTokens, totalBoughtTokens });
   if (!runnerAwareDecision) return false;
 
-  await executeSell(trade, tokenAddress, remainingTokens, runnerAwareDecision, pair);
+  await executeSell(trade, tokenAddress, remainingTokens, runnerAwareDecision, pair, tokenChain);
   return true;
 }
 
@@ -540,10 +541,10 @@ export function evaluateExits(ctx: {
   return null;
 }
 
-async function reconcileExternalWalletExit(trade: Trade, tokenAddress: string, remainingTokens: number): Promise<boolean> {
+async function reconcileExternalWalletExit(trade: Trade, tokenAddress: string, chain: string, remainingTokens: number): Promise<boolean> {
   let walletTokens: number | undefined;
   try {
-    walletTokens = await getLiveWalletTokenBalance(tokenAddress);
+    walletTokens = await getLiveWalletTokenBalance(tokenAddress, chain);
   } catch (err) {
     logger.warn({ tradeId: trade.id, tokenAddress, err: String(err) }, "could not reconcile live wallet token balance — continuing with normal position monitoring");
     return false;
@@ -612,13 +613,14 @@ async function executeSell(
   tokenAddress: string,
   remainingTokens: number,
   decision: ExitDecision,
-  pair: MarketPair
+  pair: MarketPair,
+  chain: string
 ): Promise<void> {
   const sellTokens = remainingTokens * (decision.sellPercentOfRemaining / 100);
 
   // A pre-trade estimate only, to gate on slippage before ever executing —
   // mirrors the same estimate-then-execute split used for buys (§17).
-  const preEstimate = await getSellEstimate(tokenAddress, sellTokens, pair);
+  const preEstimate = await getSellEstimate(tokenAddress, sellTokens, pair, chain);
   const stuckForMinutes = blockedExitAgeMinutes(trade.id);
   const escalate =
     tradingConfig.stuckExitEscalateAfterMinutes > 0 && stuckForMinutes >= tradingConfig.stuckExitEscalateAfterMinutes;
@@ -651,7 +653,7 @@ async function executeSell(
 
   let fill: FillResult;
   try {
-    fill = await executeSellFill(tokenAddress, sellTokens, pair);
+    fill = await executeSellFill(tokenAddress, sellTokens, pair, chain);
   } catch (err) {
     logger.error({ tradeId: trade.id, err: String(err) }, "sell execution failed — will retry next tick");
     void recordExecutionQuality({

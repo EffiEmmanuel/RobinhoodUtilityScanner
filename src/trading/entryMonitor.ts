@@ -1,4 +1,5 @@
 import { db } from "../db";
+import { config } from "../config";
 import { logger } from "../logger";
 import {
   PendingEntryStatus,
@@ -35,6 +36,7 @@ import {
   type ConvictionResult,
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
+import { getSolanaHolderSnapshot } from "./solanaHolderConcentration";
 import { getCohortSizeMultiplier } from "./cohortStats";
 import { getPublicClient } from "./live/wallet";
 import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
@@ -464,13 +466,13 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
     if (!manualEntryOverride) {
-      const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address);
+      const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address, candidate.token.chain);
       if (!executionQuality.passed) {
         await rejectEntry(entry, candidate.id, executionQuality.reasons);
         return;
       }
 
-      const honeypotRisk = await evaluateHoneypotRisk(candidate.token.address);
+      const honeypotRisk = await evaluateHoneypotRisk(candidate.token.address, candidate.token.chain);
       if (!honeypotRisk.passed) {
         await rejectEntry(entry, candidate.id, honeypotRisk.reasons);
         return;
@@ -607,7 +609,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       (tradeLane === "MOMENTUM_TACTICAL" || tradeLane === "NARRATIVE_TACTICAL");
     const maxBuySlippageBps = usesTacticalProbeLimits ? tradingConfig.tacticalProbeMaxBuySlippageBps : tradingConfig.defaultMaxBuySlippageBps;
     const maxBuyPriceImpactPercent = usesTacticalProbeLimits ? tradingConfig.tacticalProbeMaxBuyPriceImpactPercent : tradingConfig.maxBuyPriceImpactPercent;
-    let quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
+    let quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair, candidate.token.chain);
     let resized = false;
     while (
       (quote.estimatedSlippageBps > maxBuySlippageBps ||
@@ -615,7 +617,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       positionSizeUsd > sizeFloorUsd
     ) {
       positionSizeUsd = Math.max(positionSizeUsd / 2, sizeFloorUsd);
-      quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair);
+      quote = await getBuyEstimate(candidate.token.address, positionSizeUsd, pair, candidate.token.chain);
       resized = true;
     }
     if (resized) {
@@ -631,7 +633,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       );
     }
 
-    const sellQuoteAvailable = await isSellable(candidate.token.address, pair, quote.tokenAmount);
+    const sellQuoteAvailable = await isSellable(candidate.token.address, pair, candidate.token.chain, quote.tokenAmount);
     const entryResult = manualEntryOverride
       ? {
           decision: circuitBreakers.paused
@@ -698,7 +700,16 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // Checked last, right before commit: it's a real RPC log scan, not a
     // cheap in-memory check like the others above.
     if (!manualEntryOverride && tradingConfig.holderCheckEnabled) {
-      const holderSnapshot = await getHolderSnapshot(getPublicClient(), candidate.token.address as `0x${string}`).catch((err) => {
+      // evaluateHolderConcentration already fails closed (passed: false) on
+      // an undefined snapshot, so a chain with neither branch below (not
+      // Solana, not the EVM chain) correctly rejects via Promise.resolve(undefined)
+      // rather than wrongly attempting an EVM RPC call for it.
+      const holderSnapshot = await (candidate.token.chain === "solana"
+        ? getSolanaHolderSnapshot(candidate.token.address)
+        : candidate.token.chain === config.targetChainId
+          ? getHolderSnapshot(getPublicClient(), candidate.token.address as `0x${string}`)
+          : Promise.resolve(undefined)
+      ).catch((err) => {
         logger.warn({ pendingEntryId: entry.id, candidateId: candidate.id, err: String(err) }, "holder concentration check failed to read on-chain data");
         return undefined;
       });
@@ -720,6 +731,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       strategyVersionId: plan.strategyVersionId,
       tokenId: candidate.tokenId,
       tokenAddress: candidate.token.address,
+      tokenChain: candidate.token.chain,
       positionSizeUsd,
       plannedEntryMcap: plan.currentMarketCap ?? undefined,
       actualEntryMcap: mcap,
@@ -811,6 +823,7 @@ async function openTrade(input: {
   strategyVersionId: string;
   tokenId: string;
   tokenAddress: string;
+  tokenChain: string;
   positionSizeUsd: number;
   plannedEntryMcap: number | undefined;
   actualEntryMcap: number | undefined;
@@ -826,7 +839,7 @@ async function openTrade(input: {
   // resolves, so a failed live swap never creates a phantom open position.
   let fill: FillResult;
   try {
-    fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair, { maxSlippageBps: input.maxSlippageBps });
+    fill = await executeBuyFill(input.tokenAddress, input.positionSizeUsd, input.pair, input.tokenChain, { maxSlippageBps: input.maxSlippageBps });
   } catch (err) {
     // A non-transient failure here (bad routing, an allowance edge case, a
     // token that reverts every transfer) must not be retried: without this,
@@ -913,7 +926,7 @@ async function openTrade(input: {
   // OPEN and retrying a doomed sell forever (see positionManager.ts's own
   // give-up path for a stuck position that only reveals itself after this
   // check already passed).
-  if (fill.provider === "live" && !(await canWalletTransferToken(input.tokenAddress, fill.tokenAmount))) {
+  if (fill.provider === "live" && !(await canWalletTransferToken(input.tokenAddress, fill.tokenAmount, input.tokenChain))) {
     const closed = await db.trade.update({
       where: { id: trade.id },
       data: {

@@ -31,6 +31,12 @@ function tokenLabel(token: Token | null): string {
   return token?.name ?? token?.symbol ?? token?.address.slice(0, 10) ?? "unknown token";
 }
 
+function chainLabel(chain: string | undefined): string {
+  if (chain === "solana") return "Solana";
+  if (chain === config.targetChainId) return "Robinhood Chain";
+  return chain ?? "an unknown chain";
+}
+
 export async function sendTradeEntryEmail(input: {
   token: Token | null;
   trade: Trade;
@@ -51,7 +57,7 @@ export async function sendTradeEntryEmail(input: {
       isLive && input.quote.txHash ? `Transaction: ${input.quote.txHash}` : undefined,
       "",
       isLive
-        ? `THIS WAS A REAL ${tradingConfig.mode} TRADE — real funds were moved on Robinhood Chain.`
+        ? `THIS WAS A REAL ${tradingConfig.mode} TRADE — real funds were moved on ${chainLabel(input.token?.chain)}.`
         : `This is a ${tradingConfig.mode} trade — no real funds were moved.`,
     ]
       .filter((line) => line !== undefined)
@@ -76,7 +82,7 @@ export async function sendPartialProfitEmail(input: {
       `Trade ID: ${input.tradeId}`,
       "",
       isLive
-        ? `THIS WAS A REAL trade — real funds were moved on Robinhood Chain.`
+        ? `THIS WAS A REAL trade — real funds were moved on ${chainLabel(token?.chain)}.`
         : `This is a ${input.mode ?? tradingConfig.mode} trade — no real funds were moved.`,
     ].join("\n")
   );
@@ -100,7 +106,7 @@ export async function sendTradeClosedEmail(input: { token: Token | null; trade: 
       `Exit reason: ${input.trade.exitReason ?? "unknown"}`,
       "",
       isLive
-        ? `THIS WAS A REAL trade — real funds were moved on Robinhood Chain.`
+        ? `THIS WAS A REAL trade — real funds were moved on ${chainLabel(input.token?.chain)}.`
         : `This is a ${input.trade.mode} trade — no real funds were moved.`,
     ].join("\n")
   );

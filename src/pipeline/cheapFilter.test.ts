@@ -37,6 +37,22 @@ describe("cheapFilter", () => {
     const result = cheapFilter(profile({ tokenAddress: "not-an-address" }), "Navier Protocol");
     expect(result.passed).toBe(false);
   });
+
+  it("accepts a base58 Solana address when the profile is chain-tagged solana", () => {
+    const result = cheapFilter(
+      profile({ chainId: "solana", tokenAddress: "So11111111111111111111111111111111111111112" }),
+      "Navier Protocol"
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it("rejects a Solana-shaped address on an EVM-tagged profile", () => {
+    const result = cheapFilter(
+      profile({ chainId: "robinhood", tokenAddress: "So11111111111111111111111111111111111111112" }),
+      "Navier Protocol"
+    );
+    expect(result.passed).toBe(false);
+  });
 });
 
 describe("cheapFilterOnchain", () => {

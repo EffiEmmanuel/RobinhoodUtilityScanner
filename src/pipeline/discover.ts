@@ -60,7 +60,7 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
     return { seen: 0, created: 0 };
   }
 
-  const onChain = profiles.filter((p) => p.chainId === config.targetChainId);
+  const onChain = profiles.filter((p) => config.enabledChains.includes(p.chainId));
   let created = 0;
 
   for (const rawProfile of onChain) {
@@ -70,8 +70,12 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
     // makes the dedup check across this path and onchainDiscovery.ts's
     // (which gets checksummed casing from viem) actually catch the same
     // real contract, instead of creating a second row and re-spending AI
-    // calls on a token we already have.
-    const profile = { ...rawProfile, tokenAddress: rawProfile.tokenAddress.toLowerCase() };
+    // calls on a token we already have. Solana addresses are case-sensitive
+    // base58 — lowercasing would corrupt them into a different address.
+    const profile = {
+      ...rawProfile,
+      tokenAddress: rawProfile.chainId === config.targetChainId ? rawProfile.tokenAddress.toLowerCase() : rawProfile.tokenAddress,
+    };
     const existing = await db.token.findUnique({
       where: { chain_address: { chain: profile.chainId, address: profile.tokenAddress } },
     });
@@ -98,11 +102,17 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
     const name = market.primaryPair?.baseTokenName;
     const symbol = market.primaryPair?.baseTokenSymbol;
 
+    // getAdjustedTotalSupply reads via viem/EVM RPC — no Solana equivalent
+    // yet. cheapFilter treats an undefined supply as "no meme-supply signal"
+    // rather than a rejection, so skipping this for other chains is a safe
+    // degrade, not a missing check that blocks anything.
     let adjustedTotalSupply: number | undefined;
-    try {
-      adjustedTotalSupply = await getAdjustedTotalSupply(getPublicClient(), profile.tokenAddress as `0x${string}`);
-    } catch (err) {
-      logger.warn({ address: profile.tokenAddress, err: String(err) }, "discovery: could not read token total supply");
+    if (profile.chainId === config.targetChainId) {
+      try {
+        adjustedTotalSupply = await getAdjustedTotalSupply(getPublicClient(), profile.tokenAddress as `0x${string}`);
+      } catch (err) {
+        logger.warn({ address: profile.tokenAddress, err: String(err) }, "discovery: could not read token total supply");
+      }
     }
 
     const filter = cheapFilter(profile, name, adjustedTotalSupply);
@@ -154,8 +164,8 @@ export async function runDiscoveryPoll(): Promise<{ seen: number; created: numbe
       await db.token.create({ data: { chain: profile.chainId, address: profile.tokenAddress, ...data } });
       created++;
       logger.info(
-        { address: profile.tokenAddress, passed: filter.passed, reasons: filter.reasons },
-        "discovered new Robinhood Chain token"
+        { chain: profile.chainId, address: profile.tokenAddress, passed: filter.passed, reasons: filter.reasons },
+        "discovered new token"
       );
     }
   }
