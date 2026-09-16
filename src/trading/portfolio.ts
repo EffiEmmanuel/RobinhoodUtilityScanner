@@ -8,10 +8,9 @@ import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
 import { getJupiterQuote, SOL_MINT } from "./live/solana/jupiterClient";
 import { summarizeError } from "../util/errors";
 import { withTimeout } from "../util/http";
-
-const LAMPORTS_PER_SOL = 1_000_000_000;
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
 
+const LAMPORTS_PER_SOL = 1_000_000_000;
 const PAPER_WALLET_ADDRESS = "paper";
 
 /**
@@ -160,6 +159,41 @@ export async function getSolPriceUsd(): Promise<number | undefined> {
 }
 
 /**
+ * Synchronous, non-blocking reads of the cached rates above — for any caller
+ * that's on a latency-sensitive path (dashboard requests, and critically,
+ * checkCircuitBreakers()/getPortfolioState() run before every real trade
+ * entry). Confirmed live 2026-09-16: getEthPriceUsd's own live-fetch-then-
+ * fallback logic can still take 30s+ in the worst case even with the
+ * per-candidate timeout, since ALL 10 candidates can fail — that's too slow
+ * to sit on the entry-decision critical path, not just the dashboard. These
+ * never trigger a fetch themselves; PRICE_REFRESH_INTERVAL_MS below keeps
+ * the cache warm in the background instead. Undefined only on a cold cache
+ * (nothing fetched successfully yet this process) — callers already have
+ * their own documented fallback for that (see getCashUsd).
+ */
+export function getCachedEthPriceUsd(): number | undefined {
+  return cachedEthPriceUsd?.rate;
+}
+export function getCachedSolPriceUsd(): number | undefined {
+  return cachedSolPriceUsd?.rate;
+}
+
+const PRICE_REFRESH_INTERVAL_MS = 90_000;
+// Explicitly called from orchestrator.ts's startTradingOrchestrator, same as
+// ensurePaperWalletSeeded — deliberately NOT invoked at module scope. A
+// module-level side effect here would fire on every import, including from
+// the test suite (which shares this environment's DATABASE_URL), triggering
+// a real DB query and leaving a dangling setInterval with nothing to clear it.
+export function startBackgroundPriceRefresh(): void {
+  const refresh = () => {
+    void getEthPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background ETH/USD price refresh failed"));
+    void getSolPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background SOL/USD price refresh failed"));
+  };
+  refresh(); // populate the cache immediately on startup rather than waiting a full interval
+  setInterval(refresh, PRICE_REFRESH_INTERVAL_MS);
+}
+
+/**
  * In LIVE mode, cash comes from the REAL on-chain wallet balance, not summed
  * historical ledger entries — confirmed live: the ledger sums each entry's
  * amountUsd at the USD rate captured when that entry was recorded (e.g. the
@@ -242,7 +276,10 @@ export interface PortfolioState {
 }
 
 export async function getPortfolioState(): Promise<PortfolioState> {
-  const ethPriceUsd = await getEthPriceUsd();
+  // Synchronous cached read, not a live fetch — this runs on the real
+  // trade-entry critical path via checkCircuitBreakers(), not just the
+  // dashboard. See getCachedEthPriceUsd's doc comment.
+  const ethPriceUsd = getCachedEthPriceUsd();
   const [{ cashUsd, cashEth }, positions, lockedProfitUsd] = await Promise.all([
     getCashUsd(ethPriceUsd),
     getOpenPositionValueUsd(),

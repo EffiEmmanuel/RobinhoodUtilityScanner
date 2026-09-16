@@ -10,7 +10,7 @@ import { planCandidate } from "./planning";
 import { processPendingEntries, recoverStuckPendingEntries, recoverStalledRevalidatingEntries } from "./entryMonitor";
 import { runPositionMonitorTick } from "./positionManager";
 import { pollCandidateOutcomes } from "./outcomes";
-import { ensurePaperWalletSeeded, recordPortfolioSnapshot, checkCircuitBreakers } from "./portfolio";
+import { ensurePaperWalletSeeded, recordPortfolioSnapshot, checkCircuitBreakers, startBackgroundPriceRefresh } from "./portfolio";
 import { checkForCircuitBreakerTransition } from "./circuitBreakerAlerts";
 import { getActiveStrategyVersion } from "./strategy";
 import { checkPortfolioMilestones } from "./milestones";
@@ -239,6 +239,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
   // Retried in case this is the first DB call of the process (cold Neon compute).
   await retryAsync("trading orchestrator startup", async () => {
     await ensurePaperWalletSeeded();
+    startBackgroundPriceRefresh();
     await getActiveStrategyVersion(); // ensure a strategy version exists before anything else runs
     await recoverStuckCandidates();
     await recoverRecentMomentumUtilityRejects();

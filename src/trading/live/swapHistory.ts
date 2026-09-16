@@ -1,7 +1,7 @@
 import { getAddress, type PublicClient } from "viem";
 import { logger } from "../../logger";
 import { tradingConfig } from "../config";
-import { getEthPriceUsd } from "../portfolio";
+import { getCachedEthPriceUsd } from "../portfolio";
 import { UNISWAP_V4_ADDRESSES, POOL_MANAGER_ABI } from "./contracts";
 import { discoverPool, LOG_SCAN_MAX_CHUNKS } from "./poolDiscovery";
 import { getAdjustedTotalSupply, getTokenDecimals } from "./tokenUtils";
@@ -89,7 +89,11 @@ export async function getOnChainSwapHistory(
 
   if (cached.dataPoints === 0) return undefined;
 
-  const ethUsdRate = await getEthPriceUsd();
+  // Synchronous cached read, not a live fetch — already inside a try/catch
+  // one level up (marketAnalysis.ts) that degrades to snapshot-derived
+  // support/resistance on any failure, so a cold cache here should fail
+  // fast into that path rather than potentially blocking for 30s+.
+  const ethUsdRate = getCachedEthPriceUsd();
   if (ethUsdRate === undefined) throw new Error("cannot convert swap history to USD market caps: ETH/USD rate is unavailable");
 
   const mcapPerUsdPrice = await resolveMcapPerUsdPrice(client, token, currentMcap, currentPriceUsd);

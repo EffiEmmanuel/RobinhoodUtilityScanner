@@ -4,7 +4,7 @@ import { rawQuery } from "../rawDb";
 import { withTimeout } from "../util/http";
 import { tradingConfig } from "./config";
 import { isTradingEnabled, setTradingEnabled } from "./runtimeState";
-import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd, getLossBreakerCounts, getPortfolioByChain, getSolPriceUsd } from "./portfolio";
+import { getPortfolioState, checkCircuitBreakers, resetCircuitBreakerCounters, getTotalRealizedPnlUsd, getLossBreakerCounts, getPortfolioByChain, getCachedSolPriceUsd } from "./portfolio";
 import { promoteStrategyVersion } from "./strategy";
 import { isWalletConfigured, getWalletAddress } from "./live/wallet";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
@@ -73,12 +73,15 @@ async function getCheapCircuitBreakerSnapshot(): Promise<{
  * reachable from any module this file imports. */
 export function registerTradingRoutes(app: FastifyInstance): void {
   app.get("/trading/status", async () => {
-    const [portfolio, circuitBreakers, realizedPnlUsd, byChain, solPriceUsd] = await Promise.all([
+    // getCachedSolPriceUsd is a synchronous, non-blocking read — see its doc
+    // comment in portfolio.ts. Was `await getSolPriceUsd().catch(...)`, a
+    // live fetch that could take 30s+ in the worst case.
+    const solPriceUsd = getCachedSolPriceUsd();
+    const [portfolio, circuitBreakers, realizedPnlUsd, byChain] = await Promise.all([
       getPortfolioState(),
       checkCircuitBreakers(),
       getTotalRealizedPnlUsd(),
       getPortfolioByChain(),
-      getSolPriceUsd().catch(() => undefined),
     ]);
     // User directive 2026-09-12: the dashboard's account-health stat card.
     // unrealizedPnlUsd is derived the same way recordPortfolioSnapshot
