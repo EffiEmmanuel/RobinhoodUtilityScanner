@@ -649,24 +649,43 @@ export async function canWalletTransferToken(tokenAddress: string, tokenAmount: 
     return canSolanaWalletTransferToken(tokenAddress, tokenAmount);
   }
   if (!isLiveModeReady() || tokenAmount <= 0) return true;
-  let amountRaw: bigint;
+
+  const client = getPublicClient();
+  const wallet = getWalletAddress();
+  const token = tokenAddress as `0x${string}`;
+
+  // Confirmed live 2026-09-16 (RECORD/CYCLE/XBOW): re-deriving the raw probe
+  // amount from the caller's float tokenAmount hits the exact float
+  // round-trip bug documented on executeSellFill's real-sell path above
+  // (executeBuyFill records tokenAmount as a JS Number, which can round UP
+  // relative to what the wallet actually holds by the time this runs) — the
+  // simulated transfer then reverts with ERC20InsufficientBalance/
+  // InsufficientBalance, a real revert but not a honeypot signal, and gets
+  // misread as one below. Reading the actual on-chain balance instead avoids
+  // the drift entirely, same fix as executeSellFill's clamp-to-tokenBalanceRaw.
+  let actualBalanceRaw: bigint;
   try {
-    const decimals = await getTokenDecimals(getPublicClient(), tokenAddress as `0x${string}`);
-    amountRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
-  } catch {
-    amountRaw = 1n; // decimals lookup failed — dust-amount probe is still strictly better than no check
+    actualBalanceRaw = await getTokenBalance(client, token, wallet);
+  } catch (err) {
+    // Can't even read the balance — an infra hiccup, not evidence of a
+    // honeypot. A real position already exists; don't write it off on an
+    // ambiguous signal, just skip the check this cycle.
+    logger.warn({ tokenAddress, err: String(err) }, "could not read on-chain balance to probe transferability — skipping the write-off check this cycle");
+    return true;
   }
+  if (actualBalanceRaw <= 0n) return true; // nothing to probe yet — not this check's job
+
   try {
-    await getPublicClient().simulateContract({
-      address: tokenAddress as `0x${string}`,
+    await client.simulateContract({
+      address: token,
       abi: [{ type: "function", name: "transfer", stateMutability: "nonpayable", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }] }] as const,
       functionName: "transfer",
-      args: [TRANSFERABILITY_PROBE_RECIPIENT, amountRaw],
-      account: getWalletAddress(),
+      args: [TRANSFERABILITY_PROBE_RECIPIENT, actualBalanceRaw],
+      account: wallet,
     });
     return true;
   } catch (err) {
-    logger.warn({ tokenAddress, err: String(err) }, "wallet cannot transfer this token at all — likely a honeypot that blocks real holder sales");
+    logger.warn({ tokenAddress, err: String(err) }, "wallet cannot transfer its actual held balance of this token — likely a honeypot that blocks real holder sales");
     return false;
   }
 }
