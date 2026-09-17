@@ -3,6 +3,7 @@ import net from "node:net";
 import nodemailer from "nodemailer";
 import { config } from "../config";
 import { logger } from "../logger";
+import { fetchJsonWithRetry } from "../util/http";
 
 // Free SMTP relay (Gmail App Password by default) in place of Resend, which
 // hit its monthly send cap. Regular Gmail allows 500 sends/24hr, Google
@@ -52,7 +53,45 @@ export interface MailInput {
   html?: string;
 }
 
-export async function sendMail(input: MailInput): Promise<string | undefined> {
+// Parses the "Name <email@host>" format used everywhere ALERT_EMAIL_FROM is
+// read from — falls back to treating the whole string as a bare email when
+// there's no angle-bracket name, which is the same shape nodemailer accepts.
+function parseAddress(raw: string): { name?: string; email: string } {
+  const match = raw.match(/^\s*(.*?)\s*<([^<>]+)>\s*$/);
+  if (match) return { name: match[1] || undefined, email: match[2] };
+  return { email: raw.trim() };
+}
+
+/**
+ * Confirmed live 2026-09-17: raw SMTP to smtp.gmail.com:465 from Railway
+ * went to 0 successes / 26 failures ("Connection timeout") over ~3.6h — see
+ * config.ts's brevoApiKey doc comment. Brevo's HTTPS API sidesteps whatever
+ * is blocking the SMTP port entirely, since it's a normal port-443 request
+ * fetchJsonWithRetry already knows how to retry/back off.
+ */
+async function sendViaBrevo(input: MailInput): Promise<string | undefined> {
+  const from = parseAddress(input.from);
+  const to = parseAddress(input.to);
+  const result = await fetchJsonWithRetry<{ messageId?: string }>(
+    "https://api.brevo.com/v3/smtp/email",
+    {
+      method: "POST",
+      headers: { "api-key": config.brevoApiKey!, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        sender: { email: from.email, name: from.name },
+        to: [{ email: to.email, name: to.name }],
+        subject: input.subject,
+        textContent: input.text,
+        ...(input.html ? { htmlContent: input.html } : {}),
+      }),
+    },
+    { retries: 3, timeoutMs: 15_000 }
+  );
+  logger.info({ to: input.to, subject: input.subject, messageId: result.messageId }, "email accepted by Brevo API");
+  return result.messageId;
+}
+
+async function sendViaSmtp(input: MailInput): Promise<string | undefined> {
   if (!config.smtpUser || !config.smtpPass) throw new Error("SMTP_USER/SMTP_PASS are not set");
   try {
     const host = await resolveSmtpHost(config.smtpHost);
@@ -69,4 +108,9 @@ export async function sendMail(input: MailInput): Promise<string | undefined> {
   } catch (err) {
     throw new Error(`SMTP send failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+export async function sendMail(input: MailInput): Promise<string | undefined> {
+  if (config.brevoApiKey) return sendViaBrevo(input);
+  return sendViaSmtp(input);
 }

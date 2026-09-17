@@ -177,6 +177,17 @@ export const config = {
   smtpPass: optStr("SMTP_PASS"),
   alertEmailFrom: optStr("ALERT_EMAIL_FROM"),
   alertEmailTo: optStr("ALERT_EMAIL_TO"),
+  // Confirmed live 2026-09-17: raw SMTP to smtp.gmail.com:465 from Railway
+  // started timing out on 100% of sends (0 successes, 26/26 failures over
+  // ~3.6h) — same class of infra fragility as the 2026-09-16 IPv6 dead-end
+  // fix in mailer.ts, just a harder failure this time (likely Railway or
+  // Google blocking outbound SMTP from shared cloud-host IP ranges, a common
+  // anti-abuse pattern neither side documents). When set, mailer.ts sends via
+  // Brevo's HTTPS API instead of raw SMTP — port 443 doesn't have this
+  // problem. Free tier: 300 emails/day, https://app.brevo.com (Settings ->
+  // SMTP & API -> API Keys). SMTP_USER/SMTP_PASS above stay as a fallback
+  // when this isn't set.
+  brevoApiKey: optStr("BREVO_API_KEY"),
 
   minUtilityProbability: num("MIN_UTILITY_PROBABILITY", 0.65),
   maxMemeProbability: num("MAX_MEME_PROBABILITY", 0.45),
@@ -221,8 +232,12 @@ export const config = {
 export function assertRuntimeConfig() {
   const missing: string[] = [];
   if (!config.geminiApiKey) missing.push("GEMINI_API_KEY");
-  if (!config.smtpUser) missing.push("SMTP_USER");
-  if (!config.smtpPass) missing.push("SMTP_PASS");
+  // Either transport works (see mailer.ts) — only flag SMTP as missing when
+  // Brevo isn't configured as the alternative.
+  if (!config.brevoApiKey) {
+    if (!config.smtpUser) missing.push("SMTP_USER");
+    if (!config.smtpPass) missing.push("SMTP_PASS");
+  }
   if (!config.alertEmailFrom) missing.push("ALERT_EMAIL_FROM");
   if (!config.alertEmailTo) missing.push("ALERT_EMAIL_TO");
   return missing;
