@@ -12,6 +12,7 @@ import { researchToken } from "./research";
 import { TokenStatus } from "../generated/prisma";
 import type { Token } from "../generated/prisma";
 import { runWalletTrackingPoll } from "../walletTracking/poller";
+import { runArcObservationPoll } from "./arcObserve";
 
 const WORKER_CONCURRENCY = 2;
 const WORKER_IDLE_DELAY_MS = 3000;
@@ -48,6 +49,8 @@ export const health = {
   lastActivityCheckError: undefined as string | undefined,
   lastWalletTrackingPollAt: undefined as Date | undefined,
   lastWalletTrackingError: undefined as string | undefined,
+  lastArcObservationPollAt: undefined as Date | undefined,
+  lastArcObservationError: undefined as string | undefined,
   running: false,
 };
 
@@ -244,6 +247,23 @@ async function walletTrackingLoop(signal: { stopped: boolean }): Promise<void> {
   }
 }
 
+async function arcObservationLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const result = await runArcObservationPoll();
+      health.lastArcObservationPollAt = new Date();
+      health.lastArcObservationError = undefined;
+      if (result.alerted > 0) {
+        logger.info(result, "Arc observation poll found qualifying launches");
+      }
+    } catch (err) {
+      health.lastArcObservationError = summarizeError(err);
+      logger.error({ err: summarizeError(err) }, "Arc observation poll crashed");
+    }
+    await sleep(config.arcObservationIntervalSeconds * 1000);
+  }
+}
+
 export async function startOrchestrator(): Promise<() => void> {
   // The first DB call of the process, most likely to hit a cold Neon compute.
   await retryAsync("recoverStuckTokens", recoverStuckTokens);
@@ -256,6 +276,7 @@ export async function startOrchestrator(): Promise<() => void> {
     onchainDiscoveryLoop(signal),
     awaitingProfileActivityLoop(signal),
     walletTrackingLoop(signal),
+    ...(config.arcObservationEnabled ? [arcObservationLoop(signal)] : []),
     ...Array.from({ length: WORKER_CONCURRENCY }, (_, i) => workerLoop(i, signal)),
   ];
 

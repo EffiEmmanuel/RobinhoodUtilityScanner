@@ -128,6 +128,26 @@ export const config = {
   // positions yet, so this is a deliberately separate, narrower gate.
   solanaTradingEnabled: bool("SOLANA_TRADING_ENABLED", false),
 
+  // Arc: Circle's new EVM L1 (chain id 5042), public mainnet launched
+  // 2026-09-16. Ships as observation-only, not a real second trading chain —
+  // deliberately does NOT go through ENABLED_CHAINS/discover.ts, because that
+  // path ends at honeypotCheck.ts's hard fail-closed reject for any chain
+  // that isn't targetChainId or "solana" (see honeypotCheck.ts:97): every Arc
+  // token would be discovered, scored, then permanently killed there. Day-one
+  // launchpad volume (Tolly/ArcPad/Flipt) is also confirmed closed-test-
+  // environment activity, not proven organic demand, so this only alerts on
+  // real trading activity via arcObserve.ts — never creates a Token row,
+  // never runs honeypot/research, never becomes a trade candidate. Off by
+  // default; flip ARC_OBSERVATION_ENABLED once you want visibility.
+  arcObservationEnabled: bool("ARC_OBSERVATION_ENABLED", false),
+  arcObservationIntervalSeconds: num("ARC_OBSERVATION_INTERVAL_SECONDS", 60),
+  arcObservationMinLiquidityUsd: num("ARC_OBSERVATION_MIN_LIQUIDITY_USD", 10000),
+  arcObservationMinVolume1hUsd: num("ARC_OBSERVATION_MIN_VOLUME_1H_USD", 5000),
+  // How long a candidate is re-checked for real activity before being given
+  // up on — mirrors awaitingDexProfileExpiryHours's bounded-retry idea, kept
+  // in-memory only since this never touches the DB.
+  arcObservationCandidateExpiryHours: num("ARC_OBSERVATION_CANDIDATE_EXPIRY_HOURS", 12),
+
   walletTrackingEnabled: bool("WALLET_TRACKING_ENABLED", true),
   walletTrackingIntervalSeconds: num("WALLET_TRACKING_INTERVAL_SECONDS", 15),
   // Robinhood Chain is fast, and public RPCs often cap eth_getLogs ranges.
