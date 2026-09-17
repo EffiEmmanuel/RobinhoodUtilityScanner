@@ -461,8 +461,22 @@ export const tradingConfig = {
   // recommendation (see planning.ts's isExtremeMomentum/planCandidate).
   // Gated on real two-sided volume (config.momentumOverrideMinHourlyTxns),
   // not just a price change, so a single wash-traded print can't trigger it.
-  extremeMomentumOverride1hPriceChangePercent: num("EXTREME_MOMENTUM_OVERRIDE_1H_PRICE_CHANGE_PERCENT", 500),
-  extremeMomentumOverrideMinBuyRatio1h: num("EXTREME_MOMENTUM_OVERRIDE_MIN_BUY_RATIO_1H", 0.7),
+  //
+  // User directive 2026-09-17: confirmed live, AGRIPPA cleared MOMENTUM_TACTICAL
+  // (277+ txns/1h, real liquidity) and ran +384% in an hour, but the AI kept
+  // re-anchoring a new pullback target every time price broke its own
+  // doNotChaseAboveMcap ceiling (3 replans, each still WAIT_FOR_ENTRY/
+  // PULLBACK_ENTRY) instead of ever recommending MARKET_ENTRY — it never got
+  // near the old 500%/70% bar (peaked 384% with a ~48-50% buy ratio, roughly
+  // balanced buy/sell) so this override never fired. Token went on to ~4x
+  // from where the bot would have entered. Loosened both bars to catch more
+  // of this pattern — but same day, BTC/CLIP/BLACKHOLE/MARRONA/WORMHOLEX all
+  // reversed hard chasing extended, balanced-ratio pumps that looked similar
+  // at entry time, so the buy-ratio floor stays meaningfully above 50%
+  // (not just "more buys than sells") rather than being dropped to match
+  // AGRIPPA exactly.
+  extremeMomentumOverride1hPriceChangePercent: num("EXTREME_MOMENTUM_OVERRIDE_1H_PRICE_CHANGE_PERCENT", 300),
+  extremeMomentumOverrideMinBuyRatio1h: num("EXTREME_MOMENTUM_OVERRIDE_MIN_BUY_RATIO_1H", 0.58),
 
   // Active position management (§trading/positionStrategy.ts) — the AI
   // reviews an open position's strategy periodically (not on every cheap
