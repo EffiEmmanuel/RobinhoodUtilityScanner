@@ -774,9 +774,24 @@ async function closeTrade(trade: Trade, exitReason: string, options: { realizedP
   const realizedPnlUsd = options.realizedPnlUnknown ? null : totalSellUsd - totalBuyUsd;
   const realizedMultiple = options.realizedPnlUnknown ? null : totalBuyUsd > 0 ? totalSellUsd / totalBuyUsd : undefined;
 
+  // Confirmed live 2026-09-17 (QUORUM +49% net, CLIP +105% net): exitReason
+  // only ever describes what triggered the LAST sell. When staged
+  // profit-taking has already banked real gains, that last sell is often just
+  // a small leftover moonbag catching a catastrophic-loss safety exit — the
+  // label reads as a big loss while the trade closed net profitable. Only
+  // possible when more than one sell happened (a single-sell trade can't post
+  // a loss-sounding trigger and still close net positive).
+  const sellCount = executions.filter((e) => e.type === "SELL").length;
+  const closedNetProfitable = realizedMultiple !== null && realizedMultiple !== undefined && realizedMultiple >= 1;
+  const reasonReadsAsLoss = /loss|catastrophic/i.test(exitReason);
+  const finalExitReason =
+    closedNetProfitable && reasonReadsAsLoss && sellCount > 1
+      ? `${exitReason} on remaining position (overall trade still closed +${((realizedMultiple! - 1) * 100).toFixed(0)}% — earlier profit-taking banked the gain first)`
+      : exitReason;
+
   const updated = await db.trade.update({
     where: { id: trade.id },
-    data: { status: TradeStatus.CLOSED, closedAt: new Date(), realizedPnlUsd, realizedMultiple, exitReason },
+    data: { status: TradeStatus.CLOSED, closedAt: new Date(), realizedPnlUsd, realizedMultiple, exitReason: finalExitReason },
   });
 
   if (options.realizedPnlUnknown) {
@@ -788,7 +803,7 @@ async function closeTrade(trade: Trade, exitReason: string, options: { realizedP
     });
   }
 
-  logger.info({ tradeId: trade.id, realizedPnlUsd, realizedMultiple, exitReason }, "trade closed");
+  logger.info({ tradeId: trade.id, realizedPnlUsd, realizedMultiple, exitReason: finalExitReason }, "trade closed");
 
   // Fire-and-forget, not awaited — see the matching note in
   // entryMonitor.ts's openTrade: a slow SMTP send must never be able to hold
