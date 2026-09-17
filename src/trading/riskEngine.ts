@@ -224,10 +224,23 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult * laneMult * cohortMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
-  const maxBySinglePositionCap = portfolio.totalEquityUsd * (tradingConfig.maxSinglePositionPercent / 100);
+  // Small-account boost (user directive 2026-09-17): the flat percent below
+  // is tuned for an account with enough equity that fixed costs (gas) are
+  // noise; below smallAccountEquityUsd it isn't, so the cap widens toward
+  // smallAccountMaxSinglePositionPercent, tapering back to the steady-state
+  // maxSinglePositionPercent by largeAccountEquityUsd — same lerp idiom as
+  // the mcap sweet-spot boost above, just keyed on account size instead of
+  // entry mcap.
+  const singlePositionPercent = lerp(
+    tradingConfig.smallAccountMaxSinglePositionPercent,
+    tradingConfig.maxSinglePositionPercent,
+    (portfolio.totalEquityUsd - tradingConfig.smallAccountEquityUsd) /
+      (tradingConfig.largeAccountEquityUsd - tradingConfig.smallAccountEquityUsd)
+  );
+  const maxBySinglePositionCap = portfolio.totalEquityUsd * (singlePositionPercent / 100);
   if (positionSizeUsd > maxBySinglePositionCap) {
     positionSizeUsd = maxBySinglePositionCap;
-    reasons.push(`capped at maxSinglePositionPercent (${tradingConfig.maxSinglePositionPercent}% of equity)`);
+    reasons.push(`capped at single-position limit (${singlePositionPercent.toFixed(1)}% of equity)`);
   }
   if (positionSizeUsd > portfolio.availableToDeployUsd) {
     positionSizeUsd = portfolio.availableToDeployUsd;

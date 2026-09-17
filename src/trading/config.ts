@@ -95,7 +95,14 @@ export const tradingConfig = {
   // small probe until the lane proves positive expectancy under the new
   // utility/honeypot gates.
   tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.2),
-  tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 2.5),
+  // User directive 2026-09-17: raised from 2.5 alongside the gas-floor bump
+  // just above — a probationary-lane cap below the new ~$3.33 gas floor
+  // would just get silently overridden by that floor anyway (it isn't
+  // re-clamped against this cap once raised), so the two have to move
+  // together. tacticalLaneSizeMultiplier (0.2, unchanged) is still what
+  // actually keeps this lane small relative to the others — this only stops
+  // gas from eating the floor of what that multiplier produces.
+  tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 3.5),
   // Second, higher ceiling for candidates that clear evaluateHighConvictionSetup
   // (conservativeMode.ts) — already computed pre-entry, so this costs nothing
   // extra. Still a hardcoded ceiling, not an unbounded "size by AI confidence"
@@ -116,7 +123,8 @@ export const tradingConfig = {
   narrativeMinMetaLiquidityUsd: num("NARRATIVE_MIN_META_LIQUIDITY_USD", 250_000),
   narrativeMinTokenCount: num("NARRATIVE_MIN_TOKEN_COUNT", 3),
   narrativeLaneSizeMultiplier: num("NARRATIVE_LANE_SIZE_MULTIPLIER", 0.15),
-  narrativeLiveMaxPositionUsd: num("NARRATIVE_LIVE_MAX_POSITION_USD", 2.5),
+  // See tacticalLiveMaxPositionUsd's comment — same gas-floor-alignment reasoning.
+  narrativeLiveMaxPositionUsd: num("NARRATIVE_LIVE_MAX_POSITION_USD", 3.5),
   // See tacticalLiveMaxPositionUsdHighConviction — same idea for the narrative lane.
   narrativeLiveMaxPositionUsdHighConviction: num("NARRATIVE_LIVE_MAX_POSITION_USD_HIGH_CONVICTION", 10),
   // Bounded nudge applied by the CohortStats "similar past projects" lookup in
@@ -188,6 +196,20 @@ export const tradingConfig = {
   // Capital buckets (§22) — all against the PAPER starting balance below.
   minReservePercent: num("MIN_RESERVE_PERCENT", 50),
   maxTotalDeployedPercent: num("MAX_TOTAL_DEPLOYED_PERCENT", 50),
+  // User directive 2026-09-17: real equity is ~$23 — "in the 10s literally" —
+  // where fixed costs (gas) dominate any trade sized off a flat cap tuned for
+  // a much bigger account. maxSinglePositionPercent below (currently 30 in
+  // production — already bumped once from this file's 25 default) now
+  // tapers UP from that steady-state value toward
+  // smallAccountMaxSinglePositionPercent (40%) at/below smallAccountEquityUsd,
+  // and back down to steady-state by largeAccountEquityUsd (see
+  // calculatePositionSize's lerp on this, same tapering shape as the mcap
+  // sweet-spot boost above) — bigger bets while capital is this thin,
+  // automatically de-risking back to today's normal as the account actually
+  // grows, with no manual re-tuning needed at each milestone.
+  smallAccountEquityUsd: num("SMALL_ACCOUNT_EQUITY_USD", 50),
+  largeAccountEquityUsd: num("LARGE_ACCOUNT_EQUITY_USD", 300),
+  smallAccountMaxSinglePositionPercent: num("SMALL_ACCOUNT_MAX_SINGLE_POSITION_PERCENT", 40),
   maxSinglePositionPercent: num("MAX_SINGLE_POSITION_PERCENT", 25),
   // User directive 2026-09-11: this cap was blocking new entries outright
   // ("max open positions reached (2/2)") while capital was still available
@@ -519,7 +541,15 @@ export const tradingConfig = {
 
   // Small-account gas-ratio check (§23) — Robinhood Chain is a cheap L2, so
   // this is a small flat simulated cost, not a real gas oracle call.
-  maxGasCostPercentOfPosition: num("MAX_GAS_COST_PERCENT_OF_POSITION", 5),
+  //
+  // User directive 2026-09-17: real equity is ~$23, and gasViableFloorUsd
+  // (riskEngine.ts) = paperAssumedGasCostUsd*100/this — at the old 5% cap
+  // that floor was exactly $1.00, confirmed live on RECORD/CYCLE/XBOW/SCAN,
+  // which paid ~4-5% of their entire position to gas alone before the trade
+  // even had a chance. Tightened to 1.5%, raising the floor to ~$3.33 —
+  // still a hard reject above this ratio (line ~285), just a saner minimum
+  // trade size for an account this small.
+  maxGasCostPercentOfPosition: num("MAX_GAS_COST_PERCENT_OF_POSITION", 1.5),
   paperAssumedGasCostUsd: num("PAPER_ASSUMED_GAS_COST_USD", 0.05),
 
   defaultMaxHoldMinutes: num("DEFAULT_MAX_HOLD_MINUTES", 1440),
