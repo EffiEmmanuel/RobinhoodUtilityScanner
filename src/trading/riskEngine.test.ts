@@ -86,83 +86,32 @@ describe("evaluateCandidate", () => {
     expect(result.riskBucket).toBe("HIGH");
   });
 
-  it("momentum-overrides a low qualityScore into HIGH risk when every other gate clears and hourly txns are strong", () => {
-    const result = evaluateCandidate({
-      qualityScore: 62,
-      researchConfidence: 70,
-      contractScore: 100,
-      liquidityUsd: 20_000,
-      hardReject: false,
-      hourlyTxns: 40,
-    });
-    expect(result.eligible).toBe(true);
-    expect(result.riskBucket).toBe("HIGH");
-  });
-
-  it("momentum-overrides both qualityScore and researchConfidence together when contract/liquidity are clean and demand is strong", () => {
-    // Confirmed live 2026-09-11: PEG (qualityScore 53.6, researchConfidence
-    // 59 — both softly under the bar on a ~2-minute-old token with no
-    // site/socials yet to score) had 459 txns/hour on $20.8K liquidity and a
-    // clean contract (contractScore 100), and was hard-REJECTED outright
-    // because the override previously only ever waived qualityScore alone.
-    // It went on to run 100x+ from its detection mcap.
+  // User directive 2026-09-18: the momentum override that used to waive
+  // qualityScore/researchConfidence/liquidity for high-hourly-txn candidates
+  // was removed — it was exactly how meme/no-utility tokens reached live
+  // capital as MOMENTUM_TACTICAL trades. These tests lock in that a
+  // below-bar candidate now stays rejected no matter how strong the
+  // (formerly override-triggering) demand signal looks. PEG-style evidence
+  // (qualityScore 53.6, researchConfidence 59, 459 txns/hour on $20.8K
+  // liquidity, clean contract) used to be waived through — it no longer is.
+  it("stays rejected on soft quality/confidence even with strong observed demand", () => {
     const result = evaluateCandidate({
       qualityScore: 53.6,
       researchConfidence: 59,
       contractScore: 100,
       liquidityUsd: 20_783,
       hardReject: false,
-      hourlyTxns: 459,
     });
-    expect(result.eligible).toBe(true);
-    expect(result.riskBucket).toBe("HIGH");
+    expect(result.eligible).toBe(false);
   });
 
-  it("momentum-overrides marginal liquidity when demand is strong and execution checks can still size down later", () => {
+  it("stays rejected below the liquidity floor regardless of demand", () => {
     const result = evaluateCandidate({
       qualityScore: 62,
       researchConfidence: 70,
       contractScore: 100,
       liquidityUsd: 5_000,
       hardReject: false,
-      hourlyTxns: 40,
-    });
-    expect(result.eligible).toBe(true);
-    expect(result.riskBucket).toBe("HIGH");
-  });
-
-  it("does not momentum-override below the tactical liquidity floor", () => {
-    const result = evaluateCandidate({
-      qualityScore: 62,
-      researchConfidence: 70,
-      contractScore: 100,
-      liquidityUsd: 4_000,
-      hardReject: false,
-      hourlyTxns: 40,
-    });
-    expect(result.eligible).toBe(false);
-  });
-
-  it("does not momentum-override when contract safety also fails", () => {
-    const result = evaluateCandidate({
-      qualityScore: 62,
-      researchConfidence: 70,
-      contractScore: 50,
-      liquidityUsd: 20_000,
-      hardReject: false,
-      hourlyTxns: 40,
-    });
-    expect(result.eligible).toBe(false);
-  });
-
-  it("does not momentum-override without enough hourly txns", () => {
-    const result = evaluateCandidate({
-      qualityScore: 62,
-      researchConfidence: 70,
-      contractScore: 100,
-      liquidityUsd: 20_000,
-      hardReject: false,
-      hourlyTxns: 2,
     });
     expect(result.eligible).toBe(false);
   });
@@ -248,14 +197,16 @@ describe("calculatePositionSize", () => {
     expect(result.approved).toBe(false);
   });
 
-  describe("LIVE tactical/narrative probe ceiling tiers", () => {
+  describe("LIVE tactical probe ceiling (opt-in, off by default since 2026-09-18)", () => {
     // tradingConfig.mode is normally fixed at module load from TRADING_MODE
     // (default SHADOW) — mutated directly here (and restored) since these
     // tiers only apply in LIVE mode, matching how calculatePositionSize
     // itself reads tradingConfig.mode live rather than via a passed-in flag.
     const originalMode = tradingConfig.mode;
+    const originalTacticalLiveMaxPositionUsd = tradingConfig.tacticalLiveMaxPositionUsd;
     afterEach(() => {
       tradingConfig.mode = originalMode;
+      tradingConfig.tacticalLiveMaxPositionUsd = originalTacticalLiveMaxPositionUsd;
     });
 
     const richBase = {
@@ -268,54 +219,47 @@ describe("calculatePositionSize", () => {
       tradeLane: "MOMENTUM_TACTICAL" as const,
     };
 
-    it("caps a non-high-conviction LIVE tactical trade at the base probe ceiling", () => {
+    // User directive 2026-09-18: MOMENTUM_TACTICAL can no longer contain
+    // meme/no-utility tokens (the utility gate has no bypass left), so it no
+    // longer gets a hardcoded few-dollar probe ceiling by default — it sizes
+    // through the normal formula (tacticalLaneSizeMultiplier discount, then
+    // the usual single-position-percent/deployable-capital caps) same as
+    // VERIFIED_PROJECT. tacticalLiveMaxPositionUsd defaults to 0 (disabled).
+    it("does not cap a LIVE tactical trade at a fixed probe ceiling by default", () => {
       tradingConfig.mode = "LIVE";
+      expect(tradingConfig.tacticalLiveMaxPositionUsd).toBe(0);
       const result = calculatePositionSize({ ...richBase, highConviction: false });
-      expect(result.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsd);
-      expect(result.appliedProbeCapUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(result.appliedProbeCapUsd).toBeUndefined();
+      expect(result.positionSizeUsd).toBeGreaterThan(10);
     });
 
-    it("raises the ceiling for a high-conviction LIVE tactical trade", () => {
+    // The mechanism itself still exists for anyone who deliberately
+    // re-enables it (sets TACTICAL_LIVE_MAX_POSITION_USD > 0) — covered here
+    // by mutating config directly rather than relying on the (now disabled)
+    // default.
+    it("still caps at the probe ceiling when explicitly re-enabled", () => {
       tradingConfig.mode = "LIVE";
+      tradingConfig.tacticalLiveMaxPositionUsd = 2.5;
+      const result = calculatePositionSize({ ...richBase, highConviction: false });
+      expect(result.positionSizeUsd).toBe(2.5);
+      expect(result.appliedProbeCapUsd).toBe(2.5);
+    });
+
+    it("raises the ceiling for a high-conviction LIVE tactical trade when the base ceiling is enabled", () => {
+      tradingConfig.mode = "LIVE";
+      tradingConfig.tacticalLiveMaxPositionUsd = 2.5;
       const result = calculatePositionSize({ ...richBase, highConviction: true });
       expect(result.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
       expect(result.appliedProbeCapUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
-      expect(result.positionSizeUsd).toBeGreaterThan(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(result.positionSizeUsd).toBeGreaterThan(2.5);
     });
 
-    it("does not apply the LIVE probe ceiling outside LIVE mode", () => {
+    it("does not apply the LIVE probe ceiling outside LIVE mode even when enabled", () => {
       tradingConfig.mode = "SHADOW";
+      tradingConfig.tacticalLiveMaxPositionUsd = 2.5;
       const result = calculatePositionSize({ ...richBase, highConviction: false });
-      expect(result.positionSizeUsd).toBeGreaterThan(tradingConfig.tacticalLiveMaxPositionUsd);
+      expect(result.positionSizeUsd).toBeGreaterThan(2.5);
       expect(result.appliedProbeCapUsd).toBeUndefined();
-    });
-
-    it("bounds the cohort multiplier's effect and never lets it breach the tier ceiling", () => {
-      tradingConfig.mode = "LIVE";
-      const withoutCohortData = calculatePositionSize({ ...richBase, highConviction: true, cohortSizeMultiplier: 1 });
-      const withStrongCohort = calculatePositionSize({ ...richBase, highConviction: true, cohortSizeMultiplier: tradingConfig.cohortSizeMultiplierMax });
-      // Both still clamp at the same high-conviction ceiling — the cohort
-      // multiplier moves the pre-cap formula, not the cap itself.
-      expect(withoutCohortData.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
-      expect(withStrongCohort.positionSizeUsd).toBe(tradingConfig.tacticalLiveMaxPositionUsdHighConviction);
-    });
-
-    it("a weak cohort multiplier sizes smaller than a neutral one, still within the same tier", () => {
-      tradingConfig.mode = "LIVE";
-      // Tuned so the pre-cap formula lands well under both the $2.50 base
-      // probe ceiling and the $1 gas-viability floor's raise-up, so the
-      // cohort multiplier's effect is actually visible instead of being
-      // swallowed by either clamp.
-      const leanBase = {
-        ...richBase,
-        portfolio: portfolio({ availableToDeployUsd: 100, totalEquityUsd: 100 }),
-        sizingRules: { ...sizingRules, baseAllocationPercent: 4.45 },
-      };
-      const neutral = calculatePositionSize({ ...leanBase, highConviction: false, cohortSizeMultiplier: 1 });
-      const weakCohort = calculatePositionSize({ ...leanBase, highConviction: false, cohortSizeMultiplier: tradingConfig.cohortSizeMultiplierMin });
-      expect(neutral.positionSizeUsd).toBeGreaterThan(1);
-      expect(neutral.positionSizeUsd).toBeLessThan(tradingConfig.tacticalLiveMaxPositionUsd);
-      expect(weakCohort.positionSizeUsd).toBeLessThan(neutral.positionSizeUsd);
     });
   });
 });

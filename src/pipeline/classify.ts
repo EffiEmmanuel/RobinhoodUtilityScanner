@@ -5,7 +5,6 @@ import { callStructured, fetchImageAsBase64, type ImageInput } from "../ai/provi
 import { VisualClassificationSchema, VISUAL_CLASSIFICATION_JSON_SCHEMA, type VisualClassification } from "../ai/schemas";
 import { VISUAL_CLASSIFIER_SYSTEM, buildVisualClassificationPrompt } from "../ai/prompts";
 import { TokenStatus } from "../generated/prisma";
-import { fetchMarketForToken } from "../dex/client";
 
 export interface ClassifyOutcome {
   classification: VisualClassification;
@@ -43,36 +42,18 @@ export async function classifyToken(tokenId: string): Promise<ClassifyOutcome> {
     // cheap/fast tier, so the default (small, model-chosen) budget is fine.
   });
 
-  const narrativePassed =
+  // User directive 2026-09-18: utility-only, no memecoins, full stop. This
+  // used to also pass a narrative-rejected token through on trading momentum
+  // alone (real liquidity/txns as "evidence worth researching regardless") —
+  // that was precisely the mechanism letting meme/no-utility tokens reach
+  // live capital, which is what the losses this directive responds to came
+  // from. Momentum/volume are no longer allowed to override a meme verdict
+  // at any stage of the pipeline (see also riskEngine.ts's evaluateCandidate
+  // and utilityGate.ts's now-retired canBypassUtilityGateForMomentum).
+  const passed =
     classification.requiresResearch &&
     classification.utilityProbability >= config.minUtilityProbability &&
     classification.memeProbability <= config.maxMemeProbability;
-
-  // Deterministic momentum override: real, already-observable trading demand
-  // is itself evidence worth researching, regardless of the narrative
-  // utility/meme verdict above. Confirmed live misses without this: tokens
-  // rejected as "doesn't align with legitimate software/fintech" that went on
-  // to run several multiples with hundreds of real traders. This never
-  // bypasses deep research's own contract-safety/liquidity/hard-reject
-  // checks — it only decides whether that research happens at all.
-  let momentumOverride = false;
-  let momentumReason: string | undefined;
-  if (!narrativePassed) {
-    const market = await fetchMarketForToken(token.chain, token.address).catch((err) => {
-      logger.warn({ tokenId, err: String(err) }, "momentum-override market lookup failed — falling back to narrative verdict only");
-      return undefined;
-    });
-    const pair = market?.primaryPair;
-    const hourlyTxns = (pair?.buys1h ?? 0) + (pair?.sells1h ?? 0);
-    const liquidityUsd = pair?.liquidityUsd ?? 0;
-    if (liquidityUsd >= config.momentumOverrideMinLiquidityUsd && hourlyTxns >= config.momentumOverrideMinHourlyTxns) {
-      momentumOverride = true;
-      momentumReason = `Momentum override: $${Math.round(liquidityUsd).toLocaleString()} liquidity and ${hourlyTxns} txns/1h despite narrative rejection (utility ${(classification.utilityProbability * 100).toFixed(0)}%, meme ${(classification.memeProbability * 100).toFixed(0)}%) — real trading demand is proceeding to research regardless.`;
-      logger.info({ tokenId, address: token.address, liquidityUsd, hourlyTxns }, "classification narrative-rejected but passed via momentum override");
-    }
-  }
-
-  const passed = narrativePassed || momentumOverride;
 
   await db.classification.create({
     data: {
@@ -83,7 +64,7 @@ export async function classifyToken(tokenId: string): Promise<ClassifyOutcome> {
       professionalism: classification.professionalism,
       visualSpamProbability: classification.visualSpamProbability,
       passed,
-      reasoningSummary: momentumReason ? [...classification.reasoningSummary, momentumReason] : classification.reasoningSummary,
+      reasoningSummary: classification.reasoningSummary,
       model: config.classifierModel,
     },
   });

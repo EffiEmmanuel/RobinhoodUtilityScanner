@@ -1,11 +1,13 @@
 import { db } from "../db";
 import { logger } from "../logger";
 import { LedgerEntryType, TradeStatus } from "../generated/prisma";
+import { config } from "../config";
 import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
 import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
 import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
 import { getJupiterQuote, SOL_MINT } from "./live/solana/jupiterClient";
+import { isSolanaWalletConfigured, getSolanaWalletBalanceSol } from "./live/solana/wallet";
 import { summarizeError } from "../util/errors";
 import { withTimeout } from "../util/http";
 import { resolveEntryMode, type EntryMode } from "./conservativeMode";
@@ -193,29 +195,86 @@ export function startBackgroundPriceRefresh(): void {
   setInterval(refresh, PRICE_REFRESH_INTERVAL_MS);
 }
 
+/** True only when Solana trading is both enabled AND actually has a signer configured. */
+function isSolanaLiveReady(): boolean {
+  return config.solanaTradingEnabled && isSolanaWalletConfigured();
+}
+
 /**
- * In LIVE mode, cash comes from the REAL on-chain wallet balance, not summed
- * historical ledger entries — confirmed live: the ledger sums each entry's
- * amountUsd at the USD rate captured when that entry was recorded (e.g. the
- * initial deposit), which drifts from reality as ETH's price moves and never
- * self-corrects. The real wallet balance is always current by definition.
- * PAPER/SHADOW has no real wallet, so the ledger sum is the only option there
- * (and is authoritative for a simulation anyway).
+ * In LIVE mode, cash comes from the REAL on-chain wallet balance(s), not
+ * summed historical ledger entries — confirmed live: the ledger sums each
+ * entry's amountUsd at the USD rate captured when that entry was recorded
+ * (e.g. the initial deposit), which drifts from reality as the gas token's
+ * price moves and never self-corrects. The real wallet balance is always
+ * current by definition. PAPER/SHADOW has no real wallet, so the ledger sum
+ * is the only option there (and is authoritative for a simulation anyway).
+ *
+ * Solana fix (2026-09-18, prerequisite for SOLANA_TRADING_ENABLED=true with
+ * real capital): this used to read ONLY the EVM wallet, even once Solana
+ * trades were live — a completely separate wallet's balance, and every
+ * BUY/SELL/GAS ledger entry Solana trades record, both went uncounted. Two
+ * physically separate wallets means their cash has to be summed explicitly;
+ * there is no single "the wallet" to read anymore once both are live. Each
+ * side's failure to read is treated as $0 for THIS reading (never a stale
+ * ledger guess) — for a system sizing real trades and running loss breakers
+ * off this number, undercounting equity (more conservative sizing, breakers
+ * trip sooner) is the safe failure direction; overcounting is not.
  */
-async function getCashUsd(ethPriceUsd: number | undefined): Promise<{ cashUsd: number; cashEth: number | undefined }> {
-  if (isLiveModeReady()) {
+async function getCashUsd(
+  ethPriceUsd: number | undefined,
+  solPriceUsd: number | undefined
+): Promise<{ cashUsd: number; cashEth: number | undefined; cashSol: number | undefined }> {
+  const evmLive = isLiveModeReady();
+  const solanaLive = isSolanaLiveReady();
+
+  if (!evmLive && !solanaLive) {
+    const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
+    return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth: undefined, cashSol: undefined };
+  }
+
+  let cashEth: number | undefined;
+  let cashSol: number | undefined;
+  let evmUsd = 0;
+  let solUsd = 0;
+
+  if (evmLive) {
     try {
-      const cashEth = await getWalletGasBalanceEth();
-      if (ethPriceUsd !== undefined) return { cashUsd: cashEth * ethPriceUsd, cashEth };
-      // Real balance known, but no current price to convert it — fall back
-      // to the ledger sum for the USD figure rather than reporting $0.
-      logger.warn("live wallet balance read but no current ETH/USD rate available — cashUsd falls back to ledger sum");
+      cashEth = await getWalletGasBalanceEth();
+      if (ethPriceUsd !== undefined) {
+        evmUsd = cashEth * ethPriceUsd;
+      } else if (!solanaLive) {
+        // Solo-EVM behavior, unchanged from before the Solana fix: no price
+        // yet to convert a known real balance, so fall back to the ledger
+        // sum rather than reporting the EVM side as $0.
+        const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
+        return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth, cashSol: undefined };
+      } else {
+        logger.warn("live EVM wallet balance read but no current ETH/USD rate available — EVM cash omitted from this reading");
+      }
     } catch (err) {
-      logger.warn({ err: String(err) }, "failed to read live wallet balance — cashUsd falls back to ledger sum");
+      if (!solanaLive) {
+        logger.warn({ err: String(err) }, "failed to read live EVM wallet balance — cashUsd falls back to ledger sum");
+        const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
+        return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth: undefined, cashSol: undefined };
+      }
+      logger.warn({ err: String(err) }, "failed to read live EVM wallet balance — EVM cash omitted from this reading");
     }
   }
-  const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
-  return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth: undefined };
+
+  if (solanaLive) {
+    try {
+      cashSol = await getSolanaWalletBalanceSol();
+      if (solPriceUsd !== undefined) {
+        solUsd = cashSol * solPriceUsd;
+      } else {
+        logger.warn("live Solana wallet balance read but no current SOL/USD rate available — Solana cash omitted from this reading");
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "failed to read live Solana wallet balance — Solana cash omitted from this reading");
+    }
+  }
+
+  return { cashUsd: evmUsd + solUsd, cashEth, cashSol };
 }
 
 async function getOpenPositionValueUsd(chain?: string): Promise<{ valueUsd: number; costBasisUsd: number; openCount: number }> {
@@ -255,6 +314,7 @@ async function getLockedProfitUsd(): Promise<number> {
 export interface PortfolioState {
   cashUsd: number;
   cashEth?: number;
+  cashSol?: number;
   openPositionValueUsd: number;
   totalEquityUsd: number;
   // Cumulative profit skimmed into the lockbox (see getLockedProfitUsd) —
@@ -267,21 +327,22 @@ export interface PortfolioState {
   deployedUsd: number;
   availableToDeployUsd: number;
   openPositionCount: number;
-  // A current conversion rate (see getEthPriceUsd) so any USD figure above
-  // can be displayed as its ETH equivalent too — ETH fluctuates, so a
-  // dashboard showing only a point-in-time USD number reads as more stable
-  // and precise than reality. Undefined when no current rate is available;
-  // callers should fall back to USD-only display, never fabricate a rate.
+  // Current conversion rates (see getEthPriceUsd/getSolPriceUsd) so any USD
+  // figure above can be displayed in native-token terms too — undefined only
+  // when no current rate is available; callers should fall back to USD-only
+  // display, never fabricate a rate.
   ethPriceUsd?: number;
+  solPriceUsd?: number;
 }
 
 export async function getPortfolioState(): Promise<PortfolioState> {
-  // Synchronous cached read, not a live fetch — this runs on the real
+  // Synchronous cached reads, not live fetches — this runs on the real
   // trade-entry critical path via checkCircuitBreakers(), not just the
-  // dashboard. See getCachedEthPriceUsd's doc comment.
+  // dashboard. See getCachedEthPriceUsd/getCachedSolPriceUsd's doc comment.
   const ethPriceUsd = getCachedEthPriceUsd();
-  const [{ cashUsd, cashEth }, positions, lockedProfitUsd] = await Promise.all([
-    getCashUsd(ethPriceUsd),
+  const solPriceUsd = getCachedSolPriceUsd();
+  const [{ cashUsd, cashEth, cashSol }, positions, lockedProfitUsd] = await Promise.all([
+    getCashUsd(ethPriceUsd, solPriceUsd),
     getOpenPositionValueUsd(),
     getLockedProfitUsd(),
   ]);
@@ -302,6 +363,7 @@ export async function getPortfolioState(): Promise<PortfolioState> {
   return {
     cashUsd,
     cashEth,
+    cashSol,
     openPositionValueUsd: positions.valueUsd,
     totalEquityUsd,
     lockedProfitUsd,
@@ -311,6 +373,7 @@ export async function getPortfolioState(): Promise<PortfolioState> {
     availableToDeployUsd,
     openPositionCount: positions.openCount,
     ethPriceUsd,
+    solPriceUsd,
   };
 }
 
@@ -408,6 +471,21 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
 
   // §30 — LIVE only. Exits stay possible even with low gas (checked
   // separately by validateExit, never gated here), only new entries pause.
+  // Solana counterpart added 2026-09-18 alongside the getCashUsd fix — same
+  // global hardPauseReasons list as the EVM check (this breaker isn't
+  // per-chain today), so a starved Solana wallet pauses new entries on both
+  // chains, same as a starved EVM wallet already did before this change.
+  if (isSolanaLiveReady()) {
+    try {
+      const solGasBalance = await getSolanaWalletBalanceSol();
+      if (solGasBalance < tradingConfig.minGasBalanceSol) {
+        hardPauseReasons.push(`Solana wallet balance ${solGasBalance.toFixed(4)} SOL is below ${tradingConfig.minGasBalanceSol} SOL minimum`);
+      }
+    } catch (err) {
+      hardPauseReasons.push(`could not check Solana wallet balance: ${summarizeError(err)}`);
+    }
+  }
+
   if (isLiveModeReady()) {
     try {
       const gasBalance = await getWalletGasBalanceEth();

@@ -1,43 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { canBypassUtilityGateForMomentum } from "./utilityGate";
+import { evaluateUtilityOnlyGate } from "./utilityGate";
 
-describe("canBypassUtilityGateForMomentum", () => {
-  it("allows an eligible momentum override through the utility gate", () => {
-    const result = canBypassUtilityGateForMomentum({
-      qualificationPath: "MOMENTUM_OVERRIDE",
-      evaluation: {
-        eligible: true,
-        riskBucket: "HIGH",
-        reasons: ["momentum override: 535 txns/1h, $65,815 liquidity despite qualityScore 43.1 < 65"],
-      },
-    });
+// User directive 2026-09-18: utility tokens only, no memecoins, no
+// exceptions — canBypassUtilityGateForMomentum (previously tested here) was
+// removed along with the momentum/narrative bypass mechanism it served.
+// evaluateUtilityOnlyGate is now the ONLY gate, with no bypass of any kind.
+describe("evaluateUtilityOnlyGate", () => {
+  const passing = {
+    utilityClass: "UTILITY",
+    productExists: true,
+    productPredatesToken: "YES" as const,
+    utilityScore: 80,
+    credibilityScore: 70,
+    websiteScore: 70,
+  };
 
-    expect(result).toBe(true);
+  it("passes a genuine, well-evidenced utility project", () => {
+    const result = evaluateUtilityOnlyGate(passing);
+    expect(result.passed).toBe(true);
   });
 
-  it("does not bypass utility evidence for a normal eligible candidate", () => {
-    const result = canBypassUtilityGateForMomentum({
-      qualificationPath: "NORMAL",
-      evaluation: {
-        eligible: true,
-        riskBucket: "MEDIUM",
-        reasons: ["cleared all trade-eligibility gates"],
-      },
-    });
-
-    expect(result).toBe(false);
+  it("rejects a MEME utility class regardless of every other score", () => {
+    const result = evaluateUtilityOnlyGate({ ...passing, utilityClass: "MEME" });
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes("meme/unknown"))).toBe(true);
   });
 
-  it("does not revive a rejected candidate", () => {
-    const result = canBypassUtilityGateForMomentum({
-      qualificationPath: "MOMENTUM_OVERRIDE",
-      evaluation: {
-        eligible: false,
-        riskBucket: "REJECT",
-        reasons: ["liquidityUsd 9000 < 15000"],
-      },
-    });
+  it("rejects an UNKNOWN utility class", () => {
+    const result = evaluateUtilityOnlyGate({ ...passing, utilityClass: "UNKNOWN" });
+    expect(result.passed).toBe(false);
+  });
 
-    expect(result).toBe(false);
+  it("rejects when research did not verify a real product exists", () => {
+    const result = evaluateUtilityOnlyGate({ ...passing, productExists: false });
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes("did not verify a real product"))).toBe(true);
+  });
+
+  it("rejects a token-first project (product created after the token)", () => {
+    const result = evaluateUtilityOnlyGate({ ...passing, productPredatesToken: "NO" });
+    expect(result.passed).toBe(false);
+    expect(result.reasons.some((r) => r.includes("token-first"))).toBe(true);
+  });
+
+  it("rejects below-threshold utility/credibility/website scores", () => {
+    const result = evaluateUtilityOnlyGate({ ...passing, utilityScore: 10, credibilityScore: 5, websiteScore: 5 });
+    expect(result.passed).toBe(false);
+    expect(result.reasons.length).toBeGreaterThanOrEqual(3);
   });
 });

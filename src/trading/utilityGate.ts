@@ -1,5 +1,4 @@
 import { tradingConfig } from "./config";
-import type { CandidateRiskResult } from "./riskEngine";
 
 const NON_UTILITY_CLASSES = new Set(["MEME", "UNKNOWN"]);
 
@@ -15,11 +14,6 @@ export interface UtilityGateInput {
 export interface UtilityGateResult {
   passed: boolean;
   reasons: string[];
-}
-
-export interface MomentumUtilityBypassInput {
-  qualificationPath?: string | null;
-  evaluation: CandidateRiskResult;
 }
 
 function score(value: number | null | undefined): number {
@@ -52,16 +46,6 @@ export function evaluateUtilityOnlyGate(input: UtilityGateInput): UtilityGateRes
   }
 
   return { passed: reasons.length === 0, reasons: reasons.length ? reasons : ["cleared utility-only trading gate"] };
-}
-
-export function canBypassUtilityGateForMomentum(input: MomentumUtilityBypassInput): boolean {
-  if (!input.evaluation.eligible) return false;
-
-  return (
-    input.qualificationPath === "MOMENTUM_OVERRIDE" ||
-    input.qualificationPath === "NARRATIVE_META" ||
-    input.evaluation.reasons.some((reason) => reason.startsWith("momentum override:"))
-  );
 }
 
 export function utilityGateInputFromRawResearch(rawResearch: unknown, scores: {

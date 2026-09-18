@@ -9,7 +9,7 @@ import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
-import { canBypassUtilityGateForMomentum, evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
+import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
 import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecision } from "../generated/prisma";
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
@@ -49,13 +49,11 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const walletSignals = await getWalletSignalsForToken(candidate.tokenId, candidate.token.address);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
-  const hourlyTxns = (market.primaryPair?.buys1h ?? 0) + (market.primaryPair?.sells1h ?? 0);
   const freshEval = evaluateCandidate({
     qualityScore: candidate.qualityScore ?? 0,
     researchConfidence: candidate.researchConfidence ?? 0,
     contractScore: run.contractScore ?? 0,
     liquidityUsd,
-    hourlyTxns,
     hardReject: run.hardReject,
   });
   const utilityGate = evaluateUtilityOnlyGate(
@@ -65,17 +63,16 @@ export async function planCandidate(candidateId: string): Promise<void> {
       websiteScore: run.websiteScore,
     })
   );
-  const qualificationPath =
-    candidate.qualificationPath === "NARRATIVE_META"
-      ? "NARRATIVE_META"
-      : freshEval.reasons[0]?.startsWith("momentum override:")
-        ? "MOMENTUM_OVERRIDE"
-        : (candidate.qualificationPath ?? "NORMAL");
-  const utilityBypassedForMomentum = canBypassUtilityGateForMomentum({ qualificationPath, evaluation: freshEval });
-  const tradeEligibilityEvaluation =
-    utilityGate.passed || utilityBypassedForMomentum
-      ? freshEval
-      : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
+  // User directive 2026-09-18: utility-only, no exceptions — retired the
+  // momentum/narrative bypass (canBypassUtilityGateForMomentum) that used to
+  // let a candidate trade despite failing the utility gate. A candidate whose
+  // qualificationPath is still MOMENTUM_OVERRIDE/NARRATIVE_META from before
+  // this change (queued under the old rules) now gets no special treatment —
+  // it's re-evaluated as NORMAL, same as everything else.
+  const qualificationPath = "NORMAL";
+  const tradeEligibilityEvaluation = utilityGate.passed
+    ? freshEval
+    : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
   const lane = classifyTradeLane({
     evaluation: tradeEligibilityEvaluation,
     qualificationPath,
@@ -88,16 +85,9 @@ export async function planCandidate(candidateId: string): Promise<void> {
     liquidityUsd,
   });
 
-  const utilityBypassReason = utilityBypassedForMomentum
-    ? [
-        qualificationPath === "NARRATIVE_META"
-          ? "narrative tactical override: utility/product gate bypassed for a tradeable trending-meta setup"
-          : "momentum tactical override: utility/product gate bypassed for a tradeable high-activity setup",
-      ]
-    : [];
-  const planningUtilityReasons = utilityBypassedForMomentum ? utilityBypassReason : utilityGate.reasons;
+  const planningUtilityReasons = utilityGate.reasons;
 
-  if (!freshEval.eligible || (!utilityGate.passed && !utilityBypassedForMomentum)) {
+  if (!freshEval.eligible || !utilityGate.passed) {
     if (shouldRetryPlanningForTransientMomentumMarket({ qualificationPath, evaluation: freshEval, pair: market.primaryPair })) {
       const retryAfter = new Date(Date.now() + MOMENTUM_PLANNING_DATA_RETRY_MINUTES * 60_000);
       const reasons = [
@@ -255,7 +245,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       invalidationMcap: analysis.technicalInvalidationMcap,
       riskScore: analysis.riskScore,
       confidence: analysis.confidence,
-      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, utilityBypassedForMomentum, walletSignals, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
+      planData: { analysis, freshEval, tradeLane: lane.tradeLane, laneReasons: lane.reasons, utilityGate: utilityGate.reasons, walletSignals, liquidityUsd, pullbackClamped: clampedZone.clamped, extremeMomentumOverride } as unknown as object,
       expiresAt: new Date(Date.now() + strategyTtlMs(strategy)),
     },
   });

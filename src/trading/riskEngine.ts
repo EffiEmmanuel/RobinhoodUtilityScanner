@@ -1,4 +1,3 @@
-import { config } from "../config";
 import { tradingConfig } from "./config";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
@@ -16,9 +15,6 @@ export interface CandidateRiskInput {
   contractScore: number;
   liquidityUsd: number;
   hardReject: boolean;
-  // Real, already-observed trading demand (buys+sells in the last hour) —
-  // used only by the momentum override below, never as a standalone gate.
-  hourlyTxns?: number;
 }
 
 export interface CandidateRiskResult {
@@ -38,7 +34,6 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   const confidenceOk = input.researchConfidence >= tradingConfig.minTradeResearchConfidence;
   const contractScoreOk = input.contractScore >= tradingConfig.minTradeContractScore;
   const liquidityOk = input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
-  const tacticalLiquidityOk = input.liquidityUsd >= tradingConfig.momentumTacticalMinLiquidityUsd;
   if (!qualityScoreOk) {
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }
@@ -52,50 +47,14 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
     reasons.push(`liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd}`);
   }
 
-  // Momentum override, same rationale as classify.ts's and research.ts's:
-  // qualityScore AND researchConfidence both weigh signals that are
-  // structurally near-zero for ANY token still in its first minutes,
-  // legitimate or not — team/social/credibility, and confidence in general,
-  // simply because there hasn't been time to build a track record. Real,
-  // already-observed two-sided trading volume on real liquidity is evidence a
-  // brand-new project can't fake the way it can fake a team page.
-  //
-  // Confirmed live 2026-09-11: PEG (qualityScore 53.6 AND researchConfidence
-  // 59, both softly under the bar — a token ~2 minutes old, no site/socials
-  // yet to even score) had 459 txns/hour on $20.8K liquidity with a clean
-  // contract (contractScore 100) and was hard-REJECTED outright, because this
-  // override previously only ever waived qualityScore alone — reasons.length
-  // === 1 required confidence to already be passing. It went on to run 4x+
-  // from its detection mcap. Widened to waive qualityScore, researchConfidence
-  // and/or the liquidity floor together — never contract safety, which stays
-  // a real, unwaived gate on capital actually at risk. A liquidity waiver
-  // only ever brings the floor down to momentumTacticalMinLiquidityUsd (a
-  // separate, tighter-managed floor than minTradeLiquidityUsd — see
-  // MOMENTUM_TACTICAL_MIN_LIQUIDITY_USD in config.ts, not to be confused with
-  // the older MOMENTUM_OVERRIDE_MIN_LIQUIDITY_USD still used by classify.ts
-  // and research.ts's earlier-stage momentum checks), never all the way to
-  // zero — validateEntry still re-checks live buy/sell pressure right before
-  // any buy executes.
-  const onlyMomentumWaivableGatesFailing = (!qualityScoreOk || !confidenceOk || !liquidityOk) && contractScoreOk && tacticalLiquidityOk;
-  if (
-    onlyMomentumWaivableGatesFailing &&
-    (input.hourlyTxns ?? 0) >= config.momentumOverrideMinHourlyTxns &&
-    input.liquidityUsd >= tradingConfig.momentumTacticalMinLiquidityUsd
-  ) {
-    const waived = [
-      !qualityScoreOk ? `qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}` : null,
-      !confidenceOk ? `researchConfidence ${input.researchConfidence} < ${tradingConfig.minTradeResearchConfidence}` : null,
-      !liquidityOk
-        ? `liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd} but >= tactical floor ${tradingConfig.momentumTacticalMinLiquidityUsd}`
-        : null,
-    ].filter((r): r is string => r !== null);
-    return {
-      eligible: true,
-      riskBucket: "HIGH",
-      reasons: [`momentum override: ${input.hourlyTxns} txns/1h, $${Math.round(input.liquidityUsd).toLocaleString()} liquidity despite ${waived.join(" and ")}`],
-    };
-  }
-
+  // User directive 2026-09-18: retired the momentum override that used to
+  // waive qualityScore/researchConfidence/liquidity for high hourly-txn
+  // tokens regardless of what the utility classification found. That path
+  // was exactly how meme/no-utility tokens reached live capital (as
+  // MOMENTUM_TACTICAL trades) — see utilityGate.ts's now-removed
+  // canBypassUtilityGateForMomentum and classify.ts's now-removed
+  // classify-stage override for the rest of that mechanism. Contract safety
+  // was always unwaived here; now nothing is.
   if (reasons.length > 0) {
     return { eligible: false, riskBucket: "REJECT", reasons };
   }

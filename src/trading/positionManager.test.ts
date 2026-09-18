@@ -52,7 +52,32 @@ function trade(overrides: Partial<Trade> = {}): Trade {
 }
 
 describe("evaluateExits", () => {
-  it("exits once max hold time is reached", () => {
+  // User directive 2026-09-18: utility-token theses are long holds — max hold
+  // time now only ever force-closes a position that's underwater
+  // (currentMultiple < 1) when the clock runs out, freeing up capital tied to
+  // a thesis that hasn't played out. A winning position must never be
+  // force-closed just because time passed; see the next test.
+  it("exits once max hold time is reached while underwater", () => {
+    const result = evaluateExits({
+      trade: trade(),
+      plan: null,
+      exitRules,
+      currentMcap: 90_000,
+      currentMultiple: 0.9,
+      unrealizedPnlPercent: -10,
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.55,
+      totalTxns5m: 8,
+      sellQuoteAvailable: true,
+      profitStepsTaken: 0,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+    });
+
+    expect(result).toMatchObject({ type: "TIME_EXIT", sellPercentOfRemaining: 100, isEmergency: false });
+  });
+
+  it("does not time-exit a breakeven-or-better position, no matter how long it's held", () => {
     const result = evaluateExits({
       trade: trade(),
       plan: null,
@@ -69,7 +94,7 @@ describe("evaluateExits", () => {
       totalBoughtTokens: 100,
     });
 
-    expect(result).toMatchObject({ type: "TIME_EXIT", sellPercentOfRemaining: 100, isEmergency: false });
+    expect(result).toBeNull();
   });
 
   it("does not time-exit before max hold time", () => {

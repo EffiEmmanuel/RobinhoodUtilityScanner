@@ -89,26 +89,32 @@ export const tradingConfig = {
   verifiedProjectMinCredibilityScore: num("VERIFIED_PROJECT_MIN_CREDIBILITY_SCORE", 65),
   verifiedProjectMinWebsiteScore: num("VERIFIED_PROJECT_MIN_WEBSITE_SCORE", 65),
   verifiedProjectMinLiquidityMultiple: num("VERIFIED_PROJECT_MIN_LIQUIDITY_MULTIPLE", 1.5),
-  // Past closed-trade review on 2026-09-14: the account was negative with a
-  // 30% win rate, and the ordinary stop-loss bucket did most of the damage.
-  // VERIFIED_PROJECT can still size meaningfully; MOMENTUM_TACTICAL is now a
-  // small probe until the lane proves positive expectancy under the new
-  // utility/honeypot gates.
-  tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.2),
-  // User directive 2026-09-17: raised from 2.5 alongside the gas-floor bump
-  // just above — a probationary-lane cap below the new ~$3.33 gas floor
-  // would just get silently overridden by that floor anyway (it isn't
-  // re-clamped against this cap once raised), so the two have to move
-  // together. tacticalLaneSizeMultiplier (0.2, unchanged) is still what
-  // actually keeps this lane small relative to the others — this only stops
-  // gas from eating the floor of what that multiplier produces.
-  tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 3.5),
+  // Raised 2026-09-18 from a 0.2 "small probe" multiplier: that sizing dated
+  // to when MOMENTUM_TACTICAL could still mean "momentum-qualified but
+  // possibly meme/no-utility" (the old momentum-override bypass). Post
+  // utility-gate-closure, every MOMENTUM_TACTICAL candidate already cleared
+  // the same utility gate as VERIFIED_PROJECT — it just didn't hit the
+  // highest score tier — so it no longer deserves probe-only treatment, just
+  // a modest discount versus the fully-verified lane.
+  tacticalLaneSizeMultiplier: num("TACTICAL_LANE_SIZE_MULTIPLIER", 0.75),
+  // Hard probe-dollar ceiling for this lane, disabled by default as of
+  // 2026-09-18 (0 = no cap, see riskEngine.ts's sizing) for the same reason
+  // as tacticalLaneSizeMultiplier above — sizing for this lane now runs
+  // through the normal formula plus that multiplier and the usual
+  // single-position-percent cap, same as VERIFIED_PROJECT, rather than a
+  // fixed few-dollar ceiling meant for an unproven/possibly-meme lane.
+  tacticalLiveMaxPositionUsd: num("TACTICAL_LIVE_MAX_POSITION_USD", 0),
   // Second, higher ceiling for candidates that clear evaluateHighConvictionSetup
   // (conservativeMode.ts) — already computed pre-entry, so this costs nothing
   // extra. Still a hardcoded ceiling, not an unbounded "size by AI confidence"
   // formula: the probe-tier cap above stays the default for everything else.
   tacticalLiveMaxPositionUsdHighConviction: num("TACTICAL_LIVE_MAX_POSITION_USD_HIGH_CONVICTION", 10),
-  narrativeTradingEnabled: bool("NARRATIVE_TRADING_ENABLED", true),
+  // Off by default (user directive 2026-09-18): this lane trades whatever
+  // narrative/meta is trending independent of the utility classification
+  // pipeline entirely — the exact "chase the trend regardless of what it is"
+  // behavior the utility-only pivot exists to stop. Set true only to
+  // reconsider narrative trading as a deliberate, separate decision later.
+  narrativeTradingEnabled: bool("NARRATIVE_TRADING_ENABLED", false),
   narrativePollIntervalSeconds: num("NARRATIVE_POLL_INTERVAL_SECONDS", 180),
   narrativeMaxMetasPerPoll: num("NARRATIVE_MAX_METAS_PER_POLL", 8),
   narrativeMaxPairsPerMeta: num("NARRATIVE_MAX_PAIRS_PER_META", 8),
@@ -155,20 +161,25 @@ export const tradingConfig = {
   // Caps how many consecutive ticks a single trade's trailing exit can be
   // deferred — a wrong read can delay an exit, never suppress it indefinitely.
   chartVisionMaxConsecutiveDefers: num("CHART_VISION_MAX_CONSECUTIVE_DEFERS", 2),
-  narrativeMaxLossPercent: num("NARRATIVE_MAX_LOSS_PERCENT", 10),
-  narrativeCatastrophicLossPercent: num("NARRATIVE_CATASTROPHIC_LOSS_PERCENT", 22),
-  narrativeTrailingActivationMultiple: num("NARRATIVE_TRAILING_ACTIVATION_MULTIPLE", 1.15),
-  narrativeTrailingPercent: num("NARRATIVE_TRAILING_PERCENT", 8),
-  narrativeMaxHoldMinutes: num("NARRATIVE_MAX_HOLD_MINUTES", 30),
+  // narrativeVolumeExitAfterMinutes/MinTxns5mToHold/MinBuyRatio5mToHold kept:
+  // still read by positionManager.ts's NARRATIVE_TACTICAL branch, which is
+  // dormant while narrativeTradingEnabled=false but not deleted code.
+  // The matching *MaxLossPercent/*CatastrophicLossPercent/
+  // *TrailingActivationMultiple/*TrailingPercent/*MaxHoldMinutes caps for
+  // both the narrative and tactical lanes were removed 2026-09-18: they
+  // existed to force a tighter, faster-exit profile on those lanes because a
+  // trade landing there used to mean "speculative/momentum/possibly meme."
+  // That's no longer possible post-utility-gate-closure (see
+  // positionManager.ts's resolveExitRules), so those tighter caps no longer
+  // apply to anything — every trade reaching either lane already cleared the
+  // same utility gate as VERIFIED_PROJECT and gets the same patient handling.
   narrativeVolumeExitAfterMinutes: num("NARRATIVE_VOLUME_EXIT_AFTER_MINUTES", 8),
   narrativeMinTxns5mToHold: num("NARRATIVE_MIN_TXNS_5M_TO_HOLD", 3),
   narrativeMinBuyRatio5mToHold: num("NARRATIVE_MIN_BUY_RATIO_5M_TO_HOLD", 0.42),
-  tacticalMaxLossPercent: num("TACTICAL_MAX_LOSS_PERCENT", 12),
-  tacticalCatastrophicLossPercent: num("TACTICAL_CATASTROPHIC_LOSS_PERCENT", 25),
-  tacticalTrailingActivationMultiple: num("TACTICAL_TRAILING_ACTIVATION_MULTIPLE", 1.2),
-  tacticalTrailingPercent: num("TACTICAL_TRAILING_PERCENT", 10),
-  tacticalMaxHoldMinutes: num("TACTICAL_MAX_HOLD_MINUTES", 45),
-  verifiedLaneSizeMultiplier: num("VERIFIED_LANE_SIZE_MULTIPLIER", 1.15),
+  // Raised 2026-09-18: this is now the primary (only reliably populated)
+  // trading lane under the utility-only pivot — see tacticalLaneSizeMultiplier
+  // below for the other lane's matching change.
+  verifiedLaneSizeMultiplier: num("VERIFIED_LANE_SIZE_MULTIPLIER", 1.5),
   moonbagRetainPercent: num("MOONBAG_RETAIN_PERCENT", 15),
   // User directive 2026-09-11: PEG ($51K detection mcap -> ~4x) and TFLY
   // ($195K -> 2x+) both delivered real, fast multiples tonight; RWA and
@@ -570,6 +581,11 @@ export const tradingConfig = {
 
   // LIVE-only (§30/§80) — ignored entirely in PAPER/SHADOW.
   minGasBalanceEth: num("MIN_GAS_BALANCE_ETH", 0.002),
+  // Solana counterpart, checked only when solanaTradingEnabled — Solana fees
+  // are much smaller than EVM gas, but priority fees on a congested slot and
+  // multiple compute-budget/token-account instructions per swap can still add
+  // up; this floor is a rough safety margin, not a precise fee estimate.
+  minGasBalanceSol: num("MIN_GAS_BALANCE_SOL", 0.02),
 
   // Paper/shadow portfolio (§88) — there is no real wallet balance to read,
   // so the simulated ledger starts here.

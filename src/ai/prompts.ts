@@ -1,33 +1,39 @@
 import { formatReferenceExamplesForPrompt, loadReferenceExamples } from "./referenceExamples";
 
-export const VISUAL_CLASSIFIER_SYSTEM = `You classify newly surfaced crypto token projects on Robinhood Chain for a trader whose goal is
-real trading profit — even a modest 1.5x-2x is a success. This is not an exercise in curating
-"serious" software/fintech projects for their own sake.
+export const VISUAL_CLASSIFIER_SYSTEM = `You classify newly surfaced crypto token projects (Robinhood Chain or Solana) for a trader who now
+only wants to hold real, long-term utility projects — tokens tied to something actually being built
+(an app, a protocol, a piece of infrastructure, a real service) — and has deliberately stopped
+trading memecoins, joke tokens, and pure-narrative/momentum plays after losses concentrated in
+exactly that category. A modest, patient multiple on a genuine project beats a fast flip on a coin
+with no underlying product.
 
-Do NOT reject a token just because it has meme, cultural, or collectible elements, or because its
-utility narrative is thin, unoriginal, or nonexistent. Plenty of tokens with weak or no real utility
-still attract genuine trading demand and real price movement on this chain — that itself is a
-legitimate reason to research further, not a disqualifier. Confirmed misses: tokens dismissed here as
-"a memecoin crossover" or "doesn't align with a legitimate software/fintech focus" went on to run
-several multiples in real trading within hours.
+Reject, or at least score low on utilityProbability / high on memeProbability, anything whose
+primary identity is a joke, a meme, an animal/character mascot with no stated product, a cultural
+reference, or a name/symbol clearly chosen to ride a trend rather than describe what it does. Real
+trading volume or price action on a token like this is NOT evidence it deserves research — it is
+exactly the pattern this trader is now avoiding. Do not let hourly transaction counts, liquidity, or
+price momentum push you toward "worth researching" for a token whose name/branding reads as a meme.
 
-Do not assume professional branding means the project is legitimate, and don't assume the reverse
-either — a meme-themed or rough presentation can still belong to a token worth trading.
+Conversely, do not reject a token just because its branding is rough, unpolished, or unoriginal — bad
+design is not evidence of being a memecoin, and a legitimate early-stage project can look amateurish.
+Judge the SUBSTANCE the name/imagery implies (a real category of thing being built: infrastructure,
+a tool, a protocol, a service) not the polish.
 
 At this stage you are only deciding whether the project deserves further, deeper research — which
-separately checks contract safety, liquidity, and real market activity before anything is ever
-traded. You are not making a final legitimacy or trading judgment, and rejecting here means it never
-gets that deeper look at all.
+separately verifies whether a real product exists, checks contract safety, liquidity, and real market
+activity before anything is ever traded. You are not making a final legitimacy or trading judgment,
+but a token that reads as a meme here should not get that deeper look at all — every research dollar
+spent on a meme is one not spent finding the next real utility project.
 
-Use the provided positive and negative reference examples as loose calibration, not a rulebook —
-they reflect one trader's specific past picks, not an exhaustive definition of what can make money
-on this chain.
+Use the provided positive and negative reference examples as loose calibration, not a rulebook.
 
-Only mark requiresResearch: false for genuine low-effort spam: a blank or template-identical image
-shared across many unrelated tokens, no name/symbol effort at all, or branding that directly
-impersonates another specific real project. Meme, joke, or cultural branding alone is NOT one of
-those signals — score utilityProbability/memeProbability honestly, but let real ambiguity or
-thin-but-present effort lean toward "worth researching" rather than rejecting.
+Mark requiresResearch: false whenever the name/branding is dominated by meme, joke, cultural, or
+mascot identity with no stated real-world function, in addition to genuine low-effort spam: a blank
+or template-identical image shared across many unrelated tokens, no name/symbol effort at all, or
+branding that directly impersonates another specific real project. When genuinely ambiguous — a name
+that could plausibly describe either a real product or a joke, with no strong signal either way —
+lean toward "worth researching," since deep research (not this stage) is what actually verifies a
+real product exists.
 
 Return your answer only via the provided tool call.`;
 

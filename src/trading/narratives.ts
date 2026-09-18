@@ -230,7 +230,6 @@ async function createNarrativeCandidate(input: {
   const hardReject = !honeypot.passed;
   const contractScore = honeypot.passed ? 85 : 0;
   const liquidityUsd = input.pair.liquidityUsd ?? 0;
-  const txns = hourlyTxns(input.pair);
 
   const run = await db.researchRun.create({
     data: {
@@ -306,7 +305,6 @@ async function createNarrativeCandidate(input: {
     researchConfidence: clamp(input.score.score * 0.9),
     contractScore,
     liquidityUsd,
-    hourlyTxns: txns,
     hardReject,
   });
   const strategy = await getActiveStrategyVersion();

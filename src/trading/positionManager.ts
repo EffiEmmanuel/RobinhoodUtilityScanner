@@ -306,71 +306,46 @@ async function applyAiStrategyDecision(
 /**
  * Substitutes the strategy's fastFlip profile (earlier profit-taking, a
  * closer trailing stop, a short max hold) whenever either condition on
- * ExitRules.fastFlip's doc comment applies — a speculative, momentum-only
- * entry, or a large entry market cap on a project that isn't (yet) proven
- * strong enough to justify holding for the bigger move. Falls through to the
+ * ExitRules.fastFlip's doc comment applies — a large entry market cap on a
+ * project that isn't (yet) proven strong enough to justify holding for the
+ * bigger move, or a comparatively low quality score. Falls through to the
  * base profile unchanged whenever fastFlip isn't configured on the active
  * strategy, or the candidate/its qualityScore can't be found (never blocks
  * monitoring over a missing optional signal).
+ *
+ * User directive 2026-09-18: tradeLane alone no longer forces the fastFlip
+ * profile. MOMENTUM_TACTICAL/NARRATIVE_TACTICAL used to imply "speculative,
+ * momentum-only, possibly meme" — that's no longer possible, since every
+ * trade reaching this point (any lane) already cleared the utility-only gate
+ * (see utilityGate.ts) with no bypass. A trade landing in MOMENTUM_TACTICAL
+ * now means only "a genuine utility candidate that didn't clear the highest
+ * verified-project score bar," not "a risky momentum play" — it deserves the
+ * same patient, long-hold treatment as VERIFIED_PROJECT unless its own
+ * qualityScore or entry mcap independently signals caution below.
  */
 async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<ExitRules> {
   const { fastFlip } = baseExitRules;
   if (!fastFlip) return baseExitRules;
 
   const candidate = trade.candidateId
-    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true, tradeLane: true } })
+    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true } })
     : null;
   const qualityScore = candidate?.qualityScore ?? undefined;
-  const tradeLane = normalizeTradeLane(trade.tradeLane ?? candidate?.tradeLane);
 
-  if (tradeLane === "VERIFIED_PROJECT") return baseExitRules;
-
-  const isSpeculative =
-    tradeLane === "MOMENTUM_TACTICAL" ||
-    tradeLane === "NARRATIVE_TACTICAL" ||
-    (qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold);
+  const isLowQuality = qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold;
   const isLargeEntryNotYetProven =
     trade.actualEntryMcap != null &&
     trade.actualEntryMcap > fastFlip.largeMcapUsd &&
     (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
 
-  const resolved =
-    !isSpeculative && !isLargeEntryNotYetProven
-      ? baseExitRules
-      : {
-          ...baseExitRules,
-          profitSteps: fastFlip.profitSteps,
-          trailingActivationMultiple: fastFlip.trailingActivationMultiple,
-          trailingPercent: fastFlip.trailingPercent,
-          maxHoldMinutes: fastFlip.maxHoldMinutes,
-        };
-
-  if (tradeLane !== "MOMENTUM_TACTICAL" && tradeLane !== "NARRATIVE_TACTICAL") return resolved;
-
-  const caps =
-    tradeLane === "NARRATIVE_TACTICAL"
-      ? {
-          maxLossPercent: tradingConfig.narrativeMaxLossPercent,
-          catastrophicLossPercent: tradingConfig.narrativeCatastrophicLossPercent,
-          trailingActivationMultiple: tradingConfig.narrativeTrailingActivationMultiple,
-          trailingPercent: tradingConfig.narrativeTrailingPercent,
-          maxHoldMinutes: tradingConfig.narrativeMaxHoldMinutes,
-        }
-      : {
-          maxLossPercent: tradingConfig.tacticalMaxLossPercent,
-          catastrophicLossPercent: tradingConfig.tacticalCatastrophicLossPercent,
-          trailingActivationMultiple: tradingConfig.tacticalTrailingActivationMultiple,
-          trailingPercent: tradingConfig.tacticalTrailingPercent,
-          maxHoldMinutes: tradingConfig.tacticalMaxHoldMinutes,
-        };
+  if (!isLowQuality && !isLargeEntryNotYetProven) return baseExitRules;
 
   return {
-    ...resolved,
-    maxLossPercent: Math.min(resolved.maxLossPercent, caps.maxLossPercent),
-    catastrophicLossPercent: Math.min(resolved.catastrophicLossPercent, caps.catastrophicLossPercent),
-    trailingActivationMultiple: Math.min(resolved.trailingActivationMultiple, caps.trailingActivationMultiple),
-    trailingPercent: Math.min(resolved.trailingPercent, caps.trailingPercent),
-    maxHoldMinutes: Math.min(resolved.maxHoldMinutes, caps.maxHoldMinutes),
+    ...baseExitRules,
+    profitSteps: fastFlip.profitSteps,
+    trailingActivationMultiple: fastFlip.trailingActivationMultiple,
+    trailingPercent: fastFlip.trailingPercent,
+    maxHoldMinutes: fastFlip.maxHoldMinutes,
   };
 }
 
@@ -524,7 +499,15 @@ export function evaluateExits(ctx: {
   // profit step or an armed trailing stop would get fully liquidated the
   // instant it hits maxHoldMinutes instead of retaining moonbagRetainPercent
   // like every other discretionary exit does for that lane.
-  if (holdingMinutes >= exitRules.maxHoldMinutes) {
+  //
+  // User directive 2026-09-18: utility-token theses are long holds by design
+  // — a genuine winner must never get force-closed just because a clock ran
+  // out while profit-taking/trailing (priorities 1-4 above) haven't fired.
+  // This is now a stagnant-loser cutoff, not a universal timer: it only ever
+  // fires while the position is currently underwater (currentMultiple < 1),
+  // freeing up capital tied up in a thesis that hasn't played out rather than
+  // capping the upside of one that's working.
+  if (holdingMinutes >= exitRules.maxHoldMinutes && ctx.currentMultiple < 1) {
     return applyVerifiedRunnerGuard({
       trade,
       remainingTokens: ctx.remainingTokens,
@@ -532,7 +515,7 @@ export function evaluateExits(ctx: {
       decision: {
         type: "TIME_EXIT",
         sellPercentOfRemaining: 100,
-        reason: `max hold reached: ${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m`,
+        reason: `max hold reached while underwater (${ctx.currentMultiple.toFixed(2)}x): ${Math.round(holdingMinutes)}m >= ${exitRules.maxHoldMinutes}m`,
         isEmergency: false,
       },
     });

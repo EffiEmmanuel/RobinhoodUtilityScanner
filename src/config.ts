@@ -193,22 +193,11 @@ export const config = {
   maxMemeProbability: num("MAX_MEME_PROBABILITY", 0.45),
   minBrandingScore: num("MIN_BRANDING_SCORE", 0.35),
 
-  // Deterministic bypass of the narrative utility/meme gate above (classify.ts):
-  // real, already-observable trading demand (liquidity + genuine two-sided
-  // transaction volume) is itself evidence worth researching further,
-  // regardless of what the visual classifier's narrative verdict says. Added
-  // after confirmed live misses — e.g. a token rejected as "doesn't align
-  // with legitimate software/fintech" that went on to run 25K -> 137K mcap
-  // with hundreds of real traders. Mirrors the same philosophy already used
-  // for AWAITING_DEX_PROFILE promotion (awaitingProfileMin* below), applied
-  // one stage later at the actual pass/fail decision.
-  // This gates the earlier pipeline stage only (classify.ts/research.ts,
-  // before a TradeCandidate even exists). It is a DIFFERENT, higher floor
-  // than tradingConfig.momentumTacticalMinLiquidityUsd ($5,000 default),
-  // which independently gates the later riskEngine.ts momentum-override
-  // waiver right before a trade is sized — tuning one does not affect the
-  // other.
-  momentumOverrideMinLiquidityUsd: num("MOMENTUM_OVERRIDE_MIN_LIQUIDITY_USD", 15000),
+  // Retired as a utility/meme gate bypass (user directive 2026-09-18) — real
+  // trading volume no longer overrides a meme verdict anywhere in the
+  // pipeline. Kept only for planning.ts's isExtremeMomentum, an entry-timing
+  // signal (chase vs. wait for pullback) for candidates that have ALREADY
+  // cleared the utility gate — unrelated to whether a token is meme or not.
   momentumOverrideMinHourlyTxns: num("MOMENTUM_OVERRIDE_MIN_HOURLY_TXNS", 20),
 
   watchlistThreshold: num("WATCHLIST_THRESHOLD", 70),
