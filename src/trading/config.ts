@@ -109,12 +109,42 @@ export const tradingConfig = {
   // extra. Still a hardcoded ceiling, not an unbounded "size by AI confidence"
   // formula: the probe-tier cap above stays the default for everything else.
   tacticalLiveMaxPositionUsdHighConviction: num("TACTICAL_LIVE_MAX_POSITION_USD_HIGH_CONVICTION", 10),
-  // Off by default (user directive 2026-09-18): this lane trades whatever
-  // narrative/meta is trending independent of the utility classification
-  // pipeline entirely — the exact "chase the trend regardless of what it is"
-  // behavior the utility-only pivot exists to stop. Set true only to
-  // reconsider narrative trading as a deliberate, separate decision later.
-  narrativeTradingEnabled: bool("NARRATIVE_TRADING_ENABLED", false),
+  // Reopened 2026-09-20 (user directive): "let's trade memecoins THAT HAVE A
+  // REAL AND GOOD NARRATIVE behind them, not just any memecoin... you must
+  // check the tweet, see if it is a VERY GOOD and preferably VIRAL meme /
+  // concept before investing a penny in it." This is a deliberate, separate
+  // decision from the 2026-09-18 utility-only pivot, not a reversal of it —
+  // the utility gate (utilityGate.ts) is untouched and still the only path
+  // for non-memecoin tokens. What changed here is narrower and stricter than
+  // the pre-2026-09-18 version of this lane: back then a token could reach
+  // this lane on dex/market momentum alone (see the old, since-removed
+  // canBypassUtilityGateForMomentum / classify.ts momentum override — the
+  // exact "chase the trend regardless of what it is" pattern the losses were
+  // traced to). Now narrativeRequireAiNarrativeQuality below makes an actual
+  // AI read of real tweet text a hard, unwaivable gate — no verified narrative
+  // content, no trade, regardless of how strong the dex/market numbers look.
+  narrativeTradingEnabled: bool("NARRATIVE_TRADING_ENABLED", true),
+  // Hard gate (evaluateNarrativeQuality in narratives.ts): an AI must read
+  // real sample tweet text about the meta and confirm it's a genuinely good,
+  // organically viral concept — not just high tweet/account counts, which a
+  // bot-scanner network can produce for free. No X data at all (no bearer
+  // token, search error, or zero tweets found) fails this closed: "you must
+  // check the tweet... before investing a penny" means no verification, no
+  // trade, never a silent pass-through. Kill switch only for an incident;
+  // this is the entire point of reopening this lane, not optional tuning.
+  narrativeRequireAiNarrativeQuality: bool("NARRATIVE_REQUIRE_AI_NARRATIVE_QUALITY", true),
+  narrativeMinAiViralityScore: num("NARRATIVE_MIN_AI_VIRALITY_SCORE", 60),
+  // Guide heuristic (Spyzer memecoin guide, "MC vs Volume" section): healthy
+  // organic trading turns over a meaningful fraction of market cap; a token
+  // trading far below that is a bundling/low-float red flag — few wallets
+  // holding most of the supply, barely trading it among themselves. The
+  // guide's own bar (80%) is calibrated for a token's first hour on a bonding
+  // curve; this checks 24h volume against CURRENT mcap for an already-
+  // trending meta's candidates (which can be hours-to-days old, not
+  // minutes), so the bar is deliberately much lower — this is a supplementary
+  // red-flag signal alongside the volume/liquidity and buy-ratio checks
+  // above, not a replacement for either.
+  narrativeMinVolumeToMcapRatio24h: num("NARRATIVE_MIN_VOLUME_TO_MCAP_RATIO_24H", 0.15),
   narrativePollIntervalSeconds: num("NARRATIVE_POLL_INTERVAL_SECONDS", 180),
   narrativeMaxMetasPerPoll: num("NARRATIVE_MAX_METAS_PER_POLL", 8),
   narrativeMaxPairsPerMeta: num("NARRATIVE_MAX_PAIRS_PER_META", 8),

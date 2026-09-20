@@ -38,6 +38,42 @@ export const VISUAL_CLASSIFICATION_JSON_SCHEMA = {
   ],
 } as const;
 
+// 2026-09-20 user directive: memecoin trading is reopened, but only for a
+// token backed by a genuinely good, verifiably viral narrative — "check the
+// tweet, see if it is a VERY GOOD and preferably VIRAL meme/concept before
+// investing a penny." This judges actual tweet text (not just tweet/account
+// counts, which a bot-scanner network can inflate for free) the way a real
+// trader would read a coin's X presence before buying.
+export const NarrativeQualitySchema = z.object({
+  isGenuineViralNarrative: z.boolean(),
+  viralityScore: z.number().min(0).max(100),
+  narrativeClarity: z.number().min(0).max(100),
+  authenticitySignal: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  oneLineNarrative: z.string(),
+  reasoningSummary: z.array(z.string()).max(8),
+});
+export type NarrativeQuality = z.infer<typeof NarrativeQualitySchema>;
+
+export const NARRATIVE_QUALITY_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    isGenuineViralNarrative: { type: "boolean" },
+    viralityScore: { type: "number", minimum: 0, maximum: 100 },
+    narrativeClarity: { type: "number", minimum: 0, maximum: 100 },
+    authenticitySignal: { type: "string", enum: ["LOW", "MEDIUM", "HIGH"] },
+    oneLineNarrative: { type: "string" },
+    reasoningSummary: { type: "array", items: { type: "string" }, maxItems: 8 },
+  },
+  required: [
+    "isGenuineViralNarrative",
+    "viralityScore",
+    "narrativeClarity",
+    "authenticitySignal",
+    "oneLineNarrative",
+    "reasoningSummary",
+  ],
+} as const;
+
 export const UTILITY_CLASSES = [
   "AI",
   "DEFI",

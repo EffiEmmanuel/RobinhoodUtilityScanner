@@ -99,6 +99,13 @@ export interface XNarrativeSearchResult {
   totalEngagement: number;
   credibleAccountCount: number;
   sampleTweetUrls: string[];
+  // Raw tweet text (top N by engagement), for an AI narrative-quality
+  // classifier to actually read and judge — 2026-09-20 user directive:
+  // reopening memecoin trading requires "checking the tweet" for a genuinely
+  // good/viral concept, not just counting how many tweets/accounts exist.
+  // Aggregate counts above can't tell a real viral moment apart from bot
+  // scanner spam; the text can.
+  sampleTweetTexts: string[];
   accounts: XAccountSummary[];
   error?: string;
 }
@@ -196,6 +203,7 @@ export async function searchXForNarrative(query: string, maxResults = 50): Promi
     totalEngagement: 0,
     credibleAccountCount: 0,
     sampleTweetUrls: [],
+    sampleTweetTexts: [],
     accounts: [],
   };
   if (!config.xBearerToken) {
@@ -250,6 +258,18 @@ export async function searchXForNarrative(query: string, maxResults = 50): Promi
       return !looksLikeScanner && (a.verified || followers >= 500 || (followers >= 100 && accountAge >= 90 && tweetCount < 20_000));
     }).length;
 
+    // Highest-engagement tweets first for the text sample an AI narrative
+    // classifier reads — the point is judging whether real virality exists,
+    // so the most-engaged posts are the representative sample, not whichever
+    // came back first in the API's recency-ordered response.
+    const byEngagementDesc = [...tweets].sort((a, b) => {
+      const engagement = (t: XTweet) => {
+        const m = t.public_metrics;
+        return m ? m.like_count + m.retweet_count + m.reply_count + m.quote_count : 0;
+      };
+      return engagement(b) - engagement(a);
+    });
+
     return {
       query,
       tweetCount: tweets.length,
@@ -257,6 +277,7 @@ export async function searchXForNarrative(query: string, maxResults = 50): Promi
       totalEngagement,
       credibleAccountCount,
       sampleTweetUrls: tweets.slice(0, 5).map((t) => `https://x.com/i/web/status/${t.id}`),
+      sampleTweetTexts: byEngagementDesc.slice(0, 15).map((t) => t.text).filter(Boolean),
       accounts,
     };
   } catch (err) {

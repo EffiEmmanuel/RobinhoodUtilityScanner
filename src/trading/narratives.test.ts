@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { scoreNarrativeCandidate } from "./narratives";
+import { scoreNarrativeCandidate, evaluateNarrativeQuality } from "./narratives";
+import { tradingConfig } from "./config";
 import type { MarketPair, TrendingMeta } from "../dex/types";
 
 const meta: TrendingMeta = {
@@ -22,6 +23,7 @@ function pair(overrides: Partial<MarketPair> = {}): MarketPair {
     baseTokenName: "Cat Runner",
     baseTokenSymbol: "CAT",
     liquidityUsd: 35_000,
+    marketCapUsd: 800_000,
     volume1h: 70_000,
     volume24h: 500_000,
     buys1h: 70,
@@ -46,6 +48,7 @@ describe("scoreNarrativeCandidate", () => {
         totalEngagement: 500,
         credibleAccountCount: 5,
         sampleTweetUrls: [],
+        sampleTweetTexts: [],
         accounts: [],
       },
     });
@@ -74,5 +77,79 @@ describe("scoreNarrativeCandidate", () => {
 
     expect(score.passed).toBe(false);
     expect(score.reasons.join(" ")).toContain("volume/liquidity");
+  });
+
+  it("rejects a token with thin 24h turnover relative to its market cap (bundling red flag)", () => {
+    const score = scoreNarrativeCandidate({
+      meta,
+      metaRank: 1,
+      pair: pair({ marketCapUsd: 10_000_000, volume24h: 200_000 }), // 2% turnover
+    });
+
+    expect(score.passed).toBe(false);
+    expect(score.reasons.join(" ")).toContain("volume/mcap ratio");
+  });
+
+  it("rejects when market cap data is missing entirely", () => {
+    const score = scoreNarrativeCandidate({
+      meta,
+      metaRank: 1,
+      pair: pair({ marketCapUsd: undefined }),
+    });
+
+    expect(score.passed).toBe(false);
+    expect(score.reasons.join(" ")).toContain("no market cap data");
+  });
+});
+
+describe("evaluateNarrativeQuality", () => {
+  it("passes trivially when the gate is disabled (kill switch)", async () => {
+    const original = tradingConfig.narrativeRequireAiNarrativeQuality;
+    tradingConfig.narrativeRequireAiNarrativeQuality = false;
+    try {
+      const result = await evaluateNarrativeQuality(meta, undefined);
+      expect(result.passed).toBe(true);
+    } finally {
+      tradingConfig.narrativeRequireAiNarrativeQuality = original;
+    }
+  });
+
+  it("hard-rejects with no X data at all — never a silent pass-through", async () => {
+    const result = await evaluateNarrativeQuality(meta, undefined);
+    expect(result.passed).toBe(false);
+    expect(result.reasons.join(" ")).toContain("cannot verify");
+  });
+
+  it("hard-rejects when the X search itself errored", async () => {
+    const result = await evaluateNarrativeQuality(meta, {
+      query: "(Cat OR $CAT)",
+      tweetCount: 0,
+      uniqueAccountCount: 0,
+      totalEngagement: 0,
+      credibleAccountCount: 0,
+      sampleTweetUrls: [],
+      sampleTweetTexts: [],
+      accounts: [],
+      error: "HTTP 429",
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reasons.join(" ")).toContain("X search failed");
+  });
+
+  it("hard-rejects when tweets exist but no readable text was captured", async () => {
+    const result = await evaluateNarrativeQuality(meta, {
+      query: "(Cat OR $CAT)",
+      tweetCount: 5,
+      uniqueAccountCount: 3,
+      totalEngagement: 20,
+      credibleAccountCount: 1,
+      sampleTweetUrls: ["https://x.com/i/web/status/1"],
+      sampleTweetTexts: [],
+      accounts: [],
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reasons.join(" ")).toContain("no tweet content found");
   });
 });

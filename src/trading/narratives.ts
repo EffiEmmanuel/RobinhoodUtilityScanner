@@ -5,6 +5,9 @@ import { fetchTrendingMetas, searchPairs } from "../dex/client";
 import type { MarketPair, TrendingMeta } from "../dex/types";
 import { logger } from "../logger";
 import { searchXForNarrative, type XNarrativeSearchResult } from "../research/xSearch";
+import { callStructured } from "../ai/provider";
+import { NarrativeQualitySchema, NARRATIVE_QUALITY_JSON_SCHEMA } from "../ai/schemas";
+import { NARRATIVE_QUALITY_CLASSIFIER_SYSTEM, buildNarrativeQualityPrompt } from "../ai/prompts";
 import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
 import { evaluateCandidate } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
@@ -81,6 +84,9 @@ export function scoreNarrativeCandidate(input: NarrativeScoreInput): NarrativeSc
   const liquidityUsd = pair.liquidityUsd ?? 0;
   const volume1h = pair.volume1h ?? 0;
   const volumeToLiquidity1h = liquidityUsd > 0 ? volume1h / liquidityUsd : Number.POSITIVE_INFINITY;
+  const marketCapUsd = pair.marketCapUsd ?? 0;
+  const volume24h = pair.volume24h ?? 0;
+  const volumeToMcap24h = marketCapUsd > 0 ? volume24h / marketCapUsd : undefined;
 
   const metaMomentum =
     Math.max(meta.marketCapChange?.h1 ?? -25, -25) * 1.4 +
@@ -140,6 +146,19 @@ export function scoreNarrativeCandidate(input: NarrativeScoreInput): NarrativeSc
   }
   if (volumeToLiquidity1h > tradingConfig.narrativeMaxVolumeToLiquidity1h) {
     reasons.push(`token 1h volume/liquidity ${volumeToLiquidity1h.toFixed(1)}x > ${tradingConfig.narrativeMaxVolumeToLiquidity1h}x`);
+  }
+  // Guide heuristic (bundling red flag): healthy organic trading turns over a
+  // meaningful fraction of market cap; far below that suggests a handful of
+  // wallets holding most of the supply and barely trading it among
+  // themselves. Missing mcap data is treated the same as failing the check —
+  // this is exactly the kind of signal that shouldn't silently pass on
+  // absent data for a lane that's now allowed to risk capital on memecoins.
+  if (marketCapUsd <= 0) {
+    reasons.push("no market cap data available to assess volume/mcap turnover");
+  } else if (volumeToMcap24h !== undefined && volumeToMcap24h < tradingConfig.narrativeMinVolumeToMcapRatio24h) {
+    reasons.push(
+      `24h volume/mcap ratio ${(volumeToMcap24h * 100).toFixed(0)}% < ${Math.round(tradingConfig.narrativeMinVolumeToMcapRatio24h * 100)}% — thin turnover relative to market cap can indicate a bundled/low-float token`
+    );
   }
 
   const score = Math.round((dexScore * 0.38 + marketScore * 0.42 + xScore * 0.2) * 10) / 10;
@@ -208,6 +227,7 @@ async function createNarrativeCandidate(input: {
   pair: MarketPair;
   xFindings?: XNarrativeSearchResult;
   score: NarrativeScoreResult;
+  narrativeQuality: NarrativeQualityGateResult;
 }): Promise<boolean> {
   const token = await upsertNarrativeToken(input.pair);
   if (!token) return false;
@@ -249,13 +269,13 @@ async function createNarrativeCandidate(input: {
       confidence: clamp(input.score.score * 0.9),
       hardReject,
       rejectionReasons: hardReject ? (honeypot.reasons as unknown as object) : Prisma.JsonNull,
-      summary: `Narrative tactical candidate for ${input.meta.name}: ${input.score.reasons.join("; ")}`,
+      summary: `Narrative tactical candidate for ${input.meta.name} — "${input.narrativeQuality.oneLineNarrative ?? input.meta.name}": ${input.score.reasons.join("; ")}`,
       risks: [
         "narrative/memecoin lane decays quickly",
         "project fundamentals are not verified",
         ...honeypot.reasons,
       ] as unknown as object,
-      positives: input.score.reasons as unknown as object,
+      positives: [...input.narrativeQuality.reasons, ...input.score.reasons] as unknown as object,
       rawResearch: {
         source: "narrative-trading",
         synthesis: {
@@ -268,6 +288,7 @@ async function createNarrativeCandidate(input: {
           metaRank: input.metaRank,
           score: input.score,
           xFindings: input.xFindings,
+          narrativeQuality: input.narrativeQuality,
         },
         market: { primaryPair: input.pair },
         honeypot,
@@ -364,6 +385,69 @@ async function createNarrativeCandidate(input: {
   return true;
 }
 
+export interface NarrativeQualityGateResult {
+  passed: boolean;
+  viralityScore?: number;
+  oneLineNarrative?: string;
+  reasons: string[];
+}
+
+/**
+ * Hard AI gate (2026-09-20 user directive) over the actual tweet TEXT for a
+ * trending meta — see prompts.ts's NARRATIVE_QUALITY_CLASSIFIER_SYSTEM doc
+ * comment for the full rationale. Deliberately separate from
+ * scoreNarrativeCandidate's dex/market/xScore weighting: that scoring treats
+ * a missing/errored X search as a neutral-ish default (35/100 xScore) so one
+ * bad API call can't tank an otherwise-strong candidate on the quantitative
+ * side, but "no tweet content to read" must never silently pass THIS gate —
+ * the whole point of reopening this lane is that a real narrative has been
+ * verified, not merely that the numbers looked fine.
+ */
+export async function evaluateNarrativeQuality(
+  meta: TrendingMeta,
+  xFindings: XNarrativeSearchResult | undefined
+): Promise<NarrativeQualityGateResult> {
+  if (!tradingConfig.narrativeRequireAiNarrativeQuality) {
+    return { passed: true, reasons: ["AI narrative-quality gate disabled"] };
+  }
+  if (!xFindings || xFindings.error || xFindings.sampleTweetTexts.length === 0) {
+    return {
+      passed: false,
+      reasons: [
+        xFindings?.error
+          ? `X search failed (${xFindings.error}) — cannot verify a genuine narrative without reading real tweets`
+          : "no tweet content found for this narrative — cannot verify it's genuinely good/viral before risking capital",
+      ],
+    };
+  }
+
+  const classification = await callStructured({
+    model: config.classifierModel,
+    system: NARRATIVE_QUALITY_CLASSIFIER_SYSTEM,
+    prompt: buildNarrativeQualityPrompt({
+      metaName: meta.name,
+      metaDescription: meta.description,
+      tweetTexts: xFindings.sampleTweetTexts,
+    }),
+    schema: NarrativeQualitySchema,
+    jsonSchema: NARRATIVE_QUALITY_JSON_SCHEMA,
+    toolName: "submit_narrative_quality_classification",
+    maxTokens: 1000,
+  });
+
+  const passed = classification.isGenuineViralNarrative && classification.viralityScore >= tradingConfig.narrativeMinAiViralityScore;
+  return {
+    passed,
+    viralityScore: classification.viralityScore,
+    oneLineNarrative: classification.oneLineNarrative,
+    reasons: passed
+      ? [`AI narrative-quality gate passed: "${classification.oneLineNarrative}" (virality ${classification.viralityScore}/100)`]
+      : [
+          `AI narrative-quality gate failed (virality ${classification.viralityScore}/100, genuine=${classification.isGenuineViralNarrative}): ${classification.reasoningSummary.join("; ")}`,
+        ],
+  };
+}
+
 export async function generateNarrativeTradeCandidates(): Promise<number> {
   if (!tradingConfig.narrativeTradingEnabled) return 0;
 
@@ -382,10 +466,25 @@ export async function generateNarrativeTradeCandidates(): Promise<number> {
         totalEngagement: 0,
         credibleAccountCount: 0,
         sampleTweetUrls: [],
+        sampleTweetTexts: [],
         accounts: [],
         error: String(err),
       }));
       xSearches++;
+    }
+
+    // Hard gate, once per meta (not per pair — multiple pairs can match the
+    // same meta and share this same narrative-quality verdict, same as they
+    // already share xFindings above). A meta that fails this can never
+    // produce a candidate regardless of how strong any individual pair's
+    // dex/market numbers look.
+    const narrativeQuality = await evaluateNarrativeQuality(meta, xFindings).catch((err) => ({
+      passed: false,
+      reasons: [`narrative-quality check threw: ${String(err)}`],
+    }));
+    if (!narrativeQuality.passed) {
+      logger.info({ meta: meta.slug, reasons: narrativeQuality.reasons }, "narrative meta rejected by AI narrative-quality gate");
+      continue;
     }
 
     let pairs: MarketPair[];
@@ -407,7 +506,7 @@ export async function generateNarrativeTradeCandidates(): Promise<number> {
     for (const pair of targetPairs) {
       const score = scoreNarrativeCandidate({ meta, metaRank: i + 1, pair, xFindings });
       if (!score.passed) continue;
-      if (await createNarrativeCandidate({ meta, metaRank: i + 1, pair, xFindings, score })) created++;
+      if (await createNarrativeCandidate({ meta, metaRank: i + 1, pair, xFindings, score, narrativeQuality })) created++;
     }
   }
 

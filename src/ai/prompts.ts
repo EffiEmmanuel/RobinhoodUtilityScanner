@@ -88,6 +88,77 @@ ${examples}
 Classify this token now.`;
 }
 
+/**
+ * 2026-09-20 user directive: reopens memecoin trading (previously eliminated
+ * entirely on 2026-09-18 after losses traced to exactly that category), but
+ * ONLY for a token backed by a real, verifiably viral narrative — "you must
+ * check the tweet, see if it is a VERY GOOD and preferably VIRAL meme/concept
+ * before investing a penny in it. The goal is to make money." This is
+ * deliberately a hard AI judgment gate over actual tweet text, not a
+ * liquidity/volume proxy — the four+ bypass mechanisms removed on 2026-09-18
+ * (see narratives.ts's git history / classify.ts's comments) let tokens
+ * through on trading momentum alone with no real narrative verification,
+ * which is what this is designed not to repeat. Momentum/liquidity/volume are
+ * scored separately in narratives.ts's scoreNarrativeCandidate — this prompt
+ * exists only to judge whether the STORY itself is real and good.
+ */
+export const NARRATIVE_QUALITY_CLASSIFIER_SYSTEM = `You judge whether a trending crypto narrative/meme has a genuinely good, viral concept behind it —
+worth risking real money on as a memecoin trade — by reading actual tweets about it, the way an
+experienced memecoin trader would before buying.
+
+A good, tradeable narrative has ALL of these:
+- A story or concept a stranger could understand and repeat in one sentence within a few seconds
+  (a specific viral event, a distinctive character/animal/phrase, a well-known celebrity or public
+  figure's own action, or a joke/meme that is already spreading on its own).
+- Signs of REAL human reaction: genuine replies, jokes, reactions, disagreement, people tagging
+  friends — not just repetitive "🚀🚀🚀 $TICKER to the moon" engagement farming.
+- Momentum that reads as organic and still building or freshly peaking, not stale, not manufactured.
+
+Reject (isGenuineViralNarrative: false), regardless of tweet volume or engagement numbers, when:
+- The tweets are dominated by automated calling/scanner-bot posts (generic "🔥 new gem found",
+  "radar alert", copy-pasted templates posted about many unrelated tokens) rather than organic
+  reaction to a real story. A bot network can generate high tweet/account counts for free — text
+  content is the only thing that reveals this.
+- The "narrative" is just a generic crypto buzzword, a copy of another already-established
+  narrative token with no distinguishing story of its own (vamping/copycat — see if tweets are
+  people debating "is this the real one" or redirecting to a different ticker), or something you
+  cannot summarize in one plain sentence without jargon.
+- Engagement looks purchased/coordinated: near-identical phrasing across many accounts, a burst of
+  brand-new accounts all posting about the same token, or engagement wildly disproportionate to
+  what the accounts' own follower counts would predict.
+- There simply isn't enough real content to tell — when genuinely uncertain, reject. The cost of
+  missing a real winner is a missed trade; the cost of a false positive here is risking real capital
+  on a token with a hollow story, which is exactly what this trader stopped doing after losses in
+  this same category. Do not let confidence in your own read cross into a pass when the tweet
+  evidence itself is thin.
+
+viralityScore should reflect how strong and how EARLY the real (non-bot) momentum looks — a big
+story with organic reaction already exploding scores high; a quiet, thin, or fading narrative scores
+low even if technically "genuine." narrativeClarity should reflect how easily the concept could be
+explained to someone with zero context. authenticitySignal is your read on bot/manufactured
+engagement vs real human reaction across the whole sample, independent of the other two scores.
+
+Return your answer only via the provided tool call.`;
+
+export function buildNarrativeQualityPrompt(input: {
+  metaName: string;
+  metaDescription?: string;
+  tweetTexts: string[];
+}): string {
+  const tweetBlock =
+    input.tweetTexts.length > 0
+      ? input.tweetTexts.map((t, i) => `${i + 1}. "${t.replace(/\s+/g, " ").trim()}"`).join("\n")
+      : "(no tweet text available)";
+  return `NARRATIVE / META
+Name: ${input.metaName}
+Description: ${input.metaDescription ?? "(none provided)"}
+
+RECENT TWEETS ABOUT THIS NARRATIVE (highest-engagement first, up to 15)
+${tweetBlock}
+
+Judge whether this is a genuinely good, viral, tradeable narrative now.`;
+}
+
 export const RESEARCH_SYNTHESIZER_SYSTEM = `You are the final research synthesizer for a crypto trading-intelligence agent focused on
 Robinhood Chain utility tokens.
 

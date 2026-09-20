@@ -6,3 +6,4 @@ src/generated/
 *.db
 *.db-journal
 .DS_Store
+reset-circuit-breaker.sh
