@@ -305,7 +305,11 @@ async function executeSolanaBuyFill(
   chain: string,
   options: { maxSlippageBps?: number }
 ): Promise<FillResult> {
-  const solPriceUsd = deriveSolPriceUsd(pair);
+  // See getBuyEstimate's matching comment: a real, liquid token can still
+  // have a non-SOL-quoted primary pair (DOJO/DOGE, confirmed live
+  // 2026-09-21) — fall back to the independent, cached SOL/USD rate rather
+  // than refusing to size the trade.
+  const solPriceUsd = deriveSolPriceUsd(pair) ?? (await getSolPriceUsd());
   if (!solPriceUsd) throw new Error("cannot determine SOL/USD price for live buy sizing (missing priceNative)");
   const amountInLamports = BigInt(Math.floor((positionSizeUsd / solPriceUsd) * LAMPORTS_PER_SOL));
 
@@ -528,7 +532,11 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
  * from the wallet's true raw balance; never let that cause a revert-forever
  * loop, clamp and sell what's actually there). */
 async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string): Promise<FillResult> {
-  const solPriceUsd = deriveSolPriceUsd(pair);
+  // Same fallback as executeSolanaBuyFill/getBuyEstimate — critically, this
+  // is the EXIT path: refusing to sell a real position just because its pair
+  // isn't SOL-quoted (rather than merely refusing a new buy) would trap open
+  // capital, which is strictly worse than a blocked entry.
+  const solPriceUsd = deriveSolPriceUsd(pair) ?? (await getSolPriceUsd());
   if (!solPriceUsd) throw new Error("cannot determine SOL/USD price for live sell sizing (missing priceNative)");
 
   const conn = getSolanaConnection();
