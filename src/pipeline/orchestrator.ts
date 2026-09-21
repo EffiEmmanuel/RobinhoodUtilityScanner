@@ -84,60 +84,77 @@ async function recoverStuckTokens(): Promise<void> {
   }
 }
 
+async function tryClassifyOne(): Promise<boolean> {
+  if (Date.now() < classifyCooldownUntil) return false;
+  const toClassify = await claim(TokenStatus.DETECTED, TokenStatus.CLASSIFYING);
+  if (!toClassify) return false;
+  try {
+    await classifyToken(toClassify.id);
+  } catch (err) {
+    if (isQuotaExhausted(err)) {
+      classifyCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+      logger.warn({ tokenId: toClassify.id, cooldownMs: QUOTA_COOLDOWN_MS }, "classification hit an AI quota/rate limit — requeued, pausing classification briefly");
+      await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.DETECTED } });
+    } else {
+      logger.error({ tokenId: toClassify.id, err: summarizeError(err) }, "classification failed");
+      await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.FAILED } });
+    }
+  }
+  return true;
+}
+
+async function tryResearchOne(): Promise<boolean> {
+  if (Date.now() < researchCooldownUntil) return false;
+  const toResearch = await claim(TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING);
+  if (!toResearch) return false;
+  try {
+    await researchToken(toResearch.id);
+  } catch (err) {
+    if (isQuotaExhausted(err)) {
+      researchCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+      logger.warn({ tokenId: toResearch.id, cooldownMs: QUOTA_COOLDOWN_MS }, "research hit an AI quota/rate limit — requeued, pausing research briefly");
+      await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.RESEARCH_QUEUED } });
+    } else {
+      logger.error({ tokenId: toResearch.id, err: summarizeError(err) }, "research failed");
+      await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.FAILED } });
+    }
+  }
+  return true;
+}
+
 /**
  * Token.status IS the job queue (DETECTED -> CLASSIFYING -> RESEARCH_QUEUED
  * -> RESEARCHING -> ALERTED/WATCHLISTED/REJECTED). No Redis/BullMQ needed at
  * this scale.
+ *
+ * Confirmed live 2026-09-21: this used to always try classify before
+ * research. Discovery was outpacing classification (~111 tokens/hr found vs
+ * ~27/hr classified), so the DETECTED queue was essentially never empty —
+ * meaning research NEVER got a turn on either worker, for 11+ hours straight
+ * (0 ResearchRuns, 0 TradeCandidates, despite classification and discovery
+ * both running fine). `preferResearch` lets the caller flip which stage gets
+ * first refusal, so splitting it across the worker pool (see workerLoop)
+ * guarantees research always gets served by at least one worker regardless
+ * of how deep the classify backlog gets — each stage still falls through to
+ * the other if its own queue is empty, so no worker sits idle.
  */
-async function processOneToken(): Promise<boolean> {
-  const now = Date.now();
-
-  if (now >= classifyCooldownUntil) {
-    const toClassify = await claim(TokenStatus.DETECTED, TokenStatus.CLASSIFYING);
-    if (toClassify) {
-      try {
-        await classifyToken(toClassify.id);
-      } catch (err) {
-        if (isQuotaExhausted(err)) {
-          classifyCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
-          logger.warn({ tokenId: toClassify.id, cooldownMs: QUOTA_COOLDOWN_MS }, "classification hit an AI quota/rate limit — requeued, pausing classification briefly");
-          await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.DETECTED } });
-        } else {
-          logger.error({ tokenId: toClassify.id, err: summarizeError(err) }, "classification failed");
-          await db.token.update({ where: { id: toClassify.id }, data: { status: TokenStatus.FAILED } });
-        }
-      }
-      return true;
-    }
+async function processOneToken(preferResearch: boolean): Promise<boolean> {
+  if (preferResearch) {
+    return (await tryResearchOne()) || (await tryClassifyOne());
   }
-
-  if (now >= researchCooldownUntil) {
-    const toResearch = await claim(TokenStatus.RESEARCH_QUEUED, TokenStatus.RESEARCHING);
-    if (toResearch) {
-      try {
-        await researchToken(toResearch.id);
-      } catch (err) {
-        if (isQuotaExhausted(err)) {
-          researchCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
-          logger.warn({ tokenId: toResearch.id, cooldownMs: QUOTA_COOLDOWN_MS }, "research hit an AI quota/rate limit — requeued, pausing research briefly");
-          await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.RESEARCH_QUEUED } });
-        } else {
-          logger.error({ tokenId: toResearch.id, err: summarizeError(err) }, "research failed");
-          await db.token.update({ where: { id: toResearch.id }, data: { status: TokenStatus.FAILED } });
-        }
-      }
-      return true;
-    }
-  }
-
-  return false;
+  return (await tryClassifyOne()) || (await tryResearchOne());
 }
 
 async function workerLoop(workerId: number, signal: { stopped: boolean }): Promise<void> {
+  // Odd-numbered workers prioritize research over classification; even-numbered
+  // (including worker 0) prioritize classification — see processOneToken's
+  // doc comment. With WORKER_CONCURRENCY=2 this guarantees exactly one worker
+  // of each priority rather than both always favoring the same stage.
+  const preferResearch = workerId % 2 === 1;
   while (!signal.stopped) {
     let didWork = false;
     try {
-      didWork = await processOneToken();
+      didWork = await processOneToken(preferResearch);
     } catch (err) {
       logger.error({ workerId, err: summarizeError(err) }, "worker loop iteration failed");
     }
