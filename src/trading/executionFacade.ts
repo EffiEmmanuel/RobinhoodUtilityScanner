@@ -17,6 +17,7 @@ import { isSolanaLiveModeReady, getSolanaLiveQuote, executeSolanaLiveBuy, execut
 import { getSolanaConnection, getSolanaWalletPublicKey } from "./live/solana/wallet";
 import { getSolanaMintDecimals, getSolanaTokenBalance } from "./live/solana/tokenUtils";
 import { SOL_MINT } from "./live/solana/jupiterClient";
+import { getSolPriceUsd } from "./portfolio";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -127,7 +128,19 @@ export async function getBuyEstimate(
   }
 
   if (chain === "solana") {
-    const solPriceUsd = deriveSolPriceUsd(pair);
+    // Confirmed live 2026-09-21: deriveSolPriceUsd only works when THIS
+    // token's own pair happens to be SOL-quoted — but plenty of real, liquid
+    // tokens' primary/only DexScreener pair is quoted in something else
+    // (DOJO's is DOGE-quoted, for example, despite $37K liquidity and a
+    // perfectly good Jupiter route). Giving up there returned tokenAmount: 0,
+    // which downstream made isSellable() fall back to a 1-lamport dust probe
+    // — too small for Jupiter to route at all (HTTP 400) — misread as "no
+    // sell path," permanently blocking a real, tradeable token. SOL/USD is a
+    // single global rate independent of any one token's pair data, so fall
+    // back to the same reliable, cached Jupiter SOL/USDC probe portfolio.ts
+    // already uses for exactly this reason (see its doc comment) rather than
+    // refusing to price the trade at all.
+    const solPriceUsd = deriveSolPriceUsd(pair) ?? (await getSolPriceUsd());
     if (!solPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
     const amountInLamports = BigInt(Math.floor((positionSizeUsd / solPriceUsd) * LAMPORTS_PER_SOL));
     const quote = await getSolanaLiveQuote(tokenAddress, true, amountInLamports, tradingConfig.defaultMaxBuySlippageBps);
