@@ -57,10 +57,15 @@ describe("shouldRetryPlanningForTransientMomentumMarket", () => {
 });
 
 describe("tacticalScoutActionForWatchOnly", () => {
+  // 2026-09-22: these used to pass qualificationPath: "MOMENTUM_OVERRIDE" —
+  // a value planCandidate stopped ever setting on 2026-09-18 (hardcoded to
+  // "NORMAL" for every candidate post-utility-pivot), which meant these
+  // tests were exercising a gate the real call site could never satisfy —
+  // the function was silently dead in production while these all still
+  // passed. tradeLane alone is the real (and correct) gate now.
   it("turns a MULTI-style watch-only call into BUY_NOW when current price is already inside the AI zone", () => {
     const result = tacticalScoutActionForWatchOnly({
       action: TradePlanAction.WATCH_ONLY,
-      qualificationPath: "MOMENTUM_OVERRIDE",
       tradeLane: "MOMENTUM_TACTICAL",
       currentMcap: 41_099,
       targetEntryMcapMin: 28_000,
@@ -79,7 +84,6 @@ describe("tacticalScoutActionForWatchOnly", () => {
   it("turns a momentum watch-only call into WAIT_FOR_ENTRY when the actionable zone is below current price", () => {
     const result = tacticalScoutActionForWatchOnly({
       action: TradePlanAction.WATCH_ONLY,
-      qualificationPath: "MOMENTUM_OVERRIDE",
       tradeLane: "MOMENTUM_TACTICAL",
       currentMcap: 134_329,
       targetEntryMcapMin: 60_000,
@@ -98,7 +102,6 @@ describe("tacticalScoutActionForWatchOnly", () => {
   it("does not override watch-only when the activity looks like wash trading", () => {
     const result = tacticalScoutActionForWatchOnly({
       action: TradePlanAction.WATCH_ONLY,
-      qualificationPath: "MOMENTUM_OVERRIDE",
       tradeLane: "MOMENTUM_TACTICAL",
       currentMcap: 41_099,
       targetEntryMcapMin: 28_000,
@@ -117,7 +120,6 @@ describe("tacticalScoutActionForWatchOnly", () => {
   it("does not override non-momentum watch-only decisions", () => {
     const result = tacticalScoutActionForWatchOnly({
       action: TradePlanAction.WATCH_ONLY,
-      qualificationPath: "NORMAL",
       tradeLane: "VERIFIED_PROJECT",
       currentMcap: 41_099,
       targetEntryMcapMin: 28_000,

@@ -205,7 +205,6 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
   const tacticalScoutOverride = tacticalScoutActionForWatchOnly({
     action,
-    qualificationPath,
     tradeLane: lane.tradeLane,
     currentMcap,
     targetEntryMcapMin: clampedZone.min,
@@ -341,9 +340,29 @@ export function shouldRetryPlanningForTransientMomentumMarket(input: {
   return input.evaluation.reasons.some((reason) => reason.startsWith("liquidityUsd "));
 }
 
+/**
+ * Rescues a WATCH_ONLY verdict into an actionable BUY_NOW/WAIT_FOR_ENTRY for
+ * a fast-moving, already-utility-qualified MOMENTUM_TACTICAL candidate the
+ * AI got too cautious about, given real two-sided volume backing the move.
+ *
+ * User directive 2026-09-22: "we can still take advantage of momentum and
+ * volume pumps... especially for good projects and not just utility PER SE."
+ * Found (not previously known) that this had been silently dead since the
+ * 2026-09-18 utility-only pivot: it required `qualificationPath ===
+ * "MOMENTUM_OVERRIDE"`, but planCandidate hardcodes qualificationPath to
+ * "NORMAL" for every candidate now (that pivot retired the bypass path this
+ * used to gate on) — so this function could never fire, silently, for four
+ * days. Fixed by dropping that dead check; tradeLane === "MOMENTUM_TACTICAL"
+ * alone is the right gate now, same redefinition resolveExitRules in
+ * positionManager.ts already applies: post-pivot, that lane only ever means
+ * "a genuine utility candidate that didn't clear the verified-project bar,"
+ * not "a risky momentum play" — so rescuing it on confirmed momentum is
+ * exactly "taking advantage of a pump for a good project," not reopening
+ * the bypass. Chain-agnostic (no chain check anywhere in this file) — applies
+ * identically to Robinhood Chain and Solana candidates.
+ */
 export function tacticalScoutActionForWatchOnly(input: {
   action: TradePlanAction;
-  qualificationPath: string | null | undefined;
   tradeLane: string | null | undefined;
   currentMcap: number | undefined;
   targetEntryMcapMin: number | undefined;
@@ -351,7 +370,7 @@ export function tacticalScoutActionForWatchOnly(input: {
   pair: Pick<MarketPair, "liquidityUsd" | "volume1h" | "buys1h" | "sells1h"> | undefined;
 }): TradePlanAction | undefined {
   if (input.action !== TradePlanAction.WATCH_ONLY) return undefined;
-  if (input.qualificationPath !== "MOMENTUM_OVERRIDE" || input.tradeLane !== "MOMENTUM_TACTICAL") return undefined;
+  if (input.tradeLane !== "MOMENTUM_TACTICAL") return undefined;
   if (!input.pair || input.currentMcap === undefined) return undefined;
   if (input.targetEntryMcapMin === undefined || input.targetEntryMcapMax === undefined) return undefined;
 
