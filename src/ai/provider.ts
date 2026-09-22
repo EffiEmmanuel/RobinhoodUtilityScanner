@@ -10,11 +10,11 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 // Each key is a separate Google account/project with its own independent
 // daily free-tier quota — rotating on exhaustion turns one 500/day ceiling
-// into (up to) 3x that, instead of the whole pipeline stalling once the
+// into (up to) N x that, instead of the whole pipeline stalling once the
 // first key runs dry. Index only ever moves forward (a quota reset is a
 // day-boundary event, not something worth guessing at mid-process) — a
 // redeploy naturally starts back at key 0.
-const API_KEYS = [config.geminiApiKey, config.geminiApiKey2, config.geminiApiKey3].filter((k): k is string => Boolean(k));
+const API_KEYS = config.geminiApiKeys;
 let currentKeyIndex = 0;
 const clients: (GoogleGenAI | undefined)[] = [];
 

@@ -14,6 +14,7 @@
     "db:studio": "prisma studio",
     "wallet:track": "tsx scripts/track-wallet.ts",
     "wallet:poll": "tsx scripts/run-wallet-tracking-poll.ts",
+    "missed-opportunities": "tsx scripts/export-missed-opportunities.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

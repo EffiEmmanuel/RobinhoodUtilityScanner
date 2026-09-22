@@ -157,8 +157,21 @@ export const config = {
   walletTrackingInitialBackfillBlocks: num("WALLET_TRACKING_INITIAL_BACKFILL_BLOCKS", 3000),
 
   geminiApiKey: optStr("GEMINI_API_KEY"),
-  geminiApiKey2: optStr("GEMINI_API_KEY_2"),
-  geminiApiKey3: optStr("GEMINI_API_KEY_3"),
+  // Unbounded rotation pool: GEMINI_API_KEY, GEMINI_API_KEY_2, _3, _4, ... —
+  // each one ideally a separate Google account/project so it carries its own
+  // independent free-tier daily quota (see provider.ts). Stops at the first
+  // gap so keys must be numbered contiguously from 2, but there's no cap on
+  // how many can be added; growing the pool is a Railway env var, not a
+  // code change.
+  geminiApiKeys: (() => {
+    const keys = [optStr("GEMINI_API_KEY")].filter((k): k is string => Boolean(k));
+    for (let i = 2; ; i++) {
+      const key = optStr(`GEMINI_API_KEY_${i}`);
+      if (!key) break;
+      keys.push(key);
+    }
+    return keys;
+  })(),
   classifierModel: str("CLASSIFIER_MODEL", "gemini-flash-lite-latest"),
   // Defaults to the same lite model as classification: on a free-tier key,
   // "gemini-flash-latest" resolves to whatever the newest preview model is
