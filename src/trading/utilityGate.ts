@@ -32,7 +32,7 @@ export function evaluateUtilityOnlyGate(input: UtilityGateInput): UtilityGateRes
   }
   if (!tradingConfig.allowUnknownProductPredatesToken && input.productPredatesToken !== "YES") {
     reasons.push(`productPredatesToken is ${input.productPredatesToken ?? "missing"}`);
-  } else if (input.productPredatesToken === "NO") {
+  } else if (input.productPredatesToken === "NO" && tradingConfig.blockTokenFirstProducts) {
     reasons.push("product appears token-first/newly-created, not an established utility project");
   }
   if (score(input.utilityScore) < tradingConfig.minTradeUtilityScore) {

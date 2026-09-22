@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluateUtilityOnlyGate } from "./utilityGate";
+import { tradingConfig } from "./config";
 
 // User directive 2026-09-18: utility tokens only, no memecoins, no
 // exceptions — canBypassUtilityGateForMomentum (previously tested here) was
@@ -41,6 +42,20 @@ describe("evaluateUtilityOnlyGate", () => {
     const result = evaluateUtilityOnlyGate({ ...passing, productPredatesToken: "NO" });
     expect(result.passed).toBe(false);
     expect(result.reasons.some((r) => r.includes("token-first"))).toBe(true);
+  });
+
+  // User directive 2026-09-22: "why are we not investing in projects early" —
+  // blockTokenFirstProducts lets this specific check be loosened without
+  // touching the utilityClass/productExists/score floors around it.
+  it("allows a token-first project when blockTokenFirstProducts is disabled", () => {
+    const original = tradingConfig.blockTokenFirstProducts;
+    tradingConfig.blockTokenFirstProducts = false;
+    try {
+      const result = evaluateUtilityOnlyGate({ ...passing, productPredatesToken: "NO" });
+      expect(result.passed).toBe(true);
+    } finally {
+      tradingConfig.blockTokenFirstProducts = original;
+    }
   });
 
   it("rejects below-threshold utility/credibility/website scores", () => {

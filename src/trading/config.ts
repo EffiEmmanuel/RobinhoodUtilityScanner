@@ -78,6 +78,17 @@ export const tradingConfig = {
   minTradeWebsiteScore: num("MIN_TRADE_WEBSITE_SCORE", 45),
   requireProductForTrade: bool("REQUIRE_PRODUCT_FOR_TRADE", true),
   allowUnknownProductPredatesToken: bool("ALLOW_UNKNOWN_PRODUCT_PREDATES_TOKEN", true),
+  // User directive 2026-09-22: "why are we not investing in projects early" —
+  // productPredatesToken=="NO" (the product launched alongside or after the
+  // token) was a hard reject on top of everything else in utilityGate.ts,
+  // and it's structurally anti-"early": a genuine crypto-native utility
+  // project's token often launches WITH its product, not years after, which
+  // this treated identically to a bolted-on vaporware token. The other
+  // checks here (utilityClass != MEME, requireProductForTrade, the utility/
+  // credibility/website score floors) already guard against actual
+  // vaporware without this one. Default true keeps prior behavior on a fresh
+  // checkout; loosened to false live via Railway env, not the code default.
+  blockTokenFirstProducts: bool("BLOCK_TOKEN_FIRST_PRODUCTS", true),
   honeypotBytecodeCheckEnabled: bool("HONEYPOT_BYTECODE_CHECK_ENABLED", true),
   // "Verified project" is deliberately stricter than "tradeable." Momentum
   // can make a token worth a tactical scalp, but it must not masquerade as a
