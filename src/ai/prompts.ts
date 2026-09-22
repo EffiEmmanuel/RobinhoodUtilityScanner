@@ -288,7 +288,9 @@ Your options:
 - SET_REENTRY_TARGET: recommend a market-cap level to watch for a pullback to, with a suggested size
   (as a percent of the ORIGINAL position) and how long that target should stay valid. This does NOT
   buy anything now — it only takes effect if price actually falls to that level within the window.
-  Use this when you still believe in the position but current price looks locally extended.
+  Use this when you still believe in the position but current price looks locally extended. The
+  re-entry (DCA) budget below is tiered, not a blanket allowance — a weaker trade may have little or
+  none available; check it before proposing this, don't assume the budget you'd want exists.
 
 Ground every recommendation in the specific evidence you were given — the chart's actual structure
 when attached, support/resistance levels, volume trend across timeframes, momentum, how far price has

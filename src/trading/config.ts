@@ -540,15 +540,31 @@ export const tradingConfig = {
   // extra calls per interval, not an unbounded fan-out. Tune down further if
   // quota pressure shows up again.
   positionStrategyReviewIntervalSeconds: num("POSITION_STRATEGY_REVIEW_INTERVAL_SECONDS", 30),
-  // Raised from 1: the AI strategy review (positionStrategy.ts) already
-  // implements exactly a buy-the-dip/sell-the-resistance cycle via repeated
-  // TAKE_PARTIAL_PROFIT + SET_REENTRY_TARGET decisions — capping it at one
-  // re-entry turned that into a single-shot instead of the ongoing cycle it
-  // was designed for. Each re-entry is still capped at
-  // maxReentryPercentOfOriginal of the ORIGINAL position (not compounding),
-  // and every one still passes the same entry-risk gate a fresh trade would.
-  maxReentriesPerTrade: num("MAX_REENTRIES_PER_TRADE", 5),
-  maxReentryPercentOfOriginal: num("MAX_REENTRY_PERCENT_OF_ORIGINAL", 50),
+  // User directive 2026-09-22: "we can even DCA if the narrative or utility
+  // project is very good" — re-entry (DCA) budget is now tiered by
+  // positionManager.ts's resolveProjectTier, the same GOOD_PROJECT/BASE/
+  // FAST_FLIP classification used for the extended-hold decision. A trade
+  // has to actually earn the full DCA budget, not get it by default. Every
+  // re-entry is still capped at the tier's *PercentOfOriginal of the
+  // ORIGINAL position (not compounding), and every one still passes the
+  // same entry-risk gate a fresh trade would, regardless of tier.
+  //
+  // GOOD_PROJECT: unchanged from the old blanket defaults (raised from 1
+  // re-entry originally because the AI strategy review already implements
+  // exactly a buy-the-dip/sell-the-resistance cycle via repeated
+  // TAKE_PARTIAL_PROFIT + SET_REENTRY_TARGET decisions) — now the tier a
+  // trade has to earn (fastFlip-eligibility cleared + confirmed X
+  // community) rather than what every trade got by default.
+  maxReentriesPerTradeGoodProject: num("MAX_REENTRIES_PER_TRADE_GOOD_PROJECT", 5),
+  maxReentryPercentOfOriginalGoodProject: num("MAX_REENTRY_PERCENT_OF_ORIGINAL_GOOD_PROJECT", 50),
+  // BASE: decent research scores but no confirmed strong X community —
+  // some flexibility, well short of full DCA privileges.
+  maxReentriesPerTradeBase: num("MAX_REENTRIES_PER_TRADE_BASE", 2),
+  maxReentryPercentOfOriginalBase: num("MAX_REENTRY_PERCENT_OF_ORIGINAL_BASE", 25),
+  // FAST_FLIP: low-quality or an unproven large-mcap entry — don't average
+  // down into a thesis that hasn't earned any patience to begin with.
+  maxReentriesPerTradeFastFlip: num("MAX_REENTRIES_PER_TRADE_FAST_FLIP", 0),
+  maxReentryPercentOfOriginalFastFlip: num("MAX_REENTRY_PERCENT_OF_ORIGINAL_FAST_FLIP", 0),
 
   // Slippage / price-impact ceilings, used by the paper fill model (§29/§88)
   // even though nothing is actually routed on-chain in this build.
@@ -617,6 +633,14 @@ export const tradingConfig = {
   paperAssumedGasCostUsd: num("PAPER_ASSUMED_GAS_COST_USD", 0.05),
 
   defaultMaxHoldMinutes: num("DEFAULT_MAX_HOLD_MINUTES", 1440),
+  // User directive 2026-09-22: a genuinely strong project (clears the
+  // fastFlip bar AND has a confirmed real X community — see ExitRules.
+  // goodProject's doc comment in strategy.ts) gets up to 48h before the
+  // underwater-only TIME_EXIT would force-close it, not the usual 24h.
+  // Only used as the code-default seed StrategyVersion's value; the live
+  // strategy's own exitRules.goodProject.maxHoldMinutes (versioned, DB-held)
+  // is what actually governs production once a version carrying it exists.
+  goodProjectMaxHoldMinutes: num("GOOD_PROJECT_MAX_HOLD_MINUTES", 2880),
 
   // LIVE-only (§30/§80) — ignored entirely in PAPER/SHADOW.
   minGasBalanceEth: num("MIN_GAS_BALANCE_ETH", 0.002),

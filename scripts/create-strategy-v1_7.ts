@@ -11,18 +11,27 @@ import { StrategyStatus } from "../src/generated/prisma";
  * promoting it (DRAFT -> BACKTEST -> SHADOW -> PRODUCTION) is a deliberate,
  * separate human action via POST /strategies/:id/promote.
  *
- * User directive 2026-09-13: "be aggressive with taking profit... the goal
- * is to take profit." v1.6 (the current fallback-active version — nothing
- * has ever actually been promoted to PRODUCTION; getActiveStrategyVersion
- * falls back to the most recent SHADOW) only arms its trailing stop at 1.6x
- * with a 20% giveback for anything outside the fastFlip profile, and takes
- * no partial profit before 2x. fastFlip already moved to 1.2x/12% back in
- * v1.2 (2026-09-11) without a regression since — this brings the default
- * (non-fastFlip) profile in line with that, plus an earlier profit ladder
- * (1.4x/1.8x/2.5x instead of just 2x/2.5x) so a pump that reverses before 2x
- * still banks something instead of round-tripping to a loss. Loss-side
- * thresholds (maxLossPercent, catastrophicLossPercent) are unchanged from
- * v1.6 — this is a profit-taking change, not a risk-tolerance change.
+ * (A prior version of this file created a v1.7 with a tighter fixed
+ * profit-step ladder — confirmed via a live DB read 2026-09-22 that it was
+ * never actually run, no v1.7 row ever existed. That whole premise is now
+ * moot: positionManager.ts no longer enforces exitRules.profitSteps at all
+ * — see the 2026-09-22 "remove fixed-multiple profit-taking" commit — so
+ * this file was rewritten for the version that's actually needed next.)
+ *
+ * User directive 2026-09-22: "increase hold time for good projects to as
+ * long as 48 hours, we can even dca if the narrative or utility project is
+ * very good... good community on X too." Adds ONLY a new exitRules.
+ * goodProject tier on top of v1.6, unchanged otherwise — base and fastFlip
+ * profiles are byte-for-byte what's already live, so promoting this can only
+ * ever ADD the new tier's behavior, never regress existing behavior.
+ * goodProject requires resolveProjectTier's existing fastFlip-eligibility
+ * check to have already cleared (not low-quality, not an unproven large
+ * entry) AND ResearchRun.socialScore >= 60 — socialScore is the research
+ * synthesizer's own judgment of a genuine (non-bot) X community, populated
+ * identically for utility- and narrative-lane trades (narratives.ts sets
+ * socialScore: score.xScore), so this one field covers "good community on X"
+ * for both the same way the user asked. See strategy.ts's ExitRules.
+ * goodProject doc comment and positionManager.ts's resolveExitRules.
  *
  * Run with: railway run -- npx tsx scripts/create-strategy-v1_7.ts
  * (needs production DATABASE_URL — see the deploy/DB-querying references in
@@ -34,25 +43,19 @@ async function main() {
   });
   if (!parent) throw new Error("expected v1.6 to exist as the parent version — check `railway run -- npx tsx scripts/create-strategy-v1_7.ts` is running against the right DATABASE_URL");
 
+  const parentExitRules = parent.exitRules as Record<string, unknown>;
   const exitRules = {
-    profitSteps: [
-      { multiple: 1.4, sellPercentOfRemaining: 30 },
-      { multiple: 1.8, sellPercentOfRemaining: 30 },
-      { multiple: 2.5, sellPercentOfRemaining: 30 },
-    ],
-    trailRemaining: true,
-    trailingActivationMultiple: 1.2,
-    trailingPercent: 12,
-    maxLossPercent: (parent.exitRules as { maxLossPercent: number }).maxLossPercent,
-    catastrophicLossPercent: (parent.exitRules as { catastrophicLossPercent: number }).catastrophicLossPercent,
-    maxHoldMinutes: (parent.exitRules as { maxHoldMinutes: number }).maxHoldMinutes,
-    fastFlip: (parent.exitRules as { fastFlip: unknown }).fastFlip,
+    ...parentExitRules,
+    goodProject: {
+      minSocialScoreToQualify: 60,
+      maxHoldMinutes: 48 * 60, // 2880 — was 1440 (24h) for every non-fastFlip trade before this tier existed
+    },
   };
 
   const created = await db.strategyVersion.create({
     data: {
       name: "default",
-      version: "v1.7-aggressive-profit-taking",
+      version: "v1.7-good-project-hold-and-dca",
       status: StrategyStatus.DRAFT,
       configuration: parent.configuration as object,
       scoringWeights: parent.scoringWeights as object,

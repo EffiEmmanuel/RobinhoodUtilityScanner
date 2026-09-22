@@ -7,7 +7,7 @@ import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis"
 import { validatePosition, validateExit } from "./riskEngine";
 import { executeSellFill, getLiveWalletTokenBalance, getSellEstimate, isSellable, type FillResult } from "./executionFacade";
 import { recordLedgerEntry, recordPortfolioSnapshot } from "./portfolio";
-import { getActiveStrategyVersion, type ExitRules } from "./strategy";
+import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
 import { sendPartialProfitEmail, sendTradeClosedEmail } from "./notifications";
 import { generatePostmortem } from "./postmortem";
 import { checkPortfolioMilestones } from "./milestones";
@@ -83,7 +83,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const token = await db.token.findUniqueOrThrow({ where: { id: trade.tokenId } });
   const plan = trade.tradePlanId ? await db.tradePlan.findUnique({ where: { id: trade.tradePlanId } }) : null;
   const strategy = await getActiveStrategyVersion();
-  const exitRules = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
+  const { exitRules, tier } = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
 
   // Same fix as entryMonitor.ts: an open position is checked every tick here,
   // but Token.lastSeenAt otherwise only reflects the base discovery poll's
@@ -118,7 +118,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // Deterministic, cheap, runs every tick regardless of the AI review cadence
   // below: executes a previously AI-proposed re-entry buy only if (and once)
   // price has actually fallen to that target — the AI never buys directly.
-  await checkAndExecutePendingReentry(trade, token, pair).catch((err) =>
+  await checkAndExecutePendingReentry(trade, token, pair, tier).catch((err) =>
     logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
   );
 
@@ -197,12 +197,13 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
         currentMultiple,
         unrealizedPnlPercent,
         partialSellsCount,
+        tier,
       });
     } catch (err) {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
     }
     if (aiDecision) {
-      const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision);
+      const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision, tier);
       if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
     }
   }
@@ -284,10 +285,11 @@ async function applyAiStrategyDecision(
   pair: MarketPair | undefined,
   remainingTokens: number,
   totalBoughtTokens: number,
-  decision: PositionStrategyDecision
+  decision: PositionStrategyDecision,
+  tier: ProjectTier
 ): Promise<boolean> {
   if (decision.action === "SET_REENTRY_TARGET") {
-    await applyReentryTarget(trade, decision);
+    await applyReentryTarget(trade, decision, tier);
     return false;
   }
   if (decision.action === "HOLD") return false;
@@ -333,31 +335,55 @@ async function applyAiStrategyDecision(
  * verified-project score bar," not "a risky momentum play" — it deserves the
  * same patient, long-hold treatment as VERIFIED_PROJECT unless its own
  * qualityScore or entry mcap independently signals caution below.
+ *
+ * User directive 2026-09-22: a third tier above that, GOOD_PROJECT — cleared
+ * fastFlip's own bar AND has a confirmed real X community (ResearchRun.
+ * socialScore, populated identically for utility- and narrative-lane
+ * research — see ExitRules.goodProject's doc comment in strategy.ts) —
+ * unlocks up to 48h of patience (vs 24h) before the underwater-only
+ * TIME_EXIT would force-close it, and the full DCA/re-entry budget in
+ * positionStrategy.ts (this function's tier return value is what that reads).
  */
-async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<ExitRules> {
-  const { fastFlip } = baseExitRules;
-  if (!fastFlip) return baseExitRules;
+async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<{ exitRules: ExitRules; tier: ProjectTier }> {
+  const { fastFlip, goodProject } = baseExitRules;
 
   const candidate = trade.candidateId
-    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true } })
+    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true, researchRunId: true } })
     : null;
   const qualityScore = candidate?.qualityScore ?? undefined;
 
-  const isLowQuality = qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold;
-  const isLargeEntryNotYetProven =
-    trade.actualEntryMcap != null &&
-    trade.actualEntryMcap > fastFlip.largeMcapUsd &&
-    (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
+  if (fastFlip) {
+    const isLowQuality = qualityScore !== undefined && qualityScore < fastFlip.qualityScoreThreshold;
+    const isLargeEntryNotYetProven =
+      trade.actualEntryMcap != null &&
+      trade.actualEntryMcap > fastFlip.largeMcapUsd &&
+      (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
 
-  if (!isLowQuality && !isLargeEntryNotYetProven) return baseExitRules;
+    if (isLowQuality || isLargeEntryNotYetProven) {
+      return {
+        tier: "FAST_FLIP",
+        exitRules: {
+          ...baseExitRules,
+          profitSteps: fastFlip.profitSteps,
+          trailingActivationMultiple: fastFlip.trailingActivationMultiple,
+          trailingPercent: fastFlip.trailingPercent,
+          maxHoldMinutes: fastFlip.maxHoldMinutes,
+        },
+      };
+    }
+  }
 
-  return {
-    ...baseExitRules,
-    profitSteps: fastFlip.profitSteps,
-    trailingActivationMultiple: fastFlip.trailingActivationMultiple,
-    trailingPercent: fastFlip.trailingPercent,
-    maxHoldMinutes: fastFlip.maxHoldMinutes,
-  };
+  if (goodProject && candidate?.researchRunId) {
+    const run = await db.researchRun.findUnique({ where: { id: candidate.researchRunId }, select: { socialScore: true } });
+    // Fails closed to BASE on a missing/null score — never assume a strong
+    // community without a real signal for it, same principle as the
+    // narrative-quality gate's "no verification, no trade."
+    if (run?.socialScore != null && run.socialScore >= goodProject.minSocialScoreToQualify) {
+      return { tier: "GOOD_PROJECT", exitRules: { ...baseExitRules, maxHoldMinutes: goodProject.maxHoldMinutes } };
+    }
+  }
+
+  return { tier: "BASE", exitRules: baseExitRules };
 }
 
 /**

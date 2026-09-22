@@ -9,6 +9,12 @@ export interface ProfitStep {
   sellPercentOfRemaining: number;
 }
 
+// User directive 2026-09-22: computed per-trade by positionManager.ts's
+// resolveExitRules, from the same candidate/research data both the extended-
+// hold decision (ExitRules.goodProject) and the tiered DCA/re-entry budget
+// (positionStrategy.ts) read — one classification, two places it's applied.
+export type ProjectTier = "FAST_FLIP" | "BASE" | "GOOD_PROJECT";
+
 export interface SizingRules {
   baseAllocationPercent: number; // % of deployable capital for a "normal" (medium risk, medium confidence) position
   qualityMultiplierMin: number;
@@ -60,6 +66,24 @@ export interface ExitRules {
     profitSteps: ProfitStep[];
     trailingActivationMultiple: number;
     trailingPercent: number;
+    maxHoldMinutes: number;
+  };
+
+  // User directive 2026-09-22: a third, higher tier above the base profile —
+  // a genuinely strong project (cleared fastFlip's own bar, i.e. not
+  // low-quality/unproven-large-mcap) that ALSO has a confirmed real
+  // community on X, not just decent research scores. socialScore is the
+  // AI research synthesizer's own judgment of genuine (non-bot) X community
+  // presence (see prompts.ts's RESEARCH_SYNTHESIZER_SYSTEM) — populated
+  // identically for utility-lane ResearchRuns and narrative-lane ones
+  // (narratives.ts sets socialScore: score.xScore), so this one field covers
+  // "the narrative or utility project is very good" uniformly across both
+  // lanes. positionManager.ts's resolveExitRules reads it from the trade's
+  // linked ResearchRun; undefined/missing fails closed to BASE, not
+  // GOOD_PROJECT. Only maxHoldMinutes is overridden here — trailing stop and
+  // loss thresholds are unchanged from the base profile for this tier.
+  goodProject?: {
+    minSocialScoreToQualify: number;
     maxHoldMinutes: number;
   };
 }
@@ -124,6 +148,7 @@ function buildDefaultConfiguration(): {
       maxLossPercent: 25,
       catastrophicLossPercent: 40,
       maxHoldMinutes: tradingConfig.defaultMaxHoldMinutes,
+      goodProject: { minSocialScoreToQualify: 60, maxHoldMinutes: tradingConfig.goodProjectMaxHoldMinutes },
     },
   };
 }

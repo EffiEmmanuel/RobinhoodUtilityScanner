@@ -8,7 +8,7 @@ import { callStructured } from "../ai/provider";
 import { PositionStrategySchema, POSITION_STRATEGY_JSON_SCHEMA, type PositionStrategyDecision } from "../ai/schemas";
 import { POSITION_STRATEGY_SYSTEM, buildPositionStrategyPrompt } from "../ai/prompts";
 import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type TechnicalFeatures } from "./marketAnalysis";
-import { getActiveStrategyVersion, type ExitRules } from "./strategy";
+import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
 import { validateEntry } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
 import { executeBuyFill, getBuyEstimate, isSellable, type FillResult } from "./executionFacade";
@@ -64,19 +64,37 @@ function formatExitRulesState(exitRules: ExitRules, currentMultiple: number): st
     "No fixed profit-taking multiples exist — deciding if/when/how much profit to take is entirely your call, from the chart and data below.",
     `Trailing stop (loss protection only, not a target): once this position's peak-ever multiple crosses ${exitRules.trailingActivationMultiple}x, a ${exitRules.trailingPercent}% retrace from that peak force-sells everything regardless of your view${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"} — treat this as a backstop, not a cue to hold until it fires.`,
     `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.`,
-    "Max-hold time-exit only ever fires while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.",
+    `Max-hold time-exit: ${(exitRules.maxHoldMinutes / 60).toFixed(0)}h, but ONLY while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.`,
   ].join("\n");
 }
 
-function formatReentryState(trade: Trade): string {
-  const remaining = tradingConfig.maxReentriesPerTrade - trade.reentryCount;
+// User directive 2026-09-22: DCA budget is earned, not a blanket default —
+// GOOD_PROJECT (cleared fastFlip's bar + a confirmed real X community, see
+// strategy.ts's ExitRules.goodProject) gets the full budget; BASE gets a
+// modest allowance; FAST_FLIP (low quality or an unproven large entry) gets
+// none. See positionManager.ts's resolveExitRules for how the tier itself
+// is decided.
+function reentryBudgetFor(tier: ProjectTier): { maxReentries: number; maxPercentOfOriginal: number } {
+  switch (tier) {
+    case "GOOD_PROJECT":
+      return { maxReentries: tradingConfig.maxReentriesPerTradeGoodProject, maxPercentOfOriginal: tradingConfig.maxReentryPercentOfOriginalGoodProject };
+    case "BASE":
+      return { maxReentries: tradingConfig.maxReentriesPerTradeBase, maxPercentOfOriginal: tradingConfig.maxReentryPercentOfOriginalBase };
+    case "FAST_FLIP":
+      return { maxReentries: tradingConfig.maxReentriesPerTradeFastFlip, maxPercentOfOriginal: tradingConfig.maxReentryPercentOfOriginalFastFlip };
+  }
+}
+
+function formatReentryState(trade: Trade, tier: ProjectTier): string {
+  const { maxReentries, maxPercentOfOriginal } = reentryBudgetFor(tier);
+  const remaining = maxReentries - trade.reentryCount;
   if (remaining <= 0) {
-    return `No re-entry budget left for this trade (${trade.reentryCount}/${tradingConfig.maxReentriesPerTrade} already used) — do not propose SET_REENTRY_TARGET.`;
+    return `No re-entry budget for this trade (tier ${tier}: ${trade.reentryCount}/${maxReentries} used) — do not propose SET_REENTRY_TARGET.${tier !== "GOOD_PROJECT" ? " This trade hasn't earned full DCA privileges (needs cleared fastFlip eligibility plus a confirmed strong X community)." : ""}`;
   }
   const pending = trade.pendingReentryTargetMcap
     ? `A re-entry target is already pending: $${Math.round(trade.pendingReentryTargetMcap).toLocaleString()} mcap, expires ${trade.pendingReentryExpiresAt?.toISOString() ?? "unknown"}. Only replace it if your new view has genuinely changed.`
     : "No re-entry target currently pending.";
-  return `${remaining} of ${tradingConfig.maxReentriesPerTrade} re-entries still available for this trade. Any re-entry size you propose is capped at ${tradingConfig.maxReentryPercentOfOriginal}% of the original position regardless of what you suggest. ${pending}`;
+  return `${remaining} of ${maxReentries} re-entries still available for this trade (tier: ${tier}). Any re-entry size you propose is capped at ${maxPercentOfOriginal}% of the original position regardless of what you suggest. ${pending}`;
 }
 
 async function fetchResearchSummary(trade: Trade): Promise<string> {
@@ -103,6 +121,7 @@ export async function runPositionStrategyReview(input: {
   currentMultiple: number;
   unrealizedPnlPercent: number;
   partialSellsCount: number;
+  tier: ProjectTier;
 }): Promise<PositionStrategyDecision | null> {
   const { trade, token, pair } = input;
 
@@ -138,7 +157,7 @@ export async function runPositionStrategyReview(input: {
           totalBoughtTokens: input.totalBoughtTokens,
         }),
         exitRulesState: formatExitRulesState(exitRules, input.currentMultiple),
-        reentryState: formatReentryState(trade),
+        reentryState: formatReentryState(trade, input.tier),
         technical: formatTechnicalFeaturesForPrompt(technical),
         chartAttached: chartImage !== undefined,
       }),
@@ -174,7 +193,7 @@ export async function runPositionStrategyReview(input: {
       portfolioState: {},
       modelName: config.researchModel,
       aiAnalysis: decision as unknown as object,
-      deterministicRules: { maxReentryPercentOfOriginal: tradingConfig.maxReentryPercentOfOriginal, maxReentriesPerTrade: tradingConfig.maxReentriesPerTrade },
+      deterministicRules: { tier: input.tier, ...reentryBudgetFor(input.tier) },
       finalReasons: [decision.reasoning],
     },
   });
@@ -192,13 +211,14 @@ export async function runPositionStrategyReview(input: {
  * buys anything itself. The actual buy only happens later, deterministically,
  * in checkAndExecutePendingReentry once (and if) price really reaches it.
  */
-export async function applyReentryTarget(trade: Trade, decision: PositionStrategyDecision): Promise<void> {
+export async function applyReentryTarget(trade: Trade, decision: PositionStrategyDecision, tier: ProjectTier): Promise<void> {
   if (decision.action !== "SET_REENTRY_TARGET" || !decision.reentryTargetMarketCapUsd) return;
-  if (trade.reentryCount >= tradingConfig.maxReentriesPerTrade) {
-    logger.info({ tradeId: trade.id }, "AI proposed a re-entry target but this trade's re-entry budget is already used — ignoring");
+  const { maxReentries, maxPercentOfOriginal } = reentryBudgetFor(tier);
+  if (trade.reentryCount >= maxReentries) {
+    logger.info({ tradeId: trade.id, tier }, "AI proposed a re-entry target but this trade's re-entry budget is already used (or this tier gets none) — ignoring");
     return;
   }
-  const cappedPercent = Math.min(decision.reentrySizePercentOfOriginal ?? 50, tradingConfig.maxReentryPercentOfOriginal);
+  const cappedPercent = Math.min(decision.reentrySizePercentOfOriginal ?? 50, maxPercentOfOriginal);
   const reentryUsd = trade.positionSizeUsd * (cappedPercent / 100);
   const validForMinutes = decision.reentryValidForMinutes ?? 60;
 
@@ -222,7 +242,7 @@ export async function applyReentryTarget(trade: Trade, decision: PositionStrateg
  * Only actually buys if price has really reached the target the AI proposed
  * earlier, and only after the same entry-risk gate a fresh trade would face.
  */
-export async function checkAndExecutePendingReentry(trade: Trade, token: Token, pair: MarketPair | undefined): Promise<void> {
+export async function checkAndExecutePendingReentry(trade: Trade, token: Token, pair: MarketPair | undefined, tier: ProjectTier): Promise<void> {
   if (!trade.pendingReentryTargetMcap || !trade.pendingReentryUsd) return;
 
   if (trade.pendingReentryExpiresAt && trade.pendingReentryExpiresAt.getTime() < Date.now()) {
@@ -237,7 +257,11 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   const currentMcap = pair?.marketCapUsd;
   if (currentMcap === undefined || currentMcap > trade.pendingReentryTargetMcap) return; // hasn't dipped to the target yet
 
-  if (trade.reentryCount >= tradingConfig.maxReentriesPerTrade) return; // budget used up between setting and now
+  // Re-checked at execution time, not just when the target was set — the
+  // tier is re-derived fresh from resolveExitRules every tick, so this is
+  // the same budget applyReentryTarget capped the target at, just re-read
+  // here for its own hard-cap purpose rather than trusted stale.
+  if (trade.reentryCount >= reentryBudgetFor(tier).maxReentries) return; // budget used up between setting and now
   if (!pair) return;
 
   // A fresh quote before every real buy, exactly like a first entry — never
@@ -264,8 +288,8 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
     estimatedPriceImpactPercent: buyEstimate.estimatedPriceImpactPercent,
     positionSizeUsd: trade.pendingReentryUsd,
     // A re-entry still has to fit the same deployable-capital bucket a fresh
-    // trade would — the maxReentryPercentOfOriginal cap bounds this trade's
-    // own size, not the portfolio's overall exposure.
+    // trade would — the tier's maxPercentOfOriginal cap (reentryBudgetFor)
+    // bounds this trade's own size, not the portfolio's overall exposure.
     availableToDeployUsd: portfolio.availableToDeployUsd,
   });
 
