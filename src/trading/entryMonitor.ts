@@ -153,6 +153,19 @@ export type PendingEntryTickResult = "idle" | "replanned" | "checked";
 const PENDING_ENTRY_EVALUATION_TIMEOUT_MS = 90_000;
 const transientEntryCooldownUntil = new Map<string, number>();
 
+// User directive 2026-09-22: a manual buy-and-hold PendingEntry is created
+// with no expiresAt (the user explicitly asked to hold this specific token,
+// so an arbitrary chase-window timeout would defeat the point) — but that
+// means a token whose pool genuinely never becomes sellable (HUNBIKN,
+// confirmed live: a custom Uniswap V4 hook reverts every quote attempt with
+// UnexpectedRevertBytes, in both directions, for 12+ hours straight) retried
+// "no sell path available" forever with no way to ever flag it as stuck.
+// Tracks the first tick each pending entry was seen with no sell path, same
+// in-memory pattern as transientEntryCooldownUntil/lastConvictionFailures
+// below — losing this on a restart just means the give-up clock restarts,
+// never that a stuck entry gets stuck-er.
+const sellPathUnavailableSince = new Map<string, number>();
+
 function transientEntryCooldownMs(): number {
   const raw = process.env.PENDING_ENTRY_INFRA_COOLDOWN_MS;
   if (raw === undefined || raw === "") return 60_000;
@@ -634,6 +647,23 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     }
 
     const sellQuoteAvailable = await isSellable(candidate.token.address, pair, candidate.token.chain, quote.tokenAmount);
+
+    if (manualEntryOverride && !sellQuoteAvailable) {
+      const firstUnavailableAt = sellPathUnavailableSince.get(entry.id);
+      if (firstUnavailableAt === undefined) {
+        if (sellPathUnavailableSince.size >= 1000) sellPathUnavailableSince.clear();
+        sellPathUnavailableSince.set(entry.id, Date.now());
+      } else if (Date.now() - firstUnavailableAt >= tradingConfig.manualBuyAndHoldSellPathGiveUpMinutes * 60_000) {
+        sellPathUnavailableSince.delete(entry.id);
+        await rejectEntry(entry, candidate.id, [
+          `manual buy-and-hold gave up: no sell path available for over ${tradingConfig.manualBuyAndHoldSellPathGiveUpMinutes} minutes straight — likely a permanently broken/restricted pool (custom hook, honeypot, or delisted), not a temporary condition`,
+        ]);
+        return;
+      }
+    } else {
+      sellPathUnavailableSince.delete(entry.id);
+    }
+
     const entryResult = manualEntryOverride
       ? {
           decision: circuitBreakers.paused

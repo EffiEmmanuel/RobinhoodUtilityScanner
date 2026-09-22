@@ -609,6 +609,16 @@ export const tradingConfig = {
   // so a human can look, this exists so the bot stops burning RPC calls and
   // holding a position slot if nobody does. 0 disables (retry forever).
   sellGiveUpAfterMinutes: num("SELL_GIVE_UP_AFTER_MINUTES", 60),
+  // Entry-side counterpart, user directive 2026-09-22: a manual buy-and-hold
+  // PendingEntry has no expiresAt by design (see entryMonitor.ts's
+  // sellPathUnavailableSince doc comment) — this is the ONLY thing that ever
+  // gives up on one, and only for the specific "no sell path" DEFER reason,
+  // never for "waiting on deployable capital" or other transient DEFER
+  // causes. Longer than sellGiveUpAfterMinutes on purpose: an entry-side
+  // pool can plausibly be behind a real, temporary anti-bot/launch-cooldown
+  // hook, which a position we're already holding never would be — give that
+  // more room before concluding it's permanently broken/a honeypot.
+  manualBuyAndHoldSellPathGiveUpMinutes: num("MANUAL_BUY_AND_HOLD_SELL_PATH_GIVE_UP_MINUTES", 240),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)
