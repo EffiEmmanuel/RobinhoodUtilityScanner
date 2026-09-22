@@ -14,6 +14,14 @@ function envNum(name: string, fallback: number): number {
 function minIntervalMs(url: string): number {
   const hostname = new URL(url).hostname.toLowerCase();
   if (hostname.endsWith("dexscreener.com")) return envNum("DEXSCREENER_MIN_REQUEST_INTERVAL_MS", 1000);
+  // Confirmed live 2026-09-22: lite-api.jup.ag's free tier was 429-rate-
+  // limiting real buy/sell quote calls for manual buy-and-hold entries — the
+  // user's own paid-tier key (api.jup.ag) is capped at 1 request/second.
+  // 1100ms, not 1000, for margin against clock/scheduling jitter across
+  // every jup.ag caller (quote + swap-transaction build) sharing this same
+  // per-origin queue. Applies whether or not a key is configured — the free
+  // tier benefits from not hammering it either.
+  if (hostname.endsWith("jup.ag")) return envNum("JUPITER_MIN_REQUEST_INTERVAL_MS", 1100);
   return envNum("HTTP_MIN_REQUEST_INTERVAL_MS", 0);
 }
 

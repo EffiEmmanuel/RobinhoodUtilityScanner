@@ -2,6 +2,14 @@ import { config } from "../../../config";
 import { logger } from "../../../logger";
 import { fetchJsonWithRetry } from "../../../util/http";
 
+// api.jup.ag (the paid tier) requires this on every call; lite-api.jup.ag
+// (the free tier) ignores it, so it's always safe to send when configured
+// regardless of which base URL is active. Never logged or included in any
+// object that gets serialized elsewhere.
+function jupiterHeaders(extra?: Record<string, string>): Record<string, string> {
+  return config.jupiterApiKey ? { ...extra, "x-api-key": config.jupiterApiKey } : { ...extra };
+}
+
 // Wrapped native SOL's mint address — the input/output mint for any
 // SOL-denominated leg of a swap, the direct analog of NATIVE_ETH_CURRENCY on
 // the EVM side.
@@ -38,7 +46,7 @@ export interface JupiterQuote {
 export async function getJupiterQuote(inputMint: string, outputMint: string, amount: bigint, slippageBps: number): Promise<JupiterQuote | undefined> {
   const url = `${config.solanaJupiterBaseUrl}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount.toString()}&slippageBps=${slippageBps}`;
   try {
-    const raw = await fetchJsonWithRetry<RawJupiterQuoteResponse>(url);
+    const raw = await fetchJsonWithRetry<RawJupiterQuoteResponse>(url, { headers: jupiterHeaders() });
     return {
       inputMint: raw.inputMint,
       outputMint: raw.outputMint,
@@ -64,7 +72,7 @@ export async function getJupiterSwapTransaction(quote: JupiterQuote, userPublicK
   try {
     return await fetchJsonWithRetry<{ swapTransaction: string }>(`${config.solanaJupiterBaseUrl}/swap`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jupiterHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         quoteResponse: quote.raw,
         userPublicKey,

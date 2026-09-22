@@ -121,6 +121,14 @@ export const config = {
   // rather than hardcoded in case it moves again — re-verify if a long time
   // has passed since the date above.
   solanaJupiterBaseUrl: str("SOLANA_JUPITER_BASE_URL", "https://lite-api.jup.ag/swap/v1"),
+  // User-supplied 2026-09-22, after confirming live that lite-api.jup.ag's
+  // free tier was HTTP 429-rate-limiting real quote/swap calls (both
+  // directions) for manual buy-and-hold entries — sent as the x-api-key
+  // header on every Jupiter call once set (jupiterClient.ts). The user's own
+  // plan on this key is capped at 1 request/second — see
+  // JUPITER_MIN_REQUEST_INTERVAL_MS in util/http.ts's minIntervalMs, which
+  // throttles every jup.ag call (with or without a key) to stay under that.
+  jupiterApiKey: optStr("JUPITER_API_KEY"),
   // Hard off by default and independent of TRADING_MODE (which today only
   // governs the EVM path) — flipping EVM to LIVE must never silently also
   // enable live Solana trading. See live/solana/wallet.ts's doc comment:
