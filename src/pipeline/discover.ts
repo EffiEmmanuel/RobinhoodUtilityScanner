@@ -245,7 +245,11 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
     // volume proxy for it.
     const hasRealProfile = Boolean(pair.imageUrl || pair.headerUrl || pair.websites.length > 0 || pair.socials.length > 0);
     const hasRealActivity = liquidityUsd >= config.awaitingProfileMinLiquidityUsd && hourlyTxns >= config.awaitingProfileMinHourlyTxns;
-    if (hasRealProfile || hasRealActivity) {
+    // User directive 2026-09-22: never invest in a token with no dex banner/
+    // links — requireDexProfileToPromote drops hasRealActivity as an
+    // independent promotion path once it's on. hasRealProfile is untouched
+    // either way: a token with a real profile promotes exactly as before.
+    if (hasRealProfile || (hasRealActivity && !config.requireDexProfileToPromote)) {
       // Populate the same profile fields discover.ts's main loop and
       // manualSubmit.ts already fall back to — without this, a token
       // promoted here still reaches classification blind (icon/header/
@@ -303,12 +307,22 @@ export async function promoteActiveAwaitingProfile(): Promise<{ checked: number;
     // research AI, which gets the full account/engagement evidence via
     // formatXFindingsForPrompt — this gate's only job is deciding whether a
     // token is worth that AI's attention at all.
-    if (result.found) {
+    // requireDexProfileToPromote: real X mentions of the contract address
+    // are still useful research signal (kept above, xFindings persisted
+    // either way), but they don't establish a dex banner/links either — a
+    // token with no profile stays waiting on that alone rather than
+    // reaching AI review with a blank profile.
+    if (result.found && !config.requireDexProfileToPromote) {
       await db.token.update({ where: { id: token.id }, data: { status: TokenStatus.DETECTED } });
       promoted++;
       logger.info(
         { tokenId: token.id, address: token.address, tweetCount: result.tweetCount, totalEngagement: result.totalEngagement, accounts: result.accounts.map((a) => a.username) },
         "promoted AWAITING_DEX_PROFILE token to AI review — real X activity found for this exact contract address"
+      );
+    } else if (result.found) {
+      logger.info(
+        { tokenId: token.id, address: token.address, tweetCount: result.tweetCount },
+        "real X activity found for this exact contract address, but requireDexProfileToPromote is on — still waiting on a real dex profile"
       );
     } else {
       logger.info({ tokenId: token.id, address: token.address, error: result.error }, "X search found no activity for this exact contract address — not promoted");

@@ -74,6 +74,18 @@ export const config = {
   awaitingProfileMinAgeMinutes: num("AWAITING_PROFILE_MIN_AGE_MINUTES", 20),
   awaitingProfileMinLiquidityUsd: num("AWAITING_PROFILE_MIN_LIQUIDITY_USD", 5000),
   awaitingProfileMinHourlyTxns: num("AWAITING_PROFILE_MIN_HOURLY_TXNS", 20),
+  // User directive 2026-09-22: "we should never invest in shitcoins with no
+  // dex banner, link(s) and all of that" — the activity-only and X-mention-
+  // only promotion paths just above/below this both let a token reach AI
+  // review, and eventually a live trade, with zero icon/header/website/
+  // social presence, purely on raw volume or a tweet mentioning the contract
+  // address. When true, discover.ts's promoteActiveAwaitingProfile only ever
+  // promotes on hasRealProfile — activity and X evidence can still queue an
+  // X check (still useful signal for research), but neither can promote a
+  // token past this gate on its own anymore. Default false so a fresh
+  // checkout's behavior is unchanged; tightened live via Railway env, not
+  // the code default, same pattern as every other gate this session.
+  requireDexProfileToPromote: bool("REQUIRE_DEX_PROFILE_TO_PROMOTE", false),
 
   // X (Twitter) API v2, app-only auth — only the bearer token is needed for
   // read-only search/user-lookup. A real, metered cost (confirmed live: this
