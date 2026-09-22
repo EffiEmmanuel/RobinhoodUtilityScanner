@@ -25,9 +25,14 @@ const RETRYABLE_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "EPIPE", "P1001", "P
 // suspend has been observed taking up to ~76s, and the old [0,500,2000] budget
 // here (2.5s total) gave up long before that, surfacing as spurious tick
 // failures in the position monitor / orchestrator loops instead of recovering.
-const RETRY_BACKOFF_MS = [0, 2000, 5000, 15000, 30000];
+// Exported for rawDb.ts — same Neon endpoint, same transient failure modes,
+// but a completely separate `pg.Pool` that this $extends wrapper can't touch
+// (confirmed live 2026-09-22: /trading/no-trade-diagnostics's rawQuery calls
+// 500'd outright on a Neon blip that every Prisma-model call elsewhere just
+// retried through, taking the whole dashboard down with it).
+export const RETRY_BACKOFF_MS = [0, 2000, 5000, 15000, 30000];
 
-function isRetryableDbError(err: unknown): boolean {
+export function isRetryableDbError(err: unknown): boolean {
   const code = (err as { code?: string })?.code;
   if (code && RETRYABLE_CODES.has(code)) return true;
   const message = String((err as { message?: string })?.message ?? "");
