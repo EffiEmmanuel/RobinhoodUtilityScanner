@@ -52,6 +52,30 @@ function trade(overrides: Partial<Trade> = {}): Trade {
 }
 
 describe("evaluateExits", () => {
+  // User directive 2026-09-22: no more fixed profit-taking multiples —
+  // evaluateExits must never return a profit-taking decision on its own,
+  // even when currentMultiple clears a level an old exitRules.profitSteps
+  // config still (harmlessly) carries. Deciding if/when/how much profit to
+  // take is now exclusively positionStrategy.ts's AI review's call.
+  it("does not take profit at a fixed multiple, even when currentMultiple clears exitRules.profitSteps", () => {
+    const result = evaluateExits({
+      trade: trade(), // mfePercent: 0 — trailing exit isn't armed (needs 1.6x peak)
+      plan: null,
+      exitRules, // profitSteps: [{ multiple: 2, sellPercentOfRemaining: 50 }]
+      currentMcap: 250_000,
+      currentMultiple: 2.5, // well past the old 2x step
+      unrealizedPnlPercent: 150,
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.55,
+      totalTxns5m: 8,
+      sellQuoteAvailable: true,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+    });
+
+    expect(result).toBeNull();
+  });
+
   // User directive 2026-09-18: utility-token theses are long holds — max hold
   // time now only ever force-closes a position that's underwater
   // (currentMultiple < 1) when the clock runs out, freeing up capital tied to
@@ -69,7 +93,6 @@ describe("evaluateExits", () => {
       buySellRatio5m: 0.55,
       totalTxns5m: 8,
       sellQuoteAvailable: true,
-      profitStepsTaken: 0,
       remainingTokens: 100,
       totalBoughtTokens: 100,
     });
@@ -89,7 +112,6 @@ describe("evaluateExits", () => {
       buySellRatio5m: 0.55,
       totalTxns5m: 8,
       sellQuoteAvailable: true,
-      profitStepsTaken: 0,
       remainingTokens: 100,
       totalBoughtTokens: 100,
     });
@@ -109,7 +131,6 @@ describe("evaluateExits", () => {
       buySellRatio5m: 0.55,
       totalTxns5m: 8,
       sellQuoteAvailable: true,
-      profitStepsTaken: 0,
       remainingTokens: 100,
       totalBoughtTokens: 100,
     });
@@ -129,7 +150,6 @@ describe("evaluateExits", () => {
       buySellRatio5m: 0.55,
       totalTxns5m: 8,
       sellQuoteAvailable: true,
-      profitStepsTaken: 0,
       remainingTokens: 100,
       totalBoughtTokens: 100,
     });
@@ -155,7 +175,6 @@ describe("evaluateExits", () => {
       buySellRatio5m: 0.55,
       totalTxns5m: 8,
       sellQuoteAvailable: true,
-      profitStepsTaken: 0,
       remainingTokens: 100,
       totalBoughtTokens: 100,
     });

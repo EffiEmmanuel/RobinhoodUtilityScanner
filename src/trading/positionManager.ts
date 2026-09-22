@@ -47,7 +47,10 @@ function blockedExitAgeMinutes(tradeId: string): number {
 }
 
 interface ExitDecision {
-  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "PROFIT_TARGET" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
+  // PROFIT_TARGET (the old fixed-multiple step ladder) was removed 2026-09-22
+  // — user directive: no more strict multiples, profit-taking is decided
+  // exclusively by the AI strategy review (PARTIAL_PROFIT/AI_STRATEGY_EXIT).
+  type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
   isEmergency: boolean;
@@ -168,13 +171,19 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     },
   });
 
-  const profitStepsTaken = await db.exitSignal.count({ where: { tradeId: trade.id, type: "PROFIT_TARGET" } });
+  // Counts prior partial-profit sells for this trade — PARTIAL_PROFIT is the
+  // AI review's own type (applyAiStrategyDecision); PROFIT_TARGET is kept in
+  // this count only for trades that took steps under the old fixed-multiple
+  // ladder before it was removed 2026-09-22, so a trade straddling that
+  // change still reports an accurate count to the AI.
+  const partialSellsCount = await db.exitSignal.count({ where: { tradeId: trade.id, type: { in: ["PARTIAL_PROFIT", "PROFIT_TARGET"] } } });
 
-  // Periodic AI strategy review (not every tick) — proposes a partial-profit,
-  // full-exit, or re-entry-target recommendation. Deterministic code below is
-  // what actually executes anything; a HOLD or a review failure just falls
-  // through to the same profit-step/trailing/risk exits as before this
-  // feature existed.
+  // Short-interval (not every tick, but close to it — see config's
+  // positionStrategyReviewIntervalSeconds) AI strategy review. This is now
+  // the ONLY mechanism that ever takes profit on a live position — the
+  // deterministic exits below are safety-only (stop-loss/catastrophic/
+  // invalidation/trailing/time), so a HOLD or a review failure just means no
+  // profit gets banked this tick, not that some fallback ladder takes over.
   if (shouldRunStrategyReview(trade)) {
     let aiDecision: PositionStrategyDecision | null = null;
     try {
@@ -184,9 +193,10 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
         plan,
         pair,
         remainingTokens,
+        totalBoughtTokens: tokenAmounts.totalBoughtTokens,
         currentMultiple,
         unrealizedPnlPercent,
-        profitStepsTaken,
+        partialSellsCount,
       });
     } catch (err) {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
@@ -208,7 +218,6 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     buySellRatio5m,
     totalTxns5m,
     sellQuoteAvailable: await isSellable(token.address, pair, token.chain, remainingTokens),
-    profitStepsTaken,
     remainingTokens,
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
   });
@@ -223,9 +232,11 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // eligible. RISK_EXIT/INVALIDATION_EXIT (the hard stop-loss/catastrophic
   // paths) are returned by evaluateExits before the TRAILING_EXIT branch ever
   // runs, so a decision only reaches this check once those have already NOT
-  // fired this tick — structurally unreachable by this gate. PROFIT_TARGET/
-  // TIME_EXIT are deliberately left ungated (never delay profit-taking or a
-  // hold-time exit waiting on a vision call).
+  // fired this tick — structurally unreachable by this gate. TIME_EXIT is
+  // deliberately left ungated (never delay a hold-time exit waiting on a
+  // vision call). PARTIAL_PROFIT/AI_STRATEGY_EXIT never reach evaluateExits
+  // at all — they're executed directly from the AI strategy review above,
+  // which already looked at this same chart before deciding.
   //
   // Renders the chart from this trade's own PositionSnapshot history (see
   // chartVisionGate.ts's doc comment) rather than screenshotting a
@@ -375,7 +386,6 @@ export function evaluateExits(ctx: {
   buySellRatio5m: number | undefined;
   totalTxns5m: number | undefined;
   sellQuoteAvailable: boolean;
-  profitStepsTaken: number;
   remainingTokens: number;
   totalBoughtTokens: number;
 }): ExitDecision | null {
@@ -430,8 +440,8 @@ export function evaluateExits(ctx: {
   // stuckExitEscalateAfterMinutes (5 min) of being blocked. THREE, PONSIBLE
   // and FFSTR all slipped 4-9 points past their stated stop this way. A stop
   // is not a discretionary trim; it should never wait in that queue at all —
-  // PROFIT_TARGET/TRAILING_EXIT/AI_STRATEGY_EXIT stay non-emergency
-  // since those are genuinely discretionary.
+  // TRAILING_EXIT/PARTIAL_PROFIT/AI_STRATEGY_EXIT stay non-emergency since
+  // those are genuinely discretionary.
   if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
     return {
       type: "INVALIDATION_EXIT",
@@ -444,25 +454,13 @@ export function evaluateExits(ctx: {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
-  // Priority 3: staged profit-taking (§35/§36) — only the next step not yet
-  // taken, in ascending order. ctx.profitStepsTaken counts prior PROFIT_TARGET
-  // ExitSignal rows for this trade (see monitorOneTrade).
-  const nextStep = exitRules.profitSteps[ctx.profitStepsTaken];
-  if (nextStep && ctx.currentMultiple >= nextStep.multiple) {
-    return applyVerifiedRunnerGuard({
-      trade,
-      remainingTokens: ctx.remainingTokens,
-      totalBoughtTokens: ctx.totalBoughtTokens,
-      decision: {
-        type: "PROFIT_TARGET",
-        sellPercentOfRemaining: nextStep.sellPercentOfRemaining,
-        reason: `reached ${nextStep.multiple}x profit target (step ${ctx.profitStepsTaken + 1}/${exitRules.profitSteps.length})`,
-        isEmergency: false,
-      },
-    });
-  }
-
-  // Priority 4: trailing exit — armed once the position's PEAK (never the
+  // Priority 3: trailing exit — loss/gain protection only, never a profit
+  // target. User directive 2026-09-22 removed the old staged fixed-multiple
+  // profit-taking ladder that used to sit here (PROFIT_TARGET) — deciding
+  // if/when/how much profit to take is now exclusively the AI strategy
+  // review's call (see positionStrategy.ts, dispatched earlier in
+  // monitorOneTrade with its own chart read). This trailing stop still runs
+  // unconditionally as a backstop: armed once the position's PEAK (never the
   // current tick's multiple) has ever crossed trailingActivationMultiple, and
   // stays armed from then on. Desk review D5, confirmed live 2026-09-11:
   // QUORUM peaked at 2.93x, then gapped straight to ~1.1x between two 5s
@@ -493,18 +491,18 @@ export function evaluateExits(ctx: {
     }
   }
 
-  // Priority 5: max hold time — checked last, after profit-taking and the
-  // trailing exit, and routed through the same verified-runner guard they
-  // use. Otherwise a VERIFIED_PROJECT position sitting on an unclaimed
-  // profit step or an armed trailing stop would get fully liquidated the
-  // instant it hits maxHoldMinutes instead of retaining moonbagRetainPercent
-  // like every other discretionary exit does for that lane.
+  // Priority 4: max hold time — checked last, after the trailing exit, and
+  // routed through the same verified-runner guard it uses. Otherwise a
+  // VERIFIED_PROJECT position with an armed trailing stop would get fully
+  // liquidated the instant it hits maxHoldMinutes instead of retaining
+  // moonbagRetainPercent like every other discretionary exit does for that
+  // lane.
   //
   // User directive 2026-09-18: utility-token theses are long holds by design
   // — a genuine winner must never get force-closed just because a clock ran
-  // out while profit-taking/trailing (priorities 1-4 above) haven't fired.
-  // This is now a stagnant-loser cutoff, not a universal timer: it only ever
-  // fires while the position is currently underwater (currentMultiple < 1),
+  // out while the trailing exit (priority 3 above) or the AI strategy review
+  // haven't acted. This is now a stagnant-loser cutoff, not a universal timer:
+  // it only ever fires while the position is currently underwater (currentMultiple < 1),
   // freeing up capital tied up in a thesis that hasn't played out rather than
   // capping the upside of one that's working.
   if (holdingMinutes >= exitRules.maxHoldMinutes && ctx.currentMultiple < 1) {

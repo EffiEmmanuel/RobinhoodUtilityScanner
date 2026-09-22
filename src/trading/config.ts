@@ -520,17 +520,26 @@ export const tradingConfig = {
   extremeMomentumOverrideMinBuyRatio1h: num("EXTREME_MOMENTUM_OVERRIDE_MIN_BUY_RATIO_1H", 0.58),
 
   // Active position management (§trading/positionStrategy.ts) — the AI
-  // reviews an open position's strategy periodically (not on every cheap
-  // monitor tick), proposing partial-profit/exit/re-entry-target decisions
-  // that deterministic code then enforces or executes. Hard caps here bound
-  // it regardless of what the AI recommends.
-  // Tightened from 5: this is an AI call (Gemini), shared rate-limit budget
-  // with classification/research/planning — going much faster (e.g. seconds)
-  // risks exhausting that budget and breaking the rest of the pipeline. The
-  // deterministic exit checks (stop-loss/profit-target/trailing/time) run
-  // every positionMonitorIntervalSeconds (5s) regardless of this value — this
-  // setting only controls how often the smarter contextual layer refreshes.
-  positionStrategyReviewIntervalMinutes: num("POSITION_STRATEGY_REVIEW_INTERVAL_MINUTES", 2),
+  // reviews an open position's strategy periodically, proposing partial-
+  // profit/exit/re-entry-target decisions that deterministic code then
+  // enforces or executes. Hard caps here bound it regardless of what the AI
+  // recommends.
+  //
+  // User directive 2026-09-22: no more fixed profit-taking multiples —
+  // evaluateExits's old PROFIT_TARGET step ladder is gone, so this review is
+  // now the ONLY thing that ever decides to take profit on a live position
+  // (RISK_EXIT/INVALIDATION_EXIT/TRAILING_EXIT/TIME_EXIT still run every
+  // tick, unchanged, as loss protection). Seconds, not minutes, so it can
+  // actually react "as the chart progresses" rather than checking in every
+  // couple of minutes. Previously capped at 2 minutes specifically to protect
+  // the shared Gemini rate-limit budget from classification/research/
+  // planning — that budget is now an unbounded multi-key rotation pool (see
+  // config.ts's geminiApiKeys) instead of a fixed 3 keys, which is what makes
+  // going this much faster reasonable. Position count is small (circuit
+  // breakers cap it around 2 open at a time), so worst case is a handful of
+  // extra calls per interval, not an unbounded fan-out. Tune down further if
+  // quota pressure shows up again.
+  positionStrategyReviewIntervalSeconds: num("POSITION_STRATEGY_REVIEW_INTERVAL_SECONDS", 30),
   // Raised from 1: the AI strategy review (positionStrategy.ts) already
   // implements exactly a buy-the-dip/sell-the-resistance cycle via repeated
   // TAKE_PARTIAL_PROFIT + SET_REENTRY_TARGET decisions — capping it at one

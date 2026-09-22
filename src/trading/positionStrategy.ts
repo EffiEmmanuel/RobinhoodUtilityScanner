@@ -13,20 +13,31 @@ import { validateEntry } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
 import { executeBuyFill, getBuyEstimate, isSellable, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
+import { renderPositionChart } from "./chartVisionGate";
 
 /**
- * The "smart" half of active management: a periodic (not per-tick) AI
- * check-in on an already-open trade, using real-time technical data
- * (support/resistance, volume trend, momentum) that the deterministic exit
- * rules in positionManager.ts never see. The AI proposes; the deterministic
- * layer still enforces every hard limit — re-entry size cap, re-entry count
- * cap, circuit breakers, slippage — exactly as it does for a fresh entry.
+ * The "smart" half of active management: a short-interval (not per-tick, but
+ * close to it) AI check-in on an already-open trade, using real-time
+ * technical data (support/resistance, volume trend, momentum) AND — once
+ * there's enough PositionSnapshot history — an actual rendered chart of this
+ * position's own price/volume path, that the deterministic exit rules in
+ * positionManager.ts never see.
+ *
+ * User directive 2026-09-22: this is now the ONLY mechanism that ever takes
+ * profit on a live position — positionManager.ts's old fixed-multiple
+ * PROFIT_TARGET step ladder was removed. The deterministic layer still
+ * enforces every hard *safety* limit regardless of what this review
+ * recommends — stop-loss, catastrophic-loss, technical invalidation, the
+ * trailing stop protecting an already-reached peak, re-entry size/count
+ * caps, circuit breakers, slippage — none of those take profit early, they
+ * only bound downside, so a review failure or a HOLD just means no profit
+ * gets banked this tick, not that the position is unprotected.
  */
 
 export function shouldRunStrategyReview(trade: Trade): boolean {
   if (!trade.lastStrategyReviewAt) return true;
-  const elapsedMinutes = (Date.now() - trade.lastStrategyReviewAt.getTime()) / 60_000;
-  return elapsedMinutes >= tradingConfig.positionStrategyReviewIntervalMinutes;
+  const elapsedSeconds = (Date.now() - trade.lastStrategyReviewAt.getTime()) / 1000;
+  return elapsedSeconds >= tradingConfig.positionStrategyReviewIntervalSeconds;
 }
 
 function formatPositionState(input: {
@@ -35,23 +46,25 @@ function formatPositionState(input: {
   mfePercent: number | null;
   maePercent: number | null;
   holdMinutes: number;
-  profitStepsTaken: number;
-  profitStepsTotal: number;
+  partialSellsCount: number;
+  remainingTokens: number;
+  totalBoughtTokens: number;
 }): string {
+  const percentOfOriginalRemaining = input.totalBoughtTokens > 0 ? (input.remainingTokens / input.totalBoughtTokens) * 100 : 100;
   return [
     `Current: ${input.currentMultiple.toFixed(2)}x entry (${input.unrealizedPnlPercent >= 0 ? "+" : ""}${input.unrealizedPnlPercent.toFixed(1)}%)`,
     `Best so far: +${(input.mfePercent ?? 0).toFixed(1)}% | Worst so far: ${(input.maePercent ?? 0).toFixed(1)}%`,
     `Held for: ${Math.round(input.holdMinutes)} minutes`,
-    `Profit steps already taken: ${input.profitStepsTaken}/${input.profitStepsTotal}`,
+    `Partial profit sells so far: ${input.partialSellsCount} — ${percentOfOriginalRemaining.toFixed(0)}% of the original position still held`,
   ].join("\n");
 }
 
 function formatExitRulesState(exitRules: ExitRules, currentMultiple: number): string {
   return [
-    `Profit-step targets: ${exitRules.profitSteps.map((s) => `${s.multiple}x (sell ${s.sellPercentOfRemaining}% of what's left)`).join(", ")}`,
-    `Trailing stop: activates at ${exitRules.trailingActivationMultiple}x, then exits on a ${exitRules.trailingPercent}% retrace from peak${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"}`,
-    `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss`,
-    "No time-based max-hold exit is active; hold until profit, risk, invalidation, trailing, or strategy evidence says to exit.",
+    "No fixed profit-taking multiples exist — deciding if/when/how much profit to take is entirely your call, from the chart and data below.",
+    `Trailing stop (loss protection only, not a target): once this position's peak-ever multiple crosses ${exitRules.trailingActivationMultiple}x, a ${exitRules.trailingPercent}% retrace from that peak force-sells everything regardless of your view${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"} — treat this as a backstop, not a cue to hold until it fires.`,
+    `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.`,
+    "Max-hold time-exit only ever fires while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.",
   ].join("\n");
 }
 
@@ -86,9 +99,10 @@ export async function runPositionStrategyReview(input: {
   plan: TradePlan | null;
   pair: MarketPair | undefined;
   remainingTokens: number;
+  totalBoughtTokens: number;
   currentMultiple: number;
   unrealizedPnlPercent: number;
-  profitStepsTaken: number;
+  partialSellsCount: number;
 }): Promise<PositionStrategyDecision | null> {
   const { trade, token, pair } = input;
 
@@ -97,6 +111,13 @@ export async function runPositionStrategyReview(input: {
   const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair, token.address, token.chain);
   const researchSummary = await fetchResearchSummary(trade);
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
+  // The whole point of dropping the fixed profit-step ladder in favor of this
+  // review is to actually look at the chart — reuse chartVisionGate.ts's
+  // self-rendered PositionSnapshot chart (no external fetch, same data this
+  // trade has been writing every tick since it opened) rather than building a
+  // second rendering path. Undefined when there's not yet enough history;
+  // the prompt says so explicitly rather than silently reasoning off nothing.
+  const chartImage = await renderPositionChart(trade.id);
 
   let decision: PositionStrategyDecision;
   try {
@@ -112,23 +133,29 @@ export async function runPositionStrategyReview(input: {
           mfePercent: trade.mfePercent,
           maePercent: trade.maePercent,
           holdMinutes,
-          profitStepsTaken: input.profitStepsTaken,
-          profitStepsTotal: exitRules.profitSteps.length,
+          partialSellsCount: input.partialSellsCount,
+          remainingTokens: input.remainingTokens,
+          totalBoughtTokens: input.totalBoughtTokens,
         }),
         exitRulesState: formatExitRulesState(exitRules, input.currentMultiple),
         reentryState: formatReentryState(trade),
         technical: formatTechnicalFeaturesForPrompt(technical),
+        chartAttached: chartImage !== undefined,
       }),
       schema: PositionStrategySchema,
       jsonSchema: POSITION_STRATEGY_JSON_SCHEMA,
       toolName: "submit_position_strategy",
+      images: chartImage ? [chartImage] : undefined,
       maxTokens: 1500,
     });
   } catch (err) {
-    // Fail safe: no strategy call succeeding just means the deterministic
-    // exit rules keep running unmodified this tick, same as before this
-    // feature existed — never block or crash position monitoring over it.
-    logger.warn({ tradeId: trade.id, err: String(err) }, "position strategy review failed — deterministic exit rules continue unaffected");
+    // Fail safe: this is now the only profit-taking mechanism, so a failed
+    // call means no profit gets banked THIS tick — never block or crash
+    // position monitoring over it, and never fall back to a fixed multiple.
+    // The deterministic safety net (stop-loss/catastrophic/invalidation/
+    // trailing-stop) still runs every tick regardless and is what protects
+    // this position if the AI stays down for a while.
+    logger.warn({ tradeId: trade.id, err: String(err) }, "position strategy review failed — safety-only deterministic exits continue unaffected, no profit-taking this tick");
     return null;
   }
 
