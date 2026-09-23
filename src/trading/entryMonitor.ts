@@ -781,8 +781,6 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
 }
 
 async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: string[]): Promise<void> {
-  await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.REJECTED } });
-  await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
   // User directive 2026-09-11: a revalidation-stage rejection (slippage,
   // price impact, liquidity collapse, sizing, sell-path checks — everything
   // validateEntry/calculatePositionSize can reject on) was previously only
@@ -791,20 +789,41 @@ async function rejectEntry(entry: PendingEntry, candidateId: string, reasons: st
   // tonight (CME, SEXFLY, TRACE) that this is the single most common
   // follow-up question once a token's status shows REJECTED. Recorded the
   // same way a BUY decision already is in openTrade below.
+  //
+  // Confirmed live twice (ChainRot 2026-09-22, based 2026-09-23): these three
+  // writes used to run as independent calls — a transient DB error on just
+  // the third one left a candidate permanently REJECTED with its real reason
+  // never recorded anywhere, not even in logs by the time the next restart
+  // rotated them out. $transaction makes this all-or-nothing: either the
+  // rejection and its reason land together, or neither does and the entry
+  // stays claimable to retry next tick — never a silent, unexplained reject.
   const strategy = await getActiveStrategyVersion();
-  await db.tradeDecisionSnapshot.create({
-    data: {
-      candidateId,
-      decision: TradeDecision.SKIP,
-      stage: "entry_revalidation",
-      strategyVersionId: strategy.id,
-      marketState: {},
-      projectState: {},
-      technicalState: {},
-      portfolioState: {},
-      deterministicRules: { reasons },
-      finalReasons: reasons,
-    },
+  // Interactive-callback form deliberately, not the array form: `tx` below
+  // is a plain, non-extended client for the life of the transaction, so
+  // none of db.ts's own sleep-and-retry wrapping (which would hold this
+  // transaction open across up to 30s of backoff per attempt) applies
+  // inside it. If the transaction itself hits a transient error, Prisma
+  // retries the whole thing at the driver level; if it exhausts that and
+  // throws, this whole function throws and the pending entry is never
+  // updated at all — still claimable, retried next tick — rather than
+  // ending up rejected with its reason lost.
+  await db.$transaction(async (tx) => {
+    await tx.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.REJECTED } });
+    await tx.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
+    await tx.tradeDecisionSnapshot.create({
+      data: {
+        candidateId,
+        decision: TradeDecision.SKIP,
+        stage: "entry_revalidation",
+        strategyVersionId: strategy.id,
+        marketState: {},
+        projectState: {},
+        technicalState: {},
+        portfolioState: {},
+        deterministicRules: { reasons },
+        finalReasons: reasons,
+      },
+    });
   });
   logger.info({ pendingEntryId: entry.id, candidateId, reasons }, "entry rejected at revalidation");
 }

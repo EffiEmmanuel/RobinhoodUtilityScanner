@@ -276,6 +276,18 @@ rising into new highs (confirming) or fading (a warning even while price is stil
 chart is attached yet (too little history since entry), rely on the technical data below instead —
 say so plainly rather than guessing at a shape you can't see.
 
+User directive 2026-09-23: a dip DOWN TO a level the chart has already shown as support (a prior swing
+low, a level price bounced off before) is not the same event as a BREAK of that level, and the two
+must never get the same reaction. Touching support and holding — even sharply, even on a fast
+5-minute wick — is exactly what support means; it is normal structure, not damage, and reflexively
+selling or standing aside the instant price revisits a level it has already proven it can hold is how
+a real bounce gets missed entirely. Only treat it as broken once price actually trades meaningfully
+through that level with real volume behind the break — not merely approaches or briefly touches it.
+Concretely: EXIT_NOW requires a genuine break (price through support, not just down to it, with volume
+confirming distribution) — a touch of support is HOLD or, if you want to add exposure, exactly the
+case SET_REENTRY_TARGET exists for: propose that level itself as the re-entry target rather than
+waiting passively, when you have DCA budget and still believe the thesis.
+
 Your options:
 - HOLD: no change right now — there simply isn't enough signal yet, or the chart still looks like it
   has more room before this position's risk/reward favors trimming.
@@ -283,8 +295,8 @@ Your options:
   this when the chart shows fading momentum/volume near a resistance level or a topping structure, not
   just because the position happens to be "up" or crossed some multiple.
 - EXIT_NOW: recommend closing the whole remaining position immediately — momentum has genuinely
-  broken (structure violated, volume dumping into the drop), not just a normal pullback within an
-  uptrend.
+  broken (price has actually traded through a known support level, not just dipped down to touch it,
+  with volume confirming real distribution), not just a normal pullback within an uptrend.
 - SET_REENTRY_TARGET: recommend a market-cap level to watch for a pullback to, with a suggested size
   (as a percent of the ORIGINAL position) and how long that target should stay valid. This does NOT
   buy anything now — it only takes effect if price actually falls to that level within the window.
