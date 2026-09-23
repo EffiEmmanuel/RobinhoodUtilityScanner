@@ -124,6 +124,12 @@ export const config = {
   solanaRpcFallbackUrl: optStr("SOLANA_RPC_FALLBACK_URL"),
   solanaRpcExtraUrls: csv("SOLANA_RPC_EXTRA_URLS"),
   solanaExplorerApiUrl: optStr("SOLANA_EXPLORER_API_URL"),
+  // Drives solanaOnchainDiscoveryLoop (pipeline/solanaOnchainDiscovery.ts) —
+  // unlike onchainDiscoveryIntervalSeconds this isn't a poll cadence that
+  // directly gates freshness (discovery itself is event-driven, via a
+  // persistent pump.fun log subscription); this only governs how often the
+  // loop checks the subscription is still alive and reports health, and
+  // becomes the backoff base if it isn't.
   solanaDiscoveryIntervalSeconds: num("SOLANA_DISCOVERY_INTERVAL_SECONDS", 15),
   // Verified current and correct against Jupiter's live API docs/swagger
   // spec as of 2026-09-16 (GET /quote, POST /swap, both under this base) —

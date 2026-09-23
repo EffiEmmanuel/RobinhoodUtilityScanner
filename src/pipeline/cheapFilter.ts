@@ -52,16 +52,26 @@ export function cheapFilter(profile: DiscoveredTokenProfile, name?: string | nul
 
 /**
  * Same intent as cheapFilter, for tokens sourced directly from an on-chain
- * pool-creation event rather than DexScreener — there is no icon/description
- * to check at this source (that metadata is a DexScreener-only concept), so
+ * creation event rather than DexScreener — there is no icon/description to
+ * check at this source (that metadata is a DexScreener-only concept), so
  * requiring one would reject every on-chain-sourced token regardless of
  * quality. The checks that ARE meaningful for this source (real name, valid
  * address, absurd token supply) stay deterministic and pre-AI, same as
  * cheapFilter's — this is what keeps obvious meme-supply tokens from ever
  * costing an AI call in the first place.
  */
-export function cheapFilterOnchain(address: string, name?: string | null, adjustedTotalSupply?: number): CheapFilterResult {
-  // Only ever called from onchainDiscovery.ts's EVM pool-creation watcher.
-  const reasons = [...nameAndAddressReasons(name, address, config.targetChainId), ...supplyReason(adjustedTotalSupply)];
+export function cheapFilterOnchain(
+  address: string,
+  name?: string | null,
+  adjustedTotalSupply?: number,
+  // Defaults to the EVM chain (this function's only caller until
+  // solanaOnchainDiscovery.ts) so onchainDiscovery.ts/walletTracking/poller.ts
+  // are unaffected by this parameter's addition — without it, every Solana
+  // base58 address passed here would fail isValidAddressForChain against the
+  // EVM regex and get rejected as "invalid contract address format"
+  // regardless of how legitimate the token actually is.
+  chain: string = config.targetChainId
+): CheapFilterResult {
+  const reasons = [...nameAndAddressReasons(name, address, chain), ...supplyReason(adjustedTotalSupply)];
   return { passed: reasons.length === 0, reasons };
 }

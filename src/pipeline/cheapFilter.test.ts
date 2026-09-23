@@ -78,4 +78,21 @@ describe("cheapFilterOnchain", () => {
     const result = cheapFilterOnchain(addr, undefined, 1_000);
     expect(result.passed).toBe(false);
   });
+
+  it("defaults to validating the EVM address shape when no chain is passed", () => {
+    const result = cheapFilterOnchain("So11111111111111111111111111111111111111112", "Navier Protocol", undefined);
+    expect(result.passed).toBe(false);
+    expect(result.reasons).toContain("invalid contract address format");
+  });
+
+  it("accepts a base58 Solana mint when chain is passed as solana", () => {
+    const result = cheapFilterOnchain("So11111111111111111111111111111111111111112", "Navier Protocol", undefined, "solana");
+    expect(result.passed).toBe(true);
+  });
+
+  it("rejects an EVM-shaped address when chain is passed as solana", () => {
+    const result = cheapFilterOnchain(addr, "Navier Protocol", undefined, "solana");
+    expect(result.passed).toBe(false);
+    expect(result.reasons).toContain("invalid contract address format");
+  });
 });

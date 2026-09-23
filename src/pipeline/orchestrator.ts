@@ -7,6 +7,7 @@ import { retryAsync } from "../util/retry";
 import { summarizeError } from "../util/errors";
 import { runDiscoveryPoll, promoteActiveAwaitingProfile } from "./discover";
 import { runOnchainDiscoveryPoll } from "./onchainDiscovery";
+import { runSolanaOnchainDiscoveryPoll } from "./solanaOnchainDiscovery";
 import { classifyToken } from "./classify";
 import { researchToken } from "./research";
 import { TokenStatus } from "../generated/prisma";
@@ -45,6 +46,8 @@ export const health = {
   lastDiscoveryError: undefined as string | undefined,
   lastOnchainDiscoveryPollAt: undefined as Date | undefined,
   lastOnchainDiscoveryError: undefined as string | undefined,
+  lastSolanaOnchainDiscoveryPollAt: undefined as Date | undefined,
+  lastSolanaOnchainDiscoveryError: undefined as string | undefined,
   lastActivityCheckAt: undefined as Date | undefined,
   lastActivityCheckError: undefined as string | undefined,
   lastWalletTrackingPollAt: undefined as Date | undefined,
@@ -221,6 +224,37 @@ async function onchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void>
   }
 }
 
+// Same rationale as ONCHAIN_DISCOVERY_MAX_BACKOFF_SECONDS above — this loop
+// maintains a persistent websocket subscription (see
+// solanaOnchainDiscovery.ts's ensureFreshSubscription), and a genuinely dead
+// Solana RPC/websocket must not have this loop busy-retrying and flooding
+// logs any more than a dead EVM RPC is allowed to.
+const SOLANA_ONCHAIN_DISCOVERY_MAX_BACKOFF_SECONDS = 120;
+let solanaOnchainDiscoveryConsecutiveFailures = 0;
+
+async function solanaOnchainDiscoveryLoop(signal: { stopped: boolean }): Promise<void> {
+  while (!signal.stopped) {
+    try {
+      const result = await runSolanaOnchainDiscoveryPoll();
+      health.lastSolanaOnchainDiscoveryPollAt = new Date();
+      health.lastSolanaOnchainDiscoveryError = undefined;
+      solanaOnchainDiscoveryConsecutiveFailures = 0;
+      if (result.created > 0) {
+        logger.info(result, "Solana on-chain discovery poll complete");
+      }
+    } catch (err) {
+      health.lastSolanaOnchainDiscoveryError = summarizeError(err);
+      solanaOnchainDiscoveryConsecutiveFailures++;
+      logger.error({ err: summarizeError(err), consecutiveFailures: solanaOnchainDiscoveryConsecutiveFailures }, "Solana on-chain discovery poll crashed");
+    }
+    const backoffSeconds =
+      solanaOnchainDiscoveryConsecutiveFailures > 0
+        ? Math.min(config.solanaDiscoveryIntervalSeconds * 2 ** (solanaOnchainDiscoveryConsecutiveFailures - 1), SOLANA_ONCHAIN_DISCOVERY_MAX_BACKOFF_SECONDS)
+        : config.solanaDiscoveryIntervalSeconds;
+    await sleep(backoffSeconds * 1000);
+  }
+}
+
 async function awaitingProfileActivityLoop(signal: { stopped: boolean }): Promise<void> {
   while (!signal.stopped) {
     try {
@@ -291,6 +325,7 @@ export async function startOrchestrator(): Promise<() => void> {
   const loops = [
     discoveryLoop(signal),
     onchainDiscoveryLoop(signal),
+    solanaOnchainDiscoveryLoop(signal),
     awaitingProfileActivityLoop(signal),
     walletTrackingLoop(signal),
     ...(config.arcObservationEnabled ? [arcObservationLoop(signal)] : []),
