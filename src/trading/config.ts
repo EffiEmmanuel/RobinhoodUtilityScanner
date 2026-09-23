@@ -654,14 +654,20 @@ export const tradingConfig = {
   paperAssumedGasCostUsd: num("PAPER_ASSUMED_GAS_COST_USD", 0.05),
 
   defaultMaxHoldMinutes: num("DEFAULT_MAX_HOLD_MINUTES", 1440),
-  // User directive 2026-09-22: a genuinely strong project (clears the
-  // fastFlip bar AND has a confirmed real X community — see ExitRules.
-  // goodProject's doc comment in strategy.ts) gets up to 48h before the
-  // underwater-only TIME_EXIT would force-close it, not the usual 24h.
-  // Only used as the code-default seed StrategyVersion's value; the live
-  // strategy's own exitRules.goodProject.maxHoldMinutes (versioned, DB-held)
-  // is what actually governs production once a version carrying it exists.
-  goodProjectMaxHoldMinutes: num("GOOD_PROJECT_MAX_HOLD_MINUTES", 2880),
+  // User directive 2026-09-22, raised 2026-09-23 ("hold good utility tokens
+  // for as long as possible, not just 48 hours max"): a genuinely strong
+  // project (clears the fastFlip bar AND has a confirmed real X community —
+  // see ExitRules.goodProject's doc comment in strategy.ts) gets no
+  // meaningful cap before the underwater-only TIME_EXIT would force-close
+  // it, vs. the usual 24h base/60min fastFlip profiles. A year, not
+  // Infinity — JSON (and the DB-stored StrategyVersion.exitRules it lands
+  // in) can't represent Infinity, and positionStrategy.ts's
+  // formatExitRulesState treats anything >= a year as "no real cap" for
+  // display rather than printing an absurd hour count. Only used as the
+  // code-default seed StrategyVersion's value; the live strategy's own
+  // exitRules.goodProject.maxHoldMinutes (versioned, DB-held) is what
+  // actually governs production once a version carrying it exists.
+  goodProjectMaxHoldMinutes: num("GOOD_PROJECT_MAX_HOLD_MINUTES", 60 * 24 * 365),
 
   // LIVE-only (§30/§80) — ignored entirely in PAPER/SHADOW.
   minGasBalanceEth: num("MIN_GAS_BALANCE_ETH", 0.002),

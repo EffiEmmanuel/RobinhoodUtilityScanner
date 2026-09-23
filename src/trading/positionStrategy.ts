@@ -59,12 +59,26 @@ function formatPositionState(input: {
   ].join("\n");
 }
 
+// User directive 2026-09-22 (§goodProject) + 2026-09-23 ("hold good utility
+// tokens for as long as possible, not just 48 hours max"): the GOOD_PROJECT
+// tier's maxHoldMinutes uses the same "no real ceiling" sentinel this
+// codebase already uses elsewhere (manualSubmit.ts's targetMcapMax) rather
+// than Infinity, which isn't valid JSON and can't round-trip through the
+// DB-stored StrategyVersion.exitRules. A year is an arbitrary but generous
+// cutoff for "don't bother printing an absurd hour count" — the underlying
+// value can be far larger than this and still mean "no real cap."
+const NO_REAL_HOLD_CAP_MINUTES = 60 * 24 * 365;
+
 function formatExitRulesState(exitRules: ExitRules, currentMultiple: number): string {
+  const holdCapText =
+    exitRules.maxHoldMinutes >= NO_REAL_HOLD_CAP_MINUTES
+      ? "no real cap — hold as long as the thesis holds"
+      : `${(exitRules.maxHoldMinutes / 60).toFixed(0)}h`;
   return [
     "No fixed profit-taking multiples exist — deciding if/when/how much profit to take is entirely your call, from the chart and data below.",
     `Trailing stop (loss protection only, not a target): once this position's peak-ever multiple crosses ${exitRules.trailingActivationMultiple}x, a ${exitRules.trailingPercent}% retrace from that peak force-sells everything regardless of your view${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"} — treat this as a backstop, not a cue to hold until it fires.`,
     `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.`,
-    `Max-hold time-exit: ${(exitRules.maxHoldMinutes / 60).toFixed(0)}h, but ONLY while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.`,
+    `Max-hold time-exit: ${holdCapText}, but ONLY while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.`,
   ].join("\n");
 }
 

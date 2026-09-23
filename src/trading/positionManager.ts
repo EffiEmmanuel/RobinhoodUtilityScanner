@@ -336,13 +336,14 @@ async function applyAiStrategyDecision(
  * same patient, long-hold treatment as VERIFIED_PROJECT unless its own
  * qualityScore or entry mcap independently signals caution below.
  *
- * User directive 2026-09-22: a third tier above that, GOOD_PROJECT — cleared
- * fastFlip's own bar AND has a confirmed real X community (ResearchRun.
- * socialScore, populated identically for utility- and narrative-lane
- * research — see ExitRules.goodProject's doc comment in strategy.ts) —
- * unlocks up to 48h of patience (vs 24h) before the underwater-only
- * TIME_EXIT would force-close it, and the full DCA/re-entry budget in
- * positionStrategy.ts (this function's tier return value is what that reads).
+ * User directive 2026-09-22, raised 2026-09-23: a third tier above that,
+ * GOOD_PROJECT — cleared fastFlip's own bar AND has a confirmed real X
+ * community (ResearchRun.socialScore, populated identically for utility-
+ * and narrative-lane research — see ExitRules.goodProject's doc comment in
+ * strategy.ts) — unlocks essentially uncapped patience (vs 24h base/60min
+ * fastFlip) before the underwater-only TIME_EXIT would force-close it, and
+ * the full DCA/re-entry budget in positionStrategy.ts (this function's tier
+ * return value is what that reads).
  */
 async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<{ exitRules: ExitRules; tier: ProjectTier }> {
   const { fastFlip, goodProject } = baseExitRules;
