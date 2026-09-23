@@ -465,8 +465,13 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     await db.pendingEntry.update({ where: { id: entry.id }, data: { triggeredAt: new Date(), lastCheckedAt: new Date() } });
     logger.info({ pendingEntryId: entry.id, candidateId: candidate.id, mcap }, "pending entry triggered — revalidating");
 
-    const circuitBreakers = await checkCircuitBreakers();
+    const circuitBreakersAll = await checkCircuitBreakers();
     const portfolio = await getPortfolioState();
+    // Scoped to this candidate's own chain — a Solana-only RPC outage must
+    // not block a healthy Robinhood entry, and vice versa (confirmed live
+    // 2026-09-23). Global reasons (kill switch, position cap, loss breakers)
+    // still reach every chain via checkCircuitBreakers' own chains map.
+    const circuitBreakers = circuitBreakersAll.chains[candidate.token.chain === "solana" ? "solana" : "robinhood"];
 
     if (!pair) {
       await rejectEntry(entry, candidate.id, ["pool disappeared — no market data available at trigger time"]);
@@ -666,12 +671,12 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
 
     const entryResult = manualEntryOverride
       ? {
-          decision: circuitBreakers.paused
+          decision: circuitBreakers.mode === "PAUSED"
             ? ("DEFER" as const)
             : !sellQuoteAvailable || positionSizeUsd > portfolio.availableToDeployUsd
               ? ("DEFER" as const)
               : ("APPROVED" as const),
-          reasons: circuitBreakers.paused
+          reasons: circuitBreakers.mode === "PAUSED"
             ? circuitBreakers.reasons
             : !sellQuoteAvailable
               ? ["manual buy-and-hold waiting: no sell path available yet, so normal exits could not work"]
@@ -683,7 +688,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
                   ],
         }
       : validateEntry({
-          circuitBreakersPaused: circuitBreakers.paused,
+          circuitBreakersPaused: circuitBreakers.mode === "PAUSED",
           circuitBreakerReasons: circuitBreakers.reasons,
           currentLiquidityUsd: pair.liquidityUsd ?? 0,
           liquidityAtPlanUsd: planData.liquidityUsd ?? pair.liquidityUsd ?? 0,

@@ -280,18 +280,22 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
 
   // A fresh quote before every real buy, exactly like a first entry — never
   // trust the price/mcap in `pair` alone to imply slippage is acceptable.
-  const [circuitBreakers, portfolio, sellQuoteAvailable, buyEstimate] = await Promise.all([
+  const [circuitBreakersAll, portfolio, sellQuoteAvailable, buyEstimate] = await Promise.all([
     checkCircuitBreakers(),
     getPortfolioState(),
     isSellable(token.address, pair, token.chain, undefined),
     getBuyEstimate(token.address, trade.pendingReentryUsd, pair, token.chain),
   ]);
+  // Scoped to this position's own chain — see entryMonitor.ts's identical
+  // fix (confirmed live 2026-09-23: a Solana RPC outage must not block a
+  // Robinhood re-entry, and vice versa).
+  const circuitBreakers = circuitBreakersAll.chains[token.chain === "solana" ? "solana" : "robinhood"];
   // A re-entry adds to a position without facing the high-conviction gate a
   // fresh conservative-mode entry has to clear, so it waits until the loss
   // breakers reset.
   const conservative = circuitBreakers.mode === "CONSERVATIVE";
   const entryCheck = validateEntry({
-    circuitBreakersPaused: circuitBreakers.paused || conservative,
+    circuitBreakersPaused: circuitBreakers.mode === "PAUSED" || conservative,
     circuitBreakerReasons: conservative ? [...circuitBreakers.reasons, "re-entries are off in conservative mode"] : circuitBreakers.reasons,
     currentLiquidityUsd: pair.liquidityUsd ?? 0,
     liquidityAtPlanUsd: pair.liquidityUsd ?? 0,

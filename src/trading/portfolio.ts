@@ -10,7 +10,7 @@ import { getJupiterQuote, SOL_MINT } from "./live/solana/jupiterClient";
 import { isSolanaWalletConfigured, getSolanaWalletBalanceSol } from "./live/solana/wallet";
 import { summarizeError } from "../util/errors";
 import { withTimeout } from "../util/http";
-import { resolveEntryMode, type EntryMode } from "./conservativeMode";
+import { resolveEntryMode, type EntryMode, type EntryModeResult } from "./conservativeMode";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const PAPER_WALLET_ADDRESS = "paper";
@@ -448,16 +448,29 @@ export interface CircuitBreakerResult {
   // True only when no new entry may open at all. A tripped LOSS breaker
   // normally gives mode CONSERVATIVE instead, where this stays false and
   // entries go through the high-conviction gate (see conservativeMode.ts).
+  // These three fields fold every chain's gas/balance check together, same
+  // as always — kept as-is for the dashboard and anything else that just
+  // wants one overall status. Use `chains` below for an actual entry
+  // decision on a specific chain.
   paused: boolean;
   mode: EntryMode;
   reasons: string[];
+  // Confirmed live 2026-09-23: a Solana RPC quota outage's "could not check
+  // Solana wallet balance" failure was landing in the one shared reasons list
+  // above, which paused the top-level mode for BOTH chains — a healthy Robinhood
+  // wallet had no way to keep trading while only Solana's RPC was broken.
+  // Global reasons (kill switch, position cap, loss breakers) still apply to
+  // every chain; only the two chain-specific gas/balance checks are scoped
+  // here so one chain's infra problem can't block the other's entries.
+  chains: Record<"robinhood" | "solana", EntryModeResult>;
 }
 
 export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
-  const hardPauseReasons: string[] = [];
+  // Genuinely global — apply to every chain no matter what.
+  const globalHardPauseReasons: string[] = [];
 
   if (!isTradingEnabled()) {
-    hardPauseReasons.push("global kill switch is engaged");
+    globalHardPauseReasons.push("global kill switch is engaged");
   }
 
   const state = await getPortfolioState();
@@ -466,23 +479,24 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   // below, this only ever limited how many *positions* could be open at once,
   // not how much capital could be at risk.
   if (tradingConfig.maxOpenPositions > 0 && state.openPositionCount >= tradingConfig.maxOpenPositions) {
-    hardPauseReasons.push(`max open positions reached (${state.openPositionCount}/${tradingConfig.maxOpenPositions})`);
+    globalHardPauseReasons.push(`max open positions reached (${state.openPositionCount}/${tradingConfig.maxOpenPositions})`);
   }
 
   // §30 — LIVE only. Exits stay possible even with low gas (checked
   // separately by validateExit, never gated here), only new entries pause.
-  // Solana counterpart added 2026-09-18 alongside the getCashUsd fix — same
-  // global hardPauseReasons list as the EVM check (this breaker isn't
-  // per-chain today), so a starved Solana wallet pauses new entries on both
-  // chains, same as a starved EVM wallet already did before this change.
+  // Scoped per chain below (see `chains`) — confirmed live 2026-09-23 that
+  // sharing one list with the EVM check meant a Solana RPC outage paused
+  // Robinhood entries too, even with a perfectly healthy EVM wallet.
+  const chainHardPauseReasons: Record<"robinhood" | "solana", string[]> = { robinhood: [], solana: [] };
+
   if (isSolanaLiveReady()) {
     try {
       const solGasBalance = await getSolanaWalletBalanceSol();
       if (solGasBalance < tradingConfig.minGasBalanceSol) {
-        hardPauseReasons.push(`Solana wallet balance ${solGasBalance.toFixed(4)} SOL is below ${tradingConfig.minGasBalanceSol} SOL minimum`);
+        chainHardPauseReasons.solana.push(`Solana wallet balance ${solGasBalance.toFixed(4)} SOL is below ${tradingConfig.minGasBalanceSol} SOL minimum`);
       }
     } catch (err) {
-      hardPauseReasons.push(`could not check Solana wallet balance: ${summarizeError(err)}`);
+      chainHardPauseReasons.solana.push(`could not check Solana wallet balance: ${summarizeError(err)}`);
     }
   }
 
@@ -490,16 +504,28 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     try {
       const gasBalance = await getWalletGasBalanceEth();
       if (gasBalance < tradingConfig.minGasBalanceEth) {
-        hardPauseReasons.push(`wallet gas balance ${gasBalance.toFixed(5)} ETH is below ${tradingConfig.minGasBalanceEth} ETH minimum`);
+        chainHardPauseReasons.robinhood.push(`wallet gas balance ${gasBalance.toFixed(5)} ETH is below ${tradingConfig.minGasBalanceEth} ETH minimum`);
       }
     } catch (err) {
-      hardPauseReasons.push(`could not check wallet gas balance: ${summarizeError(err)}`);
+      chainHardPauseReasons.robinhood.push(`could not check wallet gas balance: ${summarizeError(err)}`);
     }
   }
 
   const { dailyRealizedLossPercent, consecutiveLosses } = await getLossBreakerCounts(state.totalEquityUsd);
-  const { mode, reasons } = resolveEntryMode({ hardPauseReasons, dailyRealizedLossPercent, consecutiveLosses });
-  return { paused: mode === "PAUSED", mode, reasons };
+  const lossInput = { dailyRealizedLossPercent, consecutiveLosses };
+
+  // Top-level result — every reason folded together, exactly like before
+  // this change, for the dashboard and anything else that just wants one
+  // overall status.
+  const allHardPauseReasons = [...globalHardPauseReasons, ...chainHardPauseReasons.robinhood, ...chainHardPauseReasons.solana];
+  const { mode, reasons } = resolveEntryMode({ hardPauseReasons: allHardPauseReasons, ...lossInput });
+
+  const chains = {
+    robinhood: resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.robinhood], ...lossInput }),
+    solana: resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.solana], ...lossInput }),
+  };
+
+  return { paused: mode === "PAUSED", mode, reasons, chains };
 }
 
 /**

@@ -6,7 +6,8 @@ vi.mock("./notifications", () => ({ sendCircuitBreakerEmail: (...args: unknown[]
 import { createCircuitBreakerAlertTracker } from "./circuitBreakerAlerts";
 
 function result(mode: "NORMAL" | "CONSERVATIVE" | "PAUSED", reasons: string[] = ["some reason"]) {
-  return { paused: mode === "PAUSED", mode, reasons };
+  const chain = { mode, reasons };
+  return { paused: mode === "PAUSED", mode, reasons, chains: { robinhood: chain, solana: chain } };
 }
 
 describe("circuit breaker alert tracker", () => {
