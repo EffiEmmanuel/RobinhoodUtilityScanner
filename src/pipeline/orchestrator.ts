@@ -325,7 +325,7 @@ export async function startOrchestrator(): Promise<() => void> {
   const loops = [
     discoveryLoop(signal),
     onchainDiscoveryLoop(signal),
-    solanaOnchainDiscoveryLoop(signal),
+    ...(config.solanaOnchainDiscoveryEnabled ? [solanaOnchainDiscoveryLoop(signal)] : []),
     awaitingProfileActivityLoop(signal),
     walletTrackingLoop(signal),
     ...(config.arcObservationEnabled ? [arcObservationLoop(signal)] : []),

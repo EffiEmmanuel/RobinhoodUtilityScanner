@@ -116,10 +116,39 @@ export function signAndSendSolanaTransaction(tx: VersionedTransaction): Promise<
   return task;
 }
 
+// Separate from getSolanaConnection()'s single primary connection (used for
+// signing/sending, where switching endpoints mid-flow risks inconsistent
+// blockhash/confirmation state) — this is a plain idempotent read, so trying
+// every configured endpoint in turn is safe. Confirmed live 2026-09-23: this
+// exact call is what checkCircuitBreakers uses to gate every new entry on
+// BOTH chains, and a single exhausted/rate-limited primary RPC was enough to
+// hard-pause all trading even though the wallet itself was fine — falling
+// back here (mirroring wallet.ts's viem fallback transport for EVM) means a
+// dead primary no longer takes down the whole system by itself.
+let balanceCheckConnections: Connection[] | undefined;
+function getBalanceCheckConnections(): Connection[] {
+  if (!balanceCheckConnections) {
+    const urls = [config.solanaRpcUrl, ...config.solanaRpcExtraUrls, config.solanaRpcFallbackUrl].filter(
+      (u): u is string => Boolean(u),
+    );
+    if (urls.length === 0) throw new Error("SOLANA_RPC_URL is not set — cannot reach the Solana network");
+    balanceCheckConnections = urls.map((url) => new Connection(url, "confirmed"));
+  }
+  return balanceCheckConnections;
+}
+
 export async function getSolanaWalletBalanceSol(): Promise<number> {
-  const conn = getSolanaConnection();
-  const lamports = await conn.getBalance(getKeypair().publicKey);
-  return lamports / 1e9;
+  const connections = getBalanceCheckConnections();
+  let lastErr: unknown;
+  for (const conn of connections) {
+    try {
+      const lamports = await conn.getBalance(getKeypair().publicKey);
+      return lamports / 1e9;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 export function getSolanaWalletPublicKey(): PublicKey {

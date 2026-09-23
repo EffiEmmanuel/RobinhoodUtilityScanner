@@ -131,6 +131,16 @@ export const config = {
   // loop checks the subscription is still alive and reports health, and
   // becomes the backoff base if it isn't.
   solanaDiscoveryIntervalSeconds: num("SOLANA_DISCOVERY_INTERVAL_SECONDS", 15),
+  // Kill switch for solanaOnchainDiscoveryLoop. Confirmed live 2026-09-23: its
+  // persistent pump.fun log subscription (plus per-create address-lookup-table
+  // resolution) shares config.solanaRpcUrl's request quota with
+  // getSolanaWalletBalanceSol — the read that gates every new entry on BOTH
+  // chains via checkCircuitBreakers. Once the provider's daily quota is
+  // exhausted, that shared fate hard-pauses all trading, not just discovery.
+  // Default true so a fresh checkout is unaffected; flip false via Railway to
+  // stop burning quota without a deploy, same pattern as every other gate
+  // this session.
+  solanaOnchainDiscoveryEnabled: bool("SOLANA_ONCHAIN_DISCOVERY_ENABLED", true),
   // Verified current and correct against Jupiter's live API docs/swagger
   // spec as of 2026-09-16 (GET /quote, POST /swap, both under this base) —
   // lite-api.jup.ag is the free no-API-key tier; api.jup.ag is the paid tier
