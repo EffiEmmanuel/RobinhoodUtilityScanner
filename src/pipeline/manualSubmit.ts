@@ -86,6 +86,23 @@ function mergeManualProfile(rawProfile: unknown, submittedAt: string, buyAndHold
   return { ...base, manual: true, submittedAt, manualBuyAndHold: buyAndHold || base.manualBuyAndHold === true };
 }
 
+// User directive 2026-09-23: "are you stupid?? now it buys only $1.66 all
+// the time for all entries" — traced to these placeholder scores, not the
+// gas-viable floor. calculatePositionSize's fixed multiplier stack for a
+// manual submission was riskBucket=HIGH (0.5x) * qualityScore=50 (0.95x) *
+// confidence=50 (0.9x) * entryRiskScore=100, i.e. the WORST possible
+// reading (0.5x) * lane=0.75x — a combined ~0.16x on top of the base
+// allocation, before liquidity/mcap even get a say. That's not "unknown, be
+// cautious" — riskBucket HIGH and entryRiskScore 100 are the single worst
+// value each scale allows, applied to every manual pick regardless of how
+// good it actually is. A human choosing to buy-and-hold a specific token is
+// closer to a MEDIUM-conviction, not-yet-independently-researched pick than
+// to "the worst candidate this system has ever seen" — sized accordingly
+// now (riskBucket MEDIUM = 1.0x, quality/confidence 70, entryRiskScore 45
+// ~1.0x) rather than reflexively worst-cased. Liquidity/market-cap still
+// vary this per token exactly as before; this only fixes the constant part
+// that was flooring every manual trade to the same tiny number regardless
+// of the token.
 async function queueManualBuyAndHold(token: Token): Promise<void> {
   const strategy = await getActiveStrategyVersion();
   const now = new Date();
@@ -93,8 +110,8 @@ async function queueManualBuyAndHold(token: Token): Promise<void> {
     data: {
       tokenId: token.id,
       status: TradeCandidateStatus.WAITING,
-      qualityScore: 50,
-      researchConfidence: 50,
+      qualityScore: 70,
+      researchConfidence: 70,
       qualificationPath: "MANUAL_BUY_AND_HOLD",
       tradeLane: "MOMENTUM_TACTICAL",
     },
@@ -107,20 +124,20 @@ async function queueManualBuyAndHold(token: Token): Promise<void> {
       entryStyle: "MARKET_ENTRY",
       targetEntryMcapMin: 0,
       targetEntryMcapMax: Number.MAX_SAFE_INTEGER,
-      riskScore: 100,
-      confidence: 50,
+      riskScore: 45,
+      confidence: 70,
       planData: {
         manualBuyAndHold: true,
         submittedAt: now.toISOString(),
-        freshEval: { eligible: true, riskBucket: "HIGH", reasons: ["manual buy-and-hold override requested by the user"] },
+        freshEval: { eligible: true, riskBucket: "MEDIUM", reasons: ["manual buy-and-hold override requested by the user"] },
         tradeLane: "MOMENTUM_TACTICAL",
         analysis: {
           marketRegime: "UNKNOWN",
           isExtended: false,
           recommendedAction: "BUY_NOW",
           entryStyle: "MARKET_ENTRY",
-          riskScore: 100,
-          confidence: 50,
+          riskScore: 45,
+          confidence: 70,
           reasoning: ["Manual buy-and-hold override: wait for the normal entry monitor to validate and open the position."],
         },
       } as unknown as object,
