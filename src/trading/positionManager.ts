@@ -136,6 +136,8 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const entryPriceUsd = trade.entryPriceUsd ?? 0;
   const currentMultiple = entryPriceUsd > 0 ? priceUsd / entryPriceUsd : 1;
   const unrealizedPnlPercent = (currentMultiple - 1) * 100;
+  const stopBaseline = await stopBaselinePriceUsd(trade, priceUsd);
+  const stopPnlPercent = stopBaseline > 0 ? (priceUsd / stopBaseline - 1) * 100 : unrealizedPnlPercent;
   const unrealizedPnlUsd = remainingTokens * priceUsd - remainingTokens * entryPriceUsd;
 
   const newMfe = Math.max(trade.mfePercent ?? unrealizedPnlPercent, unrealizedPnlPercent);
@@ -226,6 +228,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     remainingTokens,
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
     manualHold,
+    stopPnlPercent,
   });
 
   if (!decision) return;
@@ -360,6 +363,50 @@ async function applyAiStrategyDecision(
  * the full DCA/re-entry budget in positionStrategy.ts (this function's tier
  * return value is what that reads).
  */
+/**
+ * Where the loss stops measure from. A position is marked at its real
+ * on-chain sell quote (net of the pool fee and price impact) against a fill
+ * price that already paid the buy side, so it reads as a loss of the whole
+ * round-trip cost from its very first mark. Confirmed 2026-09-24 across 47
+ * price-stopped trades: the median first mark, 3-10s after entry, was
+ * -5.5%, and many were -6% to -10%. The 15% max-loss stop was firing on a
+ * ~10% market dip. GOMO, FOMOBAG and PONSI were stopped that way and later
+ * peaked at 8-9x. So the stops measure from the first mark instead: never
+ * above the entry price, and never more than MAX_ROUND_TRIP_COST below it,
+ * so a real crash in the first seconds can't be absorbed into the baseline.
+ * P&L, MFE and every reported number still use the entry price.
+ */
+export function stopBaseline(entryPriceUsd: number, firstMarkPriceUsd: number | undefined): number {
+  if (!(entryPriceUsd > 0)) return entryPriceUsd;
+  if (!(firstMarkPriceUsd !== undefined && firstMarkPriceUsd > 0)) return entryPriceUsd;
+  return Math.max(Math.min(entryPriceUsd, firstMarkPriceUsd), entryPriceUsd * (1 - MAX_ROUND_TRIP_COST));
+}
+const MAX_ROUND_TRIP_COST = 0.12;
+const STOP_BASELINE_WINDOW_MS = 60_000;
+const stopBaselineByTrade = new Map<string, number>();
+
+async function stopBaselinePriceUsd(trade: Trade, markPriceUsd: number): Promise<number> {
+  const cached = stopBaselineByTrade.get(trade.id);
+  if (cached !== undefined) return cached;
+  const openedAtMs = trade.openedAt?.getTime() ?? 0;
+  let firstMark: number | undefined;
+  if (Date.now() - openedAtMs <= STOP_BASELINE_WINDOW_MS) {
+    firstMark = markPriceUsd;
+  } else {
+    // Restarted since entry: use the first mark recorded then, if it was
+    // taken within the window; otherwise fall back to the entry price.
+    const first = await db.positionSnapshot.findFirst({
+      where: { tradeId: trade.id, capturedAt: { lte: new Date(openedAtMs + STOP_BASELINE_WINDOW_MS) } },
+      orderBy: { capturedAt: "asc" },
+      select: { priceUsd: true },
+    });
+    firstMark = first?.priceUsd ?? undefined;
+  }
+  const baseline = stopBaseline(trade.entryPriceUsd ?? 0, firstMark);
+  stopBaselineByTrade.set(trade.id, baseline);
+  return baseline;
+}
+
 async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<{ exitRules: ExitRules; tier: ProjectTier; manualHold: boolean }> {
   const candidate = trade.candidateId
     ? await db.tradeCandidate.findUnique({
@@ -450,6 +497,10 @@ export function evaluateExits(ctx: {
   // it at a loss — only an unsellable token or pulled liquidity, plus the
   // trailing stop, which only arms once the position is well in profit.
   manualHold?: boolean;
+  // The loss the stops judge: the move since the first mark after entry
+  // (stopBaselinePriceUsd), which leaves out our own round-trip cost.
+  // Falls back to unrealizedPnlPercent.
+  stopPnlPercent?: number;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
 
@@ -457,7 +508,7 @@ export function evaluateExits(ctx: {
   const positionRisk = validatePosition({
     liquidityUsd: ctx.liquidityUsd,
     liquidityAtEntryUsd: trade.entryLiquidityUsd ?? ctx.liquidityUsd, // falls back to current (no-op check) only for trades opened before entryLiquidityUsd existed
-    unrealizedPnlPercent: ctx.unrealizedPnlPercent,
+    unrealizedPnlPercent: ctx.stopPnlPercent ?? ctx.unrealizedPnlPercent,
     maxLossPercent: exitRules.maxLossPercent,
     catastrophicLossPercent: exitRules.catastrophicLossPercent,
     buySellRatio5m: ctx.buySellRatio5m,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Trade } from "../generated/prisma";
-import { evaluateExits } from "./positionManager";
+import { evaluateExits, stopBaseline } from "./positionManager";
 import type { ExitRules } from "./strategy";
 
 const exitRules: ExitRules = {
@@ -228,6 +228,53 @@ describe("evaluateExits", () => {
 
     it("leaves the same drawdown to the normal exits for a trade that isn't a manual hold", () => {
       expect(evaluateExits({ ...underwater, trade: trade(), manualHold: false })).toMatchObject({ isEmergency: true });
+    });
+  });
+});
+
+describe("stopBaseline", () => {
+  it("measures stops from the first mark, which already carries the round-trip cost", () => {
+    expect(stopBaseline(1, 0.945)).toBeCloseTo(0.945);
+  });
+
+  it("never measures from above the entry price", () => {
+    expect(stopBaseline(1, 1.3)).toBe(1);
+  });
+
+  it("never lets a crash in the first seconds pass for trading cost", () => {
+    expect(stopBaseline(1, 0.6)).toBeCloseTo(0.88);
+  });
+
+  it("falls back to the entry price without a usable first mark", () => {
+    expect(stopBaseline(1, undefined)).toBe(1);
+    expect(stopBaseline(1, 0)).toBe(1);
+  });
+});
+
+describe("evaluateExits loss stops", () => {
+  const base = {
+    trade: trade({ openedAt: new Date(Date.now() - 5 * 60_000) }), // inside maxHoldMinutes
+    plan: null,
+    exitRules, // maxLossPercent 25, catastrophicLossPercent 40
+    currentMcap: 70_000,
+    liquidityUsd: 25_000,
+    buySellRatio5m: 0.55,
+    totalTxns5m: 8,
+    sellQuoteAvailable: true,
+    remainingTokens: 100,
+    totalBoughtTokens: 100,
+  };
+
+  it("judges the loss stops by the move since the first mark, not the fee-inclusive entry", () => {
+    // -28% against the fill, but the first mark was already -8%: a ~22% market move.
+    expect(evaluateExits({ ...base, currentMultiple: 0.72, unrealizedPnlPercent: -28, stopPnlPercent: -21.7 })).toBeNull();
+    expect(evaluateExits({ ...base, currentMultiple: 0.72, unrealizedPnlPercent: -28 })).toMatchObject({ type: "RISK_EXIT" });
+  });
+
+  it("still fires once the market move itself passes the stop", () => {
+    expect(evaluateExits({ ...base, currentMultiple: 0.5, unrealizedPnlPercent: -50, stopPnlPercent: -45.6 })).toMatchObject({
+      type: "RISK_EXIT",
+      isEmergency: true,
     });
   });
 });
