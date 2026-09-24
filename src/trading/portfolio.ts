@@ -4,7 +4,7 @@ import { LedgerEntryType, TradeStatus } from "../generated/prisma";
 import { config } from "../config";
 import { tradingConfig } from "./config";
 import { isTradingEnabled } from "./runtimeState";
-import { isLiveModeReady, getWalletGasBalanceEth } from "./live/liveExecutionProvider";
+import { isLiveModeReady, getWalletGasBalanceEth, quoteEthPriceUsd } from "./live/liveExecutionProvider";
 import { fetchMarketForToken, isNativeEthQuoted } from "../dex/client";
 import { getJupiterQuote, SOL_MINT } from "./live/solana/jupiterClient";
 import { isSolanaWalletConfigured, getSolanaWalletBalanceSol } from "./live/solana/wallet";
@@ -74,6 +74,18 @@ let cachedEthPriceUsd: { rate: number; at: number } | undefined;
  * fabricated number, but also no longer this fragile on a single token.
  */
 export async function getEthPriceUsd(): Promise<number | undefined> {
+  // On-chain first (see quoteEthPriceUsd); the recent-token DexScreener pairs
+  // below are the fallback. 10s, not 3s: the first call of a process also
+  // finds the ETH/USDG pool (~5s), which is cached from then on.
+  try {
+    const rate = await withTimeout(quoteEthPriceUsd(), 10_000, "on-chain ETH/USD quote");
+    if (rate !== undefined) {
+      cachedEthPriceUsd = { rate, at: Date.now() };
+      return rate;
+    }
+  } catch (err) {
+    logger.warn({ err: summarizeError(err) }, "on-chain ETH/USD quote failed — falling back to DexScreener pairs");
+  }
   const recentTokens = await db.token.findMany({
     where: { marketSnapshots: { some: {} } },
     orderBy: { lastSeenAt: "desc" },

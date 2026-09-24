@@ -8,10 +8,12 @@ import {
   UNIVERSAL_ROUTER_EXECUTE_ABI,
   ROUTER_RECIPIENT,
   ROBINHOOD_WETH,
+  ROBINHOOD_USDG,
+  ROBINHOOD_USDG_DECIMALS,
   SWAP_ROUTER_02_ABI,
 } from "./contracts";
-import type { PoolKey } from "./poolDiscovery";
-import { bestRouteQuote, rankedRouteQuotes, isLegacyRoute, pathFor, routeLabel, tokenSidePool, v2PathFor, v3PathFor, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
+import { discoverPool, type PoolKey } from "./poolDiscovery";
+import { bestRouteQuote, quoteRoute, rankedRouteQuotes, isLegacyRoute, pathFor, routeLabel, tokenSidePool, v2PathFor, v3PathFor, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
 import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, type V4SwapSpec } from "./swapEncoding";
 import { ensureSellApprovals, ensureSwapRouter02Approval } from "./permit2Approvals";
 import { getPublicClient, getWalletAddress, signAndSendTransaction, isWalletConfigured } from "./wallet";
@@ -290,6 +292,28 @@ export async function warmRoutes(tokenAddress: `0x${string}`): Promise<void> {
   await bestRouteQuote(getPublicClient(), tokenAddress, true, ROUTE_WARMUP_AMOUNT_WEI);
 }
 const ROUTE_WARMUP_AMOUNT_WEI = 1_000_000_000_000_000n; // 0.001 ETH
+
+/**
+ * ETH/USD on Robinhood Chain itself: what 0.01 ETH buys in the chain's
+ * native-ETH/USDG v4 pool (USDG is Paxos' $1 stablecoin), found on-chain
+ * and quoted in ~200ms. Confirmed live 2026-09-24 that the DexScreener-pair
+ * method in portfolio.ts couldn't be relied on: its calls share DexScreener's
+ * one-request-per-second queue with research and never got a slot within
+ * their 3s budget, so the portfolio showed no EVM cash at all. Undefined when
+ * the pool can't be found or the quote is implausible (a drained pool).
+ */
+export async function quoteEthPriceUsd(): Promise<number | undefined> {
+  const client = getPublicClient();
+  const pool = await discoverPool(client, ROBINHOOD_USDG);
+  if (!pool) return undefined;
+  const route: SwapRoute = { pools: [{ poolKey: pool.poolKey, poolId: pool.poolId }], hubs: [] };
+  const quote = await quoteRoute(client, route, ROBINHOOD_USDG, true, ETH_PRICE_QUOTE_WEI);
+  const rate = Number(quote.amountOut) / 10 ** ROBINHOOD_USDG_DECIMALS / (Number(ETH_PRICE_QUOTE_WEI) / 1e18);
+  return rate >= ETH_PRICE_PLAUSIBLE_USD.min && rate <= ETH_PRICE_PLAUSIBLE_USD.max ? rate : undefined;
+}
+const ETH_PRICE_QUOTE_WEI = 10_000_000_000_000_000n; // 0.01 ETH
+// Wide on purpose: only catches a drained or broken pool, never a real move.
+const ETH_PRICE_PLAUSIBLE_USD = { min: 100, max: 100_000 };
 
 export async function getWalletGasBalanceEth(): Promise<number> {
   const client = getPublicClient();

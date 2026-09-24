@@ -241,6 +241,7 @@ export const ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" as co
 // so a USDG-paired v2/v3 position stays sellable even if DexScreener stops
 // listing its pool.
 export const ROBINHOOD_USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as const;
+export const ROBINHOOD_USDG_DECIMALS = 6; // read on-chain 2026-09-24
 
 // Pools whose key carries this flag charge a fee the hook sets per swap, so
 // the key's fee field is a flag, not a fee — never compare it against
