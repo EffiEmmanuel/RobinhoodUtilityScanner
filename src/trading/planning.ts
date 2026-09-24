@@ -5,7 +5,7 @@ import { callStructured } from "../ai/provider";
 import { TradeAnalysisSchema, TRADE_ANALYSIS_JSON_SCHEMA } from "./schemas";
 import { TRADE_ANALYSIS_SYSTEM, buildTradeAnalysisPrompt } from "./prompts";
 import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesForPrompt } from "./marketAnalysis";
-import { evaluateCandidate, isBondingCurvePair, failedOnlyOnMarketAccess, type CandidateRiskResult } from "./riskEngine";
+import { evaluateCandidate, entryMarketFilter, isBondingCurvePair, failedOnlyOnMarketAccess, type CandidateRiskResult } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { getBuyEstimate, isSellable } from "./executionFacade";
 import { isLiveModeReady, warmRoutes } from "./live/liveExecutionProvider";
@@ -178,6 +178,30 @@ export async function planCandidate(candidateId: string): Promise<void> {
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     logger.info({ candidateId, reasons: rejectReasons }, "candidate rejected at planning (eligibility/utility moved since qualification)");
+    return;
+  }
+
+  // Market conditions that almost never led to a sellable 2x (see
+  // entryMarketFilter). First plan only: a watched candidate already passed it.
+  const marketFilterReasons = isFirstPlan
+    ? entryMarketFilter({
+        chain: candidate.token.chain,
+        marketCapUsd: market.primaryPair?.marketCapUsd,
+        liquidityUsd: market.primaryPair?.liquidityUsd,
+        priceChange1hPercent: market.primaryPair?.priceChange1h,
+        onBondingCurve,
+      })
+    : [];
+  if (marketFilterReasons.length > 0) {
+    await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
+      market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+      project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
+      technical,
+      walletSignals,
+      reasons: marketFilterReasons,
+    });
+    await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
+    logger.info({ candidateId, reasons: marketFilterReasons }, "candidate rejected at planning by the entry market filter");
     return;
   }
 

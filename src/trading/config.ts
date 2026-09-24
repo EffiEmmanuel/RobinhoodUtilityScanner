@@ -659,6 +659,21 @@ export const tradingConfig = {
   // DexScreener poll, no AI call.
   liquidityWaitRetryMinutes: num("LIQUIDITY_WAIT_RETRY_MINUTES", 2),
   liquidityWaitMaxHours: num("LIQUIDITY_WAIT_MAX_HOURS", 24),
+
+  // Entry market filter for the bot's own buys (riskEngine.ts's
+  // entryMarketFilter), from a 2026-09-24 study of 1,696 candidates against
+  // their tracked 24h outcomes. Share that made a sellable 2x within 24h:
+  // Robinhood rose from 2.6% to 5.7% with the filter, and from 5.0% to 11.1%
+  // on the newer half of the data alone. Of the 874 candidates it blocks,
+  // 1% ran. Tokens already up 1000%+ in the hour ran 0% of the time; 264
+  // were checked. The mcap cap is Robinhood-only: on Solana it would have
+  // skipped XPAY (38x from $138K) and TIMELESS (27x from $194K). 0 disables
+  // a check.
+  entryMaxMarketCapUsdRobinhood: num("ENTRY_MAX_MARKET_CAP_USD_ROBINHOOD", 100_000),
+  entryMaxMarketCapUsdSolana: num("ENTRY_MAX_MARKET_CAP_USD_SOLANA", 0),
+  entryMaxPriceChange1hPercent: num("ENTRY_MAX_PRICE_CHANGE_1H_PERCENT", 1000),
+  entryMinLiquidityToMarketCap: num("ENTRY_MIN_LIQUIDITY_TO_MARKET_CAP", 0.1),
+  entryMaxLiquidityToMarketCap: num("ENTRY_MAX_LIQUIDITY_TO_MARKET_CAP", 0.6),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)

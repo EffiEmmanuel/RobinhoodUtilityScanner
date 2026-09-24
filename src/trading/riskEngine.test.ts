@@ -7,6 +7,7 @@ import {
   calculatePositionSize,
   validateEntry,
   validatePosition,
+  entryMarketFilter,
   validateExit,
 } from "./riskEngine";
 import type { SizingRules } from "./strategy";
@@ -511,5 +512,32 @@ describe("validateExit", () => {
     expect(
       validateExit({ isEmergency: true, estimatedSlippageBps: 50_000 }).approved
     ).toBe(true);
+  });
+});
+
+describe("entryMarketFilter", () => {
+  const healthy = { chain: "robinhood", marketCapUsd: 40_000, liquidityUsd: 12_000, priceChange1hPercent: 80, onBondingCurve: false };
+
+  it("passes a fresh, reasonably liquid token", () => {
+    expect(entryMarketFilter(healthy)).toEqual([]);
+  });
+
+  it("caps market cap on Robinhood but not on Solana", () => {
+    expect(entryMarketFilter({ ...healthy, marketCapUsd: 150_000, liquidityUsd: 40_000 })).toHaveLength(1);
+    expect(entryMarketFilter({ ...healthy, chain: "solana", marketCapUsd: 150_000, liquidityUsd: 40_000 })).toEqual([]);
+  });
+
+  it("skips a token that already ran 1000%+ in the hour", () => {
+    expect(entryMarketFilter({ ...healthy, priceChange1hPercent: 1200 })[0]).toMatch(/already up/);
+  });
+
+  it("skips liquidity far out of line with market cap", () => {
+    expect(entryMarketFilter({ ...healthy, liquidityUsd: 2_000 })[0]).toMatch(/liquidity is 5% of market cap/);
+    expect(entryMarketFilter({ ...healthy, liquidityUsd: 30_000 })[0]).toMatch(/liquidity is 75% of market cap/);
+  });
+
+  it("never fails on missing data or a bonding curve's absent pool", () => {
+    expect(entryMarketFilter({ ...healthy, marketCapUsd: undefined, liquidityUsd: undefined, priceChange1hPercent: undefined })).toEqual([]);
+    expect(entryMarketFilter({ ...healthy, chain: "solana", liquidityUsd: 1, onBondingCurve: true })).toEqual([]);
   });
 });

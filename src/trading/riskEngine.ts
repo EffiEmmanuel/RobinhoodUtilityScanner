@@ -38,6 +38,41 @@ export function isBondingCurvePair(pair: { dexId?: string; liquidityUsd?: number
   return pair?.dexId === "pumpfun" && pair.liquidityUsd === undefined;
 }
 
+export interface EntryMarketInput {
+  chain: string;
+  marketCapUsd: number | undefined;
+  liquidityUsd: number | undefined;
+  priceChange1hPercent: number | undefined;
+  onBondingCurve: boolean;
+}
+
+/**
+ * Market conditions that, in the 2026-09-24 outcome study, marked
+ * candidates that almost never went on to a sellable 2x (see the entry*
+ * config comment for the numbers). Returns the reasons it fails; empty
+ * means pass. Missing data never fails a check, and a bonding curve has
+ * no pool liquidity to judge.
+ */
+export function entryMarketFilter(input: EntryMarketInput): string[] {
+  const reasons: string[] = [];
+  const maxMcap = input.chain === "solana" ? tradingConfig.entryMaxMarketCapUsdSolana : tradingConfig.entryMaxMarketCapUsdRobinhood;
+  if (maxMcap > 0 && input.marketCapUsd !== undefined && input.marketCapUsd >= maxMcap) {
+    reasons.push(`market cap $${Math.round(input.marketCapUsd).toLocaleString()} >= $${maxMcap.toLocaleString()} entry cap`);
+  }
+  const maxPump = tradingConfig.entryMaxPriceChange1hPercent;
+  if (maxPump > 0 && input.priceChange1hPercent !== undefined && input.priceChange1hPercent >= maxPump) {
+    reasons.push(`already up ${Math.round(input.priceChange1hPercent)}% in the last hour (>= ${maxPump}%)`);
+  }
+  if (!input.onBondingCurve && input.liquidityUsd && input.liquidityUsd > 0 && input.marketCapUsd && input.marketCapUsd > 0) {
+    const ratio = input.liquidityUsd / input.marketCapUsd;
+    const { entryMinLiquidityToMarketCap: lo, entryMaxLiquidityToMarketCap: hi } = tradingConfig;
+    if ((lo > 0 && ratio < lo) || (hi > 0 && ratio >= hi)) {
+      reasons.push(`liquidity is ${(ratio * 100).toFixed(0)}% of market cap (outside ${Math.round(lo * 100)}-${Math.round(hi * 100)}%)`);
+    }
+  }
+  return reasons;
+}
+
 export type CandidateCheck = "hardReject" | "quality" | "confidence" | "contract" | "liquidity" | "execution";
 
 export interface CandidateRiskResult {
