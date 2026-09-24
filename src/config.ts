@@ -243,9 +243,10 @@ export const config = {
   // monthly cap once. Each key should be its own Resend account, so each
   // carries its own free quota (100/day, 3,000/month); mailer.ts moves to
   // the next key when one hits a limit. Takes precedence over Brevo/SMTP.
-  // Without a verified domain, Resend only sends from its shared test
-  // address, and only to the address the account was registered with — so
-  // each account here must be registered to ALERT_EMAIL_TO.
+  // Each key sends from alerts@<its account's verified domain>, looked up
+  // at runtime. RESEND_FROM supplies the display name, and is the sender for
+  // an account with no verified domain, which Resend then only lets email
+  // its own owner.
   resendApiKeys: [...new Set([...csv("RESEND_API_KEYS"), ...csv("RESEND_API_KEY")])],
   resendFrom: str("RESEND_FROM", "UtilityScout <onboarding@resend.dev>"),
 

@@ -92,8 +92,46 @@ async function sendViaBrevo(input: MailInput): Promise<string | undefined> {
 }
 
 const RESEND_URL = "https://api.resend.com/emails";
+const RESEND_DOMAINS_URL = "https://api.resend.com/domains";
 const RESEND_TIMEOUT_MS = 15_000;
 const resendCooldownUntil = new Map<string, number>();
+const resendSenderByKey = new Map<string, string>();
+
+/**
+ * The sender a Resend account can email ALERT_EMAIL_TO from: an address on
+ * the account's first verified domain, keeping RESEND_FROM's display name.
+ * Without a verified domain, Resend only lets an account email its own
+ * owner (confirmed live 2026-09-24: the re_2Cu5 account is registered to a
+ * different Gmail than ALERT_EMAIL_TO and was refused until it sent from
+ * its own domain), so RESEND_FROM's shared test address is the fallback.
+ */
+export function resendSenderAddress(defaultFrom: string, domains: { name: string; status: string }[]): string {
+  const domain = domains.find((d) => d.status === "verified")?.name;
+  if (!domain) return defaultFrom;
+  const { name } = parseAddress(defaultFrom);
+  return name ? `${name} <alerts@${domain}>` : `alerts@${domain}`;
+}
+
+/** Looked up once per key. A 401/403 (a sending-only key can't list
+ * domains) is cached as the fallback too; a network error or 5xx isn't, so
+ * the next email looks again. */
+async function resendSenderFor(key: string): Promise<string> {
+  const cached = resendSenderByKey.get(key);
+  if (cached) return cached;
+  try {
+    const res = await fetch(RESEND_DOMAINS_URL, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(RESEND_TIMEOUT_MS) });
+    if (res.ok) {
+      const body = (await res.json()) as { data?: { name: string; status: string }[] };
+      const sender = resendSenderAddress(config.resendFrom, body.data ?? []);
+      resendSenderByKey.set(key, sender);
+      return sender;
+    }
+    if (res.status === 401 || res.status === 403) resendSenderByKey.set(key, config.resendFrom);
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Resend domain lookup failed, sending from RESEND_FROM");
+  }
+  return config.resendFrom;
+}
 
 /**
  * How long a Resend key sits out after Resend refuses it. Quota errors clear
@@ -122,19 +160,21 @@ export function resendKeyOrder(keys: string[], cooldownUntil: ReadonlyMap<string
  * so one account hitting its free-tier cap doesn't stop alerts. Uses plain
  * fetch rather than fetchJsonWithRetry: which key to try next depends on
  * Resend's error name, and fetchJsonWithRetry's errors drop the body. The
- * sender is always RESEND_FROM, since Resend refuses unverified sender
- * domains like the gmail.com one in ALERT_EMAIL_FROM.
+ * sender comes from each key's own account (resendSenderFor), never
+ * ALERT_EMAIL_FROM, since Resend refuses unverified sender domains like
+ * that gmail.com one.
  */
 async function sendViaResend(input: MailInput): Promise<string | undefined> {
   let lastError = "no keys";
   for (const key of resendKeyOrder(config.resendApiKeys, resendCooldownUntil, Date.now())) {
     const keyNumber = config.resendApiKeys.indexOf(key) + 1; // never log the key itself
     try {
+      const from = await resendSenderFor(key);
       const res = await fetch(RESEND_URL, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify({
-          from: config.resendFrom,
+          from,
           to: [input.to],
           subject: input.subject,
           text: input.text,
@@ -145,7 +185,7 @@ async function sendViaResend(input: MailInput): Promise<string | undefined> {
       const body = (await res.json().catch(() => ({}))) as { id?: string; name?: string; message?: string };
       if (res.ok) {
         resendCooldownUntil.delete(key);
-        logger.info({ to: input.to, subject: input.subject, messageId: body.id, keyNumber }, "email accepted by Resend");
+        logger.info({ to: input.to, from, subject: input.subject, messageId: body.id, keyNumber }, "email accepted by Resend");
         return body.id;
       }
       const cooldownMs = resendCooldownMs(res.status, body.name);

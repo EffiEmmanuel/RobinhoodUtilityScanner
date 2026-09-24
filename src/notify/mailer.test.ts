@@ -1,5 +1,27 @@
 import { describe, it, expect } from "vitest";
-import { resendCooldownMs, resendKeyOrder } from "./mailer";
+import { resendCooldownMs, resendKeyOrder, resendSenderAddress } from "./mailer";
+
+describe("resendSenderAddress", () => {
+  const defaultFrom = "UtilityScout <onboarding@resend.dev>";
+
+  it("sends from the account's first verified domain, keeping the display name", () => {
+    const domains = [
+      { name: "pending.example", status: "pending" },
+      { name: "effiemmanuel.com", status: "verified" },
+      { name: "getklina.app", status: "verified" },
+    ];
+    expect(resendSenderAddress(defaultFrom, domains)).toBe("UtilityScout <alerts@effiemmanuel.com>");
+  });
+
+  it("falls back to the default sender when the account has no verified domain", () => {
+    expect(resendSenderAddress(defaultFrom, [])).toBe(defaultFrom);
+    expect(resendSenderAddress(defaultFrom, [{ name: "pending.example", status: "pending" }])).toBe(defaultFrom);
+  });
+
+  it("uses a bare address when the default sender has no display name", () => {
+    expect(resendSenderAddress("onboarding@resend.dev", [{ name: "metriq.studio", status: "verified" }])).toBe("alerts@metriq.studio");
+  });
+});
 
 describe("resendCooldownMs", () => {
   it("benches a key for an hour when it hits a quota", () => {
