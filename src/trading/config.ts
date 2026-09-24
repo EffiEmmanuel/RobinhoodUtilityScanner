@@ -630,6 +630,17 @@ export const tradingConfig = {
   // hook, which a position we're already holding never would be — give that
   // more room before concluding it's permanently broken/a honeypot.
   manualBuyAndHoldSellPathGiveUpMinutes: num("MANUAL_BUY_AND_HOLD_SELL_PATH_GIVE_UP_MINUTES", 240),
+  // User directive 2026-09-24, after DESKS ran 3-4x while its manual buy was
+  // permanently REJECTED by a single non-transient execution crash (a code
+  // bug in Solana signing, not anything about the token): "it should have
+  // never been rejected." A manual buy-and-hold is an explicit human "buy
+  // this" — one failed attempt must not kill it. Each non-transient failure
+  // now retries on the normal infra cooldown (PENDING_ENTRY_INFRA_COOLDOWN_MS,
+  // 60s) up to this many times before giving up, so a bug fixed by a
+  // redeploy inside the window still gets the buy through. Bounded because a
+  // failing EVM swap can spend gas on every attempt, which is why automatic
+  // entries still reject on the first non-transient failure.
+  manualBuyAndHoldMaxExecutionFailures: num("MANUAL_BUY_AND_HOLD_MAX_EXECUTION_FAILURES", 30),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)

@@ -173,9 +173,23 @@ function transientEntryCooldownMs(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60_000;
 }
 
+// A manual buy-and-hold's non-transient execution failure that still has
+// retry budget left (see openTrade) — routed through the same cooldown-and-
+// retry handling as a transient infra error instead of a permanent reject.
+class ManualBuyRetryableError extends Error {
+  constructor(cause: unknown) {
+    super(`manual buy-and-hold execution failed, will retry: ${String(cause)}`);
+  }
+}
+
+// Keyed by candidateId. In-memory like sellPathUnavailableSince — a restart
+// just resets the budget, never shrinks it.
+const manualBuyFailureCounts = new Map<string, number>();
+
 function isTransientEntryInfraError(err: unknown): boolean {
   const message = String(err).toLowerCase();
   return (
+    err instanceof ManualBuyRetryableError ||
     isPoolDiscoveryInconclusiveError(err) ||
     isHoneypotCheckInconclusiveError(err) ||
     message.includes("too many requests") ||
@@ -773,6 +787,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       tradeLane,
       pair,
       maxSlippageBps: maxBuySlippageBps,
+      manualBuyAndHold: manualEntryOverride,
       reasons: manualEntryOverride
         ? entryResult.reasons
         : conservative
@@ -884,6 +899,7 @@ async function openTrade(input: {
   tradeLane: TradeLane;
   pair: MarketPair;
   maxSlippageBps: number;
+  manualBuyAndHold: boolean;
   reasons: string[];
 }): Promise<void> {
   const mode: TradingMode = tradingConfig.mode === "LIVE" ? TradingMode.LIVE : tradingConfig.mode === "SHADOW" ? TradingMode.SHADOW : TradingMode.PAPER;
@@ -924,10 +940,21 @@ async function openTrade(input: {
       error: String(err),
     });
     if (!transientInfra) {
+      if (input.manualBuyAndHold) {
+        const failures = (manualBuyFailureCounts.get(input.candidateId) ?? 0) + 1;
+        if (failures < tradingConfig.manualBuyAndHoldMaxExecutionFailures) {
+          if (manualBuyFailureCounts.size >= 1000) manualBuyFailureCounts.clear();
+          manualBuyFailureCounts.set(input.candidateId, failures);
+          throw new ManualBuyRetryableError(err);
+        }
+        manualBuyFailureCounts.delete(input.candidateId);
+        logger.error({ candidateId: input.candidateId, failures }, "manual buy-and-hold exhausted its execution retry budget — rejecting");
+      }
       await db.tradeCandidate.update({ where: { id: input.candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
     }
     throw err;
   }
+  manualBuyFailureCounts.delete(input.candidateId);
   recordBuySuccess();
 
   const trade = await db.trade.create({
