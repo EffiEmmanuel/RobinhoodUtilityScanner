@@ -14,6 +14,149 @@ export const UNISWAP_V4_ADDRESSES = {
 
 export const NATIVE_ETH_CURRENCY = "0x0000000000000000000000000000000000000000" as const;
 
+// Uniswap v2/v3 on Robinhood Chain (chainId 4663) — from Uniswap's own
+// deployment registry (github.com/Uniswap/contracts deployments/4663.md) and
+// docs (developers.uniswap.org v3-robinhood-chain-deployments), 2026-09-24.
+// Confirmed live the same day: this chain's v3 pools match the canonical
+// init-code hash, and BOTH Universal Routers deployed here revert on every
+// v2/v3 swap command (v4-only deployments), while SwapRouter02 executes v2
+// and v3 swaps — including full buy -> sell -> unwrap round-trips — from the
+// bot's wallet. So v2/v3 trades go through SwapRouter02; v4 stays on the
+// Universal Router.
+export const UNISWAP_LEGACY_ADDRESSES = {
+  v2Factory: "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+  // Read-only here: getAmountsOut for v2 quotes. Never approved or sent to.
+  v2Router02: "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
+  v3Factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+  quoterV2: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
+  swapRouter02: "0xcaf681a66d020601342297493863e78c959e5cb2",
+} as const;
+
+export const V2_FACTORY_ABI = [
+  {
+    type: "function",
+    name: "getPair",
+    stateMutability: "view",
+    inputs: [{ type: "address" }, { type: "address" }],
+    outputs: [{ type: "address" }],
+  },
+] as const;
+
+export const V3_FACTORY_ABI = [
+  {
+    type: "function",
+    name: "getPool",
+    stateMutability: "view",
+    inputs: [{ type: "address" }, { type: "address" }, { type: "uint24" }],
+    outputs: [{ type: "address" }],
+  },
+] as const;
+
+export const V3_STANDARD_FEE_TIERS = [100, 500, 3000, 10_000] as const;
+
+export const LEGACY_POOL_ABI = [
+  { type: "function", name: "factory", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+  { type: "function", name: "fee", stateMutability: "view", inputs: [], outputs: [{ type: "uint24" }] },
+] as const;
+
+export const QUOTER_V2_ABI = [
+  {
+    type: "function",
+    name: "quoteExactInputSingle",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "tokenIn", type: "address" },
+          { name: "tokenOut", type: "address" },
+          { name: "amountIn", type: "uint256" },
+          { name: "fee", type: "uint24" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+    ],
+    outputs: [
+      { name: "amountOut", type: "uint256" },
+      { name: "sqrtPriceX96After", type: "uint160" },
+      { name: "initializedTicksCrossed", type: "uint32" },
+      { name: "gasEstimate", type: "uint256" },
+    ],
+  },
+] as const;
+
+export const V2_ROUTER_QUOTE_ABI = [
+  {
+    type: "function",
+    name: "getAmountsOut",
+    stateMutability: "view",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "path", type: "address[]" },
+    ],
+    outputs: [{ name: "amounts", type: "uint256[]" }],
+  },
+] as const;
+
+// SwapRouter02 (router-contracts): recipient address(1) = msg.sender,
+// address(2) = the router itself; amountIn 0 = the router's whole balance.
+export const SWAP_ROUTER_02_ABI = [
+  {
+    type: "function",
+    name: "multicall",
+    stateMutability: "payable",
+    inputs: [
+      { name: "deadline", type: "uint256" },
+      { name: "data", type: "bytes[]" },
+    ],
+    outputs: [{ name: "results", type: "bytes[]" }],
+  },
+  {
+    type: "function",
+    name: "exactInputSingle",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "tokenIn", type: "address" },
+          { name: "tokenOut", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "recipient", type: "address" },
+          { name: "amountIn", type: "uint256" },
+          { name: "amountOutMinimum", type: "uint256" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "swapExactTokensForTokens",
+    stateMutability: "payable",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+      { name: "path", type: "address[]" },
+      { name: "to", type: "address" },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "unwrapWETH9",
+    stateMutability: "payable",
+    inputs: [
+      { name: "amountMinimum", type: "uint256" },
+      { name: "recipient", type: "address" },
+    ],
+    outputs: [],
+  },
+] as const;
+
 // Router allowlist (§28) — only these addresses are ever signed a transaction
 // to. Configurable via ALLOWED_ROUTER_ADDRESSES, but defaults to exactly the
 // verified Universal Router above; nothing in this codebase approves an
@@ -21,7 +164,11 @@ export const NATIVE_ETH_CURRENCY = "0x0000000000000000000000000000000000000000" 
 export function getAllowedRouterAddresses(): string[] {
   const fromEnv = process.env.ALLOWED_ROUTER_ADDRESSES;
   if (fromEnv) return fromEnv.split(",").map((a) => a.trim().toLowerCase());
-  return [UNISWAP_V4_ADDRESSES.universalRouter];
+  return [UNISWAP_V4_ADDRESSES.universalRouter, UNISWAP_LEGACY_ADDRESSES.swapRouter02];
+}
+
+export function isRouterAllowed(address: string): boolean {
+  return getAllowedRouterAddresses().includes(address.toLowerCase());
 }
 
 // Ground-truth constants confirmed against live Uniswap v4-core/v4-periphery

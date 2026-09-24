@@ -1,8 +1,8 @@
-import { createWalletClient, createPublicClient, http, fallback, type Hex } from "viem";
+import { createWalletClient, createPublicClient, decodeFunctionData, http, fallback, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../../config";
 import { logger } from "../../logger";
-import { getAllowedRouterAddresses, UNISWAP_V4_ADDRESSES } from "./contracts";
+import { getAllowedRouterAddresses, UNISWAP_V4_ADDRESSES, UNISWAP_LEGACY_ADDRESSES, ERC20_ALLOWANCE_ABI } from "./contracts";
 
 /**
  * §20 Wallet Security Requirements — this is the ONLY module in the codebase
@@ -70,9 +70,15 @@ let sendQueue: Promise<unknown> = Promise.resolve();
 // address that was never vetted. Approvals are only ever legitimately sent
 // to the token itself (approving Permit2) or to the canonical Permit2
 // address (approving the router) — never to an arbitrary spender.
-type SignPurpose = "swap" | "erc20-approve-permit2" | "permit2-approve-router";
+type SignPurpose = "swap" | "erc20-approve-permit2" | "erc20-approve-swaprouter02" | "permit2-approve-router";
 
-function assertDestinationAllowed(purpose: SignPurpose, to: `0x${string}`): void {
+// The only spenders a token approval may ever name, per purpose.
+const APPROVAL_SPENDER: Record<"erc20-approve-permit2" | "erc20-approve-swaprouter02", string> = {
+  "erc20-approve-permit2": UNISWAP_V4_ADDRESSES.permit2.toLowerCase(),
+  "erc20-approve-swaprouter02": UNISWAP_LEGACY_ADDRESSES.swapRouter02.toLowerCase(),
+};
+
+export function assertDestinationAllowed(purpose: SignPurpose, to: `0x${string}`, data: `0x${string}`): void {
   const toLower = to.toLowerCase();
   if (purpose === "swap") {
     const allowed = getAllowedRouterAddresses();
@@ -83,10 +89,27 @@ function assertDestinationAllowed(purpose: SignPurpose, to: `0x${string}`): void
     if (toLower !== UNISWAP_V4_ADDRESSES.permit2.toLowerCase()) {
       throw new Error(`refusing to sign: permit2-approve-router must target Permit2 itself, got ${to}`);
     }
+  } else {
+    // An ERC20 approval targets the token contract itself, which is
+    // legitimately dynamic (any token this app trades) — so the spender
+    // inside the calldata is what's pinned instead. Added 2026-09-24 with
+    // SwapRouter02 as a second spender: decoding it here means no bug
+    // upstream can ever approve an arbitrary contract.
+    let spender: string;
+    try {
+      const decoded = decodeFunctionData({ abi: ERC20_ALLOWANCE_ABI, data });
+      if (decoded.functionName !== "approve") throw new Error(`not approve(): ${decoded.functionName}`);
+      spender = (decoded.args[0] as string).toLowerCase();
+    } catch (err) {
+      throw new Error(`refusing to sign: ${purpose} calldata is not a plain ERC20 approve (${String(err).slice(0, 120)})`);
+    }
+    if (spender !== APPROVAL_SPENDER[purpose]) {
+      throw new Error(`refusing to sign: ${purpose} may only approve ${APPROVAL_SPENDER[purpose]}, got spender ${spender}`);
+    }
+    if (purpose === "erc20-approve-swaprouter02" && !getAllowedRouterAddresses().includes(spender)) {
+      throw new Error(`refusing to sign: SwapRouter02 is not in the router allowlist, so it may not be approved`);
+    }
   }
-  // "erc20-approve-permit2" targets the token contract itself, which is
-  // legitimately dynamic (any token this app trades) — nothing to allowlist
-  // by address; permit2Approvals.ts already hardcodes the spender as Permit2.
 }
 
 /**
@@ -97,7 +120,7 @@ function assertDestinationAllowed(purpose: SignPurpose, to: `0x${string}`): void
  * kind of mistake this rule exists to prevent.
  */
 export function signAndSendTransaction(tx: { to: `0x${string}`; data: `0x${string}`; value: bigint; purpose: SignPurpose }): Promise<`0x${string}`> {
-  assertDestinationAllowed(tx.purpose, tx.to);
+  assertDestinationAllowed(tx.purpose, tx.to, tx.data);
   const task = sendQueue.then(async () => {
     const acct = getAccount();
     const client = createWalletClient({ account: acct, chain: robinhoodChain, transport: rpcTransport, pollingInterval: FAST_CHAIN_POLLING_INTERVAL_MS });

@@ -11,6 +11,14 @@ import {
   V4_QUOTER_ABI,
   MAX_REASONABLE_POOL_FEE,
   DYNAMIC_FEE_FLAG,
+  UNISWAP_LEGACY_ADDRESSES,
+  LEGACY_POOL_ABI,
+  QUOTER_V2_ABI,
+  V2_ROUTER_QUOTE_ABI,
+  V2_FACTORY_ABI,
+  V3_FACTORY_ABI,
+  V3_STANDARD_FEE_TIERS,
+  isRouterAllowed,
 } from "./contracts";
 import { discoverPool, isPoolDiscoveryInconclusiveError, type PoolKey } from "./poolDiscovery";
 import type { PathKey } from "./swapEncoding";
@@ -44,8 +52,25 @@ export interface SwapRoute {
   viaWeth?: boolean;
 }
 
+/**
+ * A Uniswap v2 or v3 WETH/token pool, traded through SwapRouter02 (the
+ * Universal Routers on this chain can't do v2/v3 — see contracts.ts). The ETH
+ * side is always WETH, wrapped/unwrapped by the router.
+ */
+export interface LegacyRoute {
+  venue: "v2" | "v3";
+  pool: `0x${string}`;
+  fee?: number; // v3 only
+}
+
+export type AnyRoute = SwapRoute | LegacyRoute;
+
+export function isLegacyRoute(route: AnyRoute): route is LegacyRoute {
+  return "venue" in route;
+}
+
 export interface RouteQuote {
-  route: SwapRoute;
+  route: AnyRoute;
   amountOut: bigint;
   gasEstimateUnits: bigint;
 }
@@ -109,7 +134,10 @@ export function pathFor(
   return { currencyIn: sequence[0], currencyOut: sequence[sequence.length - 1], path };
 }
 
-export function routeLabel(route: SwapRoute, hubSymbols: Map<string, string> = new Map()): string {
+export function routeLabel(route: AnyRoute, hubSymbols: Map<string, string> = new Map()): string {
+  if (isLegacyRoute(route)) {
+    return `ETH(wrap)→WETH→token [${route.venue}${route.fee !== undefined ? ` ${route.fee / 10_000}%` : ""}]`;
+  }
   return [route.viaWeth ? "ETH(wrap)→WETH" : "ETH", ...route.hubs.map((h) => hubSymbols.get(h.toLowerCase()) ?? `${h.slice(0, 6)}…`), "token"].join("→");
 }
 
@@ -254,8 +282,23 @@ const hubLegCache = new Map<string, { at: number; legs: RoutePool[] }>();
 const hubSymbols = new Map<string, string>();
 
 /** A currency's v4 pools as DexScreener lists them (pairAddress is the 32-byte poolId for v4), keys resolved on-chain. */
+// One DexScreener read per currency serves both the v4 and the v2/v3 pool
+// listings (and concurrent callers share the in-flight request).
+const MARKET_TTL_MS = 60_000;
+const marketCache = new Map<string, { at: number; market: Promise<Awaited<ReturnType<typeof fetchMarketForToken>>> }>();
+
+function cachedMarket(currency: `0x${string}`) {
+  const key = currency.toLowerCase();
+  const hit = marketCache.get(key);
+  if (hit && Date.now() - hit.at < MARKET_TTL_MS) return hit.market;
+  const market = fetchMarketForToken("robinhood", currency);
+  marketCache.set(key, { at: Date.now(), market });
+  market.catch(() => marketCache.delete(key));
+  return market;
+}
+
 async function listV4Pools(client: PublicClient, currency: `0x${string}`): Promise<TokenPool[]> {
-  const market = await fetchMarketForToken("robinhood", currency);
+  const market = await cachedMarket(currency);
   const v4Pairs = market.pairs
     .filter((p) => p.pairAddress?.length === 66)
     .sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))
@@ -415,6 +458,104 @@ export async function candidateRoutes(
   return routes;
 }
 
+// A pool's factory and fee never change — classified once per process.
+const legacyPoolKind = new Map<string, { venue: "v2" | "v3"; fee?: number } | null>();
+const MAX_LEGACY_POOLS_PER_TOKEN = 3;
+
+async function classifyLegacyPool(client: PublicClient, pool: `0x${string}`): Promise<{ venue: "v2" | "v3"; fee?: number } | null> {
+  const key = pool.toLowerCase();
+  if (legacyPoolKind.has(key)) return legacyPoolKind.get(key) ?? null;
+  const factory = (await client.readContract({ address: pool, abi: LEGACY_POOL_ABI, functionName: "factory" })).toLowerCase();
+  let kind: { venue: "v2" | "v3"; fee?: number } | null = null;
+  if (factory === UNISWAP_LEGACY_ADDRESSES.v3Factory) {
+    kind = { venue: "v3", fee: await client.readContract({ address: pool, abi: LEGACY_POOL_ABI, functionName: "fee" }) };
+  } else if (factory === UNISWAP_LEGACY_ADDRESSES.v2Factory) {
+    kind = { venue: "v2" };
+  }
+  legacyPoolKind.set(key, kind);
+  return kind;
+}
+
+// Straight from Uniswap's own v2/v3 factories — independent of DexScreener,
+// which confirmed 2026-09-24 drops quiet pools entirely (DEED, PAWSINU: live
+// v2 pools, zero listed pairs). That matters most for an open position whose
+// pool stops being listed: it still has to be sellable.
+const ON_CHAIN_LEGACY_TTL_MS = 10 * 60_000;
+const onChainLegacyCache = new Map<string, { at: number; routes: LegacyRoute[] }>();
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+async function onChainLegacyRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
+  const key = token.toLowerCase();
+  const cached = onChainLegacyCache.get(key);
+  if (cached && Date.now() - cached.at < ON_CHAIN_LEGACY_TTL_MS) return cached.routes;
+  const [v2, ...v3] = await Promise.allSettled([
+    client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v2Factory as `0x${string}`, abi: V2_FACTORY_ABI, functionName: "getPair", args: [token, ROBINHOOD_WETH] }),
+    ...V3_STANDARD_FEE_TIERS.map((fee) =>
+      client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v3Factory as `0x${string}`, abi: V3_FACTORY_ABI, functionName: "getPool", args: [token, ROBINHOOD_WETH, fee] })
+    ),
+  ]);
+  const routes: LegacyRoute[] = [];
+  if (v2.status === "fulfilled" && !same(v2.value, ZERO_ADDRESS)) routes.push({ venue: "v2", pool: v2.value });
+  v3.forEach((r, i) => {
+    if (r.status === "fulfilled" && !same(r.value, ZERO_ADDRESS)) routes.push({ venue: "v3", pool: r.value, fee: V3_STANDARD_FEE_TIERS[i] });
+  });
+  onChainLegacyCache.set(key, { at: Date.now(), routes });
+  return routes;
+}
+
+/**
+ * The token's Uniswap v2/v3 WETH pools — only when SwapRouter02 is in the
+ * router allowlist, so a route is never chosen that signing would refuse.
+ */
+async function legacyRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
+  if (!isRouterAllowed(UNISWAP_LEGACY_ADDRESSES.swapRouter02)) return [];
+  const [listed, onChain] = await Promise.allSettled([listedLegacyRoutes(client, token), onChainLegacyRoutes(client, token)]);
+  const routes: LegacyRoute[] = [];
+  for (const r of [...(listed.status === "fulfilled" ? listed.value : []), ...(onChain.status === "fulfilled" ? onChain.value : [])]) {
+    if (!routes.some((existing) => same(existing.pool, r.pool))) routes.push(r);
+  }
+  return routes;
+}
+
+async function listedLegacyRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
+  const market = await cachedMarket(token);
+  const pairs = market.pairs
+    .filter(
+      (p) =>
+        p.pairAddress?.length === 42 &&
+        ((same(p.baseTokenAddress ?? "", token) && same(p.quoteTokenAddress ?? "", ROBINHOOD_WETH)) ||
+          (same(p.quoteTokenAddress ?? "", token) && same(p.baseTokenAddress ?? "", ROBINHOOD_WETH)))
+    )
+    .sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))
+    .slice(0, MAX_LEGACY_POOLS_PER_TOKEN);
+  const kinds = await Promise.allSettled(pairs.map((p) => classifyLegacyPool(client, p.pairAddress as `0x${string}`)));
+  const routes: LegacyRoute[] = [];
+  kinds.forEach((k, i) => {
+    if (k.status === "fulfilled" && k.value) routes.push({ ...k.value, pool: pairs[i].pairAddress as `0x${string}` });
+  });
+  return routes;
+}
+
+export async function quoteLegacyRoute(client: PublicClient, route: LegacyRoute, token: `0x${string}`, isBuy: boolean, amountIn: bigint): Promise<RouteQuote> {
+  const [tokenIn, tokenOut] = isBuy ? [ROBINHOOD_WETH, token] : [token, ROBINHOOD_WETH];
+  if (route.venue === "v3") {
+    const { result } = await client.simulateContract({
+      address: UNISWAP_LEGACY_ADDRESSES.quoterV2 as `0x${string}`,
+      abi: QUOTER_V2_ABI,
+      functionName: "quoteExactInputSingle",
+      args: [{ tokenIn, tokenOut, amountIn, fee: route.fee ?? 0, sqrtPriceLimitX96: 0n }],
+    });
+    return { route, amountOut: result[0], gasEstimateUnits: result[3] };
+  }
+  const amounts = await client.readContract({
+    address: UNISWAP_LEGACY_ADDRESSES.v2Router02 as `0x${string}`,
+    abi: V2_ROUTER_QUOTE_ABI,
+    functionName: "getAmountsOut",
+    args: [amountIn, [tokenIn, tokenOut]],
+  });
+  return { route, amountOut: amounts[amounts.length - 1], gasEstimateUnits: 0n };
+}
+
 export async function quoteRoute(
   client: PublicClient,
   route: SwapRoute,
@@ -451,24 +592,34 @@ export async function bestRouteQuote(
   options: { allowHighFeePools?: boolean } = {}
 ): Promise<RouteQuote | undefined> {
   const token = getAddress(tokenAddress);
-  const routes = await candidateRoutes(client, token, options);
-  if (routes.length === 0) return undefined;
+  const [v4Result, legacyResult] = await Promise.allSettled([candidateRoutes(client, token, options), legacyRoutes(client, token)]);
+  const v4Routes = v4Result.status === "fulfilled" ? v4Result.value : [];
+  const legacy = legacyResult.status === "fulfilled" ? legacyResult.value : [];
+  if (legacyResult.status === "rejected") {
+    logger.warn({ token, err: String(legacyResult.reason).slice(0, 200) }, "listing v2/v3 routes failed — quoting v4 routes only");
+  }
+  if (v4Routes.length === 0 && legacy.length === 0) {
+    // "Couldn't check" must never read as "no route" — see candidateRoutes.
+    if (v4Result.status === "rejected") throw v4Result.reason;
+    return undefined;
+  }
 
-  const quotes = await Promise.allSettled(routes.map((route) => quoteRoute(client, route, token, isBuy, amountIn)));
+  const quotes = await Promise.allSettled([
+    ...v4Routes.map((route) => quoteRoute(client, route, token, isBuy, amountIn)),
+    ...legacy.map((route) => quoteLegacyRoute(client, route, token, isBuy, amountIn)),
+  ]);
   let best: RouteQuote | undefined;
   for (const q of quotes) {
     if (q.status === "fulfilled" && q.value.amountOut > 0n && (!best || q.value.amountOut > best.amountOut)) best = q.value;
   }
+  const candidates = v4Routes.length + legacy.length;
   if (!best) {
     const firstError = quotes.find((q): q is PromiseRejectedResult => q.status === "rejected");
-    logger.warn({ token, routes: routes.length, err: firstError ? String(firstError.reason).slice(0, 240) : undefined }, "no candidate route produced a quote");
+    logger.warn({ token, routes: candidates, err: firstError ? String(firstError.reason).slice(0, 240) : undefined }, "no candidate route produced a quote");
     return undefined;
   }
-  if (best.route.pools.length > 1) {
-    logger.info(
-      { token, route: routeLabel(best.route, hubSymbols), candidates: routes.length, direction: isBuy ? "buy" : "sell" },
-      "best route is multi-hop"
-    );
+  if (isLegacyRoute(best.route) || best.route.pools.length > 1 || best.route.viaWeth) {
+    logger.info({ token, route: routeLabel(best.route, hubSymbols), candidates, direction: isBuy ? "buy" : "sell" }, "best route is not a direct ETH pool");
   }
   return best;
 }

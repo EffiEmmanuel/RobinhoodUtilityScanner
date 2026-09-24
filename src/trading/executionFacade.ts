@@ -11,7 +11,7 @@ import { isLiveModeReady, executeLiveBuy, executeLiveSell, getLiveQuote } from "
 import type { PoolKey } from "./live/poolDiscovery";
 import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
-import { ensureSellApprovals } from "./live/permit2Approvals";
+import { ensureSellApprovals, ensureSwapRouter02Approval } from "./live/permit2Approvals";
 import { recordExecutionQuality } from "./executionQuality";
 import { isSolanaLiveModeReady, getSolanaLiveQuote, executeSolanaLiveBuy, executeSolanaLiveSell, canSolanaWalletTransferToken } from "./live/solana/executionProvider";
 import { getSolanaConnection, getSolanaWalletPublicKey } from "./live/solana/wallet";
@@ -84,7 +84,7 @@ const SUSPICIOUS_PRICE_IMPACT_PERCENT = 25;
 function logSuspiciousQuote(
   direction: "buy" | "sell",
   tokenAddress: string,
-  quote: { poolKey: PoolKey; poolId: string; poolLiquidity?: bigint; routeLabel?: string },
+  quote: { poolKey?: PoolKey; poolId: string; poolLiquidity?: bigint; routeLabel?: string },
   priceImpactPercent: number,
   spotPriceUsd: number,
   effectivePriceUsd: number
@@ -99,9 +99,9 @@ function logSuspiciousQuote(
       effectivePriceUsd,
       route: quote.routeLabel,
       poolId: quote.poolId,
-      fee: quote.poolKey.fee,
-      tickSpacing: quote.poolKey.tickSpacing,
-      hooks: quote.poolKey.hooks,
+      fee: quote.poolKey?.fee,
+      tickSpacing: quote.poolKey?.tickSpacing,
+      hooks: quote.poolKey?.hooks,
       poolLiquidity: quote.poolLiquidity?.toString(),
     },
     "quote has suspiciously high price impact — likely quoted against the wrong pool or one with too little real depth"
@@ -284,7 +284,10 @@ export async function executeBuyFill(
   // no regression for long holds, but every fast flip (most of today's
   // trades closed within minutes) now exits without an approval on the
   // critical path at all.
-  ensureSellApprovals(token, boughtRaw).catch((err) =>
+  // Pre-approve for the router a sell of this position will most likely use:
+  // the same venue it was bought through (SwapRouter02 for v2/v3 pools).
+  const preApproval = result.venue === "v4" ? ensureSellApprovals(token, boughtRaw) : ensureSwapRouter02Approval(token, boughtRaw);
+  preApproval.catch((err) =>
     logger.warn({ tokenAddress, err: String(err) }, "pre-approving this position for a future sell failed — will retry at sell time instead")
   );
 

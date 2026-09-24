@@ -1,20 +1,29 @@
 import { encodeAbiParameters, encodeFunctionData } from "viem";
 import { logger } from "../../logger";
 import { tradingConfig } from "../config";
-import { UNISWAP_V4_ADDRESSES, UNIVERSAL_ROUTER_COMMANDS, UNIVERSAL_ROUTER_EXECUTE_ABI, ROUTER_RECIPIENT } from "./contracts";
+import {
+  UNISWAP_V4_ADDRESSES,
+  UNISWAP_LEGACY_ADDRESSES,
+  UNIVERSAL_ROUTER_COMMANDS,
+  UNIVERSAL_ROUTER_EXECUTE_ABI,
+  ROUTER_RECIPIENT,
+  ROBINHOOD_WETH,
+  SWAP_ROUTER_02_ABI,
+} from "./contracts";
 import type { PoolKey } from "./poolDiscovery";
-import { bestRouteQuote, pathFor, routeLabel, tokenSidePool, zeroForOneFor, type SwapRoute } from "./routing";
+import { bestRouteQuote, isLegacyRoute, pathFor, routeLabel, tokenSidePool, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
 import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, type V4SwapSpec } from "./swapEncoding";
-import { ensureSellApprovals } from "./permit2Approvals";
+import { ensureSellApprovals, ensureSwapRouter02Approval } from "./permit2Approvals";
 import { getPublicClient, getWalletAddress, signAndSendTransaction, isWalletConfigured } from "./wallet";
 
 const SWAP_DEADLINE_SECONDS = 300; // 5 minutes — matches the plan/entry revalidation cadence
 
 export interface LiveQuote {
-  route: SwapRoute;
+  route: AnyRoute;
   routeLabel: string;
   // The pool holding the token itself (the last hop of a buy) — diagnostics.
-  poolKey: PoolKey;
+  // A v2/v3 pool has an address instead of a v4 PoolKey.
+  poolKey?: PoolKey;
   poolId: `0x${string}`;
   poolLiquidity?: bigint;
   amountOut: bigint;
@@ -37,15 +46,10 @@ export async function getLiveQuote(
     logger.warn({ tokenAddress }, "no live V4 route found for this token — cannot quote");
     return undefined;
   }
+  const base = { route: best.route, routeLabel: routeLabel(best.route), amountOut: best.amountOut, gasEstimateUnits: best.gasEstimateUnits };
+  if (isLegacyRoute(best.route)) return { ...base, poolId: best.route.pool };
   const pool = tokenSidePool(best.route);
-  return {
-    route: best.route,
-    routeLabel: routeLabel(best.route),
-    poolKey: pool.poolKey,
-    poolId: pool.poolId,
-    amountOut: best.amountOut,
-    gasEstimateUnits: best.gasEstimateUnits,
-  };
+  return { ...base, poolKey: pool.poolKey, poolId: pool.poolId };
 }
 
 export interface LiveSwapResult {
@@ -54,6 +58,7 @@ export interface LiveSwapResult {
   amountOutMinimum: bigint;
   approvalTxHashes: string[];
   routeLabel: string;
+  venue: "v4" | "v2" | "v3";
 }
 
 export function routerCommands(...commands: number[]): `0x${string}` {
@@ -114,6 +119,52 @@ function buildExecuteCalldata(route: SwapRoute, token: `0x${string}`, isBuy: boo
 }
 
 /**
+ * SwapRouter02 multicall for a v2/v3 WETH pool. Buys pay with msg.value
+ * (the router wraps it) and deliver the token straight to the wallet; sells
+ * pull the token (ERC20 approval), leave the WETH with the router, and
+ * unwrap it to the wallet — the slippage floor is enforced on the swap and
+ * again on the unwrap.
+ */
+export function buildLegacyCalldata(
+  route: LegacyRoute,
+  token: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  amountOutMinimum: bigint,
+  wallet: `0x${string}`
+): `0x${string}` {
+  const [tokenIn, tokenOut] = isBuy ? [ROBINHOOD_WETH, token] : [token, ROBINHOOD_WETH];
+  const recipient = isBuy ? wallet : ROUTER_RECIPIENT.ADDRESS_THIS;
+  const swap =
+    route.venue === "v3"
+      ? encodeFunctionData({
+          abi: SWAP_ROUTER_02_ABI,
+          functionName: "exactInputSingle",
+          args: [{ tokenIn, tokenOut, fee: route.fee ?? 0, recipient, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n }],
+        })
+      : encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "swapExactTokensForTokens", args: [amountIn, amountOutMinimum, [tokenIn, tokenOut], recipient] });
+  const calls = isBuy ? [swap] : [swap, encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "unwrapWETH9", args: [amountOutMinimum, wallet] })];
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + SWAP_DEADLINE_SECONDS);
+  return encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "multicall", args: [deadline, calls] });
+}
+
+/** Which router to send to and the exact calldata, for whichever kind of route won. */
+function transactionFor(route: AnyRoute, token: `0x${string}`, isBuy: boolean, amountIn: bigint, amountOutMinimum: bigint) {
+  if (isLegacyRoute(route)) {
+    return {
+      to: UNISWAP_LEGACY_ADDRESSES.swapRouter02 as `0x${string}`,
+      data: buildLegacyCalldata(route, token, isBuy, amountIn, amountOutMinimum, getWalletAddress()),
+      venue: route.venue,
+    };
+  }
+  return {
+    to: UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`,
+    data: buildExecuteCalldata(route, token, isBuy, amountIn, amountOutMinimum),
+    venue: "v4" as const,
+  };
+}
+
+/**
  * §27 transaction preflight's "simulation successful?" check — an `eth_call`
  * dry-run of the EXACT calldata that would be sent, before it's ever signed.
  * A revert here means DO NOT SIGN, full stop.
@@ -141,8 +192,8 @@ export async function dryRunLiveBuy(
   const quote = await getLiveQuote(tokenAddress, true, amountInWei);
   if (!quote) return { ok: false, error: "no route" };
   const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const data = buildExecuteCalldata(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
-  const sim = await simulateExecute(UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`, data, amountInWei);
+  const tx = transactionFor(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
+  const sim = await simulateExecute(tx.to, tx.data, amountInWei);
   return { ok: sim.ok, routeLabel: quote.routeLabel, amountOut: quote.amountOut, error: sim.error };
 }
 
@@ -153,16 +204,16 @@ export async function executeLiveBuy(tokenAddress: `0x${string}`, amountInWei: b
   if (!quote) throw new Error(`no live quote available for ${tokenAddress}`);
 
   const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const data = buildExecuteCalldata(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
+  const tx = transactionFor(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
 
-  const sim = await simulateExecute(UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`, data, amountInWei);
+  const sim = await simulateExecute(tx.to, tx.data, amountInWei);
   if (!sim.ok) throw new Error(`buy simulation reverted (route ${quote.routeLabel}), refusing to sign: ${sim.error}`);
 
-  const txHash = await signAndSendTransaction({ to: UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`, data, value: amountInWei, purpose: "swap" });
-  return { txHash, amountIn: amountInWei, amountOutMinimum, approvalTxHashes: [], routeLabel: quote.routeLabel };
+  const txHash = await signAndSendTransaction({ to: tx.to, data: tx.data, value: amountInWei, purpose: "swap" });
+  return { txHash, amountIn: amountInWei, amountOutMinimum, approvalTxHashes: [], routeLabel: quote.routeLabel, venue: tx.venue };
 }
 
-/** Sell: pay with the token via Permit2 (approvals topped up only if actually insufficient). */
+/** Sell: pay with the token (approvals topped up only if actually insufficient). */
 export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: bigint, maxSlippageBps: number): Promise<LiveSwapResult> {
   if (!isWalletConfigured()) throw new Error("BOT_WALLET_PRIVATE_KEY is not set — cannot execute a live sell");
   // Exits may route through a predatory-fee pool when it's the only
@@ -170,16 +221,20 @@ export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: 
   const quote = await getLiveQuote(tokenAddress, false, tokenAmount, { allowHighFeePools: true });
   if (!quote) throw new Error(`no live quote available for ${tokenAddress}`);
 
-  const approvalTxHashes = await ensureSellApprovals(tokenAddress, tokenAmount);
+  // v2/v3 (SwapRouter02) pulls the token with a plain ERC20 approval; v4
+  // (Universal Router) pulls it through Permit2.
+  const approvalTxHashes = isLegacyRoute(quote.route)
+    ? await ensureSwapRouter02Approval(tokenAddress, tokenAmount)
+    : await ensureSellApprovals(tokenAddress, tokenAmount);
 
   const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const data = buildExecuteCalldata(quote.route, tokenAddress, false, tokenAmount, amountOutMinimum);
+  const tx = transactionFor(quote.route, tokenAddress, false, tokenAmount, amountOutMinimum);
 
-  const sim = await simulateExecute(UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`, data, 0n);
+  const sim = await simulateExecute(tx.to, tx.data, 0n);
   if (!sim.ok) throw new Error(`sell simulation reverted (route ${quote.routeLabel}), refusing to sign: ${sim.error}`);
 
-  const txHash = await signAndSendTransaction({ to: UNISWAP_V4_ADDRESSES.universalRouter as `0x${string}`, data, value: 0n, purpose: "swap" });
-  return { txHash, amountIn: tokenAmount, amountOutMinimum, approvalTxHashes, routeLabel: quote.routeLabel };
+  const txHash = await signAndSendTransaction({ to: tx.to, data: tx.data, value: 0n, purpose: "swap" });
+  return { txHash, amountIn: tokenAmount, amountOutMinimum, approvalTxHashes, routeLabel: quote.routeLabel, venue: tx.venue };
 }
 
 export async function getWalletGasBalanceEth(): Promise<number> {
