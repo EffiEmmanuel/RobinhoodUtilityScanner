@@ -271,7 +271,9 @@ interface TokenPool {
   liquidityUsd: number;
 }
 
-const TOKEN_POOLS_TTL_MS = 60_000;
+// A token's set of pools changes rarely and every trade still gets a fresh
+// quote, so discovery can outlive the planning -> entry gap (often minutes).
+const TOKEN_POOLS_TTL_MS = 5 * 60_000;
 const HUB_LEG_TTL_MS = 10 * 60_000;
 // Deepest few of a token's listed pools — a long tail of dust pools only
 // costs RPC calls and quote time, it never wins a best-route comparison.
@@ -284,7 +286,7 @@ const hubSymbols = new Map<string, string>();
 /** A currency's v4 pools as DexScreener lists them (pairAddress is the 32-byte poolId for v4), keys resolved on-chain. */
 // One DexScreener read per currency serves both the v4 and the v2/v3 pool
 // listings (and concurrent callers share the in-flight request).
-const MARKET_TTL_MS = 60_000;
+const MARKET_TTL_MS = 5 * 60_000;
 const marketCache = new Map<string, { at: number; market: Promise<Awaited<ReturnType<typeof fetchMarketForToken>>> }>();
 
 function cachedMarket(currency: `0x${string}`) {
@@ -369,7 +371,10 @@ async function hubLegs(client: PublicClient, hub: `0x${string}`): Promise<RouteP
 // 7h after research), and when DexScreener already listed routes the scan
 // only gets a short grace period; it keeps running and fills
 // poolDiscovery.ts's own cache for the next quote either way.
-const DIRECT_MISS_RETRY_MS = 5 * 60_000;
+// Long, because a held position with no direct ETH pool would otherwise
+// re-run the slow scan on every monitor tick after it expired — latency on
+// the exit path and RPC quota burned for a pool that rarely appears mid-hold.
+const DIRECT_MISS_RETRY_MS = 30 * 60_000;
 const DIRECT_DISCOVERY_GRACE_MS = 1_500;
 const directMissUntil = new Map<string, number>();
 

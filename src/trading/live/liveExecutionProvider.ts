@@ -237,6 +237,18 @@ export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: 
   return { txHash, amountIn: tokenAmount, amountOutMinimum, approvalTxHashes, routeLabel: quote.routeLabel, venue: tx.venue };
 }
 
+/**
+ * Resolves and caches every route to a token (pool keys, hub legs, v2/v3
+ * pools, and misses) ahead of an entry — the slow, one-off part of routing —
+ * so the entry itself only has to re-quote (measured 2026-09-24: ~0.6-1.6s
+ * warm vs 4-17s cold). Quote-only: never sends anything, never records an
+ * execution-quality row.
+ */
+export async function warmRoutes(tokenAddress: `0x${string}`): Promise<void> {
+  await bestRouteQuote(getPublicClient(), tokenAddress, true, ROUTE_WARMUP_AMOUNT_WEI);
+}
+const ROUTE_WARMUP_AMOUNT_WEI = 1_000_000_000_000_000n; // 0.001 ETH
+
 export async function getWalletGasBalanceEth(): Promise<number> {
   const client = getPublicClient();
   const balance = await client.getBalance({ address: getWalletAddress() });

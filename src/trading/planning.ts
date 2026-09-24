@@ -8,6 +8,7 @@ import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesF
 import { evaluateCandidate, isBondingCurvePair, failedOnlyOnLiquidity, type CandidateRiskResult } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { getBuyEstimate, isSellable } from "./executionFacade";
+import { isLiveModeReady, warmRoutes } from "./live/liveExecutionProvider";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
 import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
@@ -43,6 +44,13 @@ export async function planCandidate(candidateId: string): Promise<void> {
   }
 
   const strategy = await getActiveStrategyVersion();
+  // Warm every trade route to this token now, while nothing is racing, so a
+  // later entry only has to re-quote (see live/liveExecutionProvider.ts).
+  if (candidate.token.chain !== "solana" && isLiveModeReady()) {
+    void warmRoutes(candidate.token.address as `0x${string}`).catch((err) =>
+      logger.debug({ candidateId, err: String(err) }, "route warm-up failed — the entry will discover routes itself")
+    );
+  }
   const market = await pollCandidateMarket(candidate.tokenId, candidate.token.chain, candidate.token.address);
   const technical = await computeTechnicalFeatures(candidate.tokenId, market.primaryPair, candidate.token.address, candidate.token.chain);
   const walletSignals = await getWalletSignalsForToken(candidate.tokenId, candidate.token.address);

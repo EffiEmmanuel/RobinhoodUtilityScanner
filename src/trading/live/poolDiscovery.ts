@@ -280,22 +280,37 @@ export async function discoverPool(
   return undefined;
 }
 
+// Measured 2026-09-24: scanning one chunk at a time took ~15s for a token with
+// no ETH pool at all, on the trading critical path. Same chunks, same
+// newest-first answer, a few requests at a time — kept to 3, since 6 at once
+// tripped the RPC provider's rate limit in testing the same day (which puts
+// the token into poolDiscovery's infra cooldown).
+const LOG_SCAN_PARALLEL = 3;
+
 async function scanInitializeLogsBackward(client: PublicClient, token: `0x${string}`) {
   const latest = await client.getBlockNumber();
-  let toBlock = latest;
-
-  for (let chunk = 0; chunk < LOG_SCAN_MAX_CHUNKS; chunk++) {
-    const fromBlock = toBlock > LOG_SCAN_CHUNK_BLOCKS ? toBlock - LOG_SCAN_CHUNK_BLOCKS : 0n;
-    const logs = await client.getLogs({
-      address: UNISWAP_V4_ADDRESSES.poolManager as `0x${string}`,
-      event: POOL_MANAGER_ABI[0],
-      args: { currency0: NATIVE_ETH_CURRENCY, currency1: token },
-      fromBlock,
-      toBlock,
-    });
-    if (logs.length > 0) return logs;
-    if (fromBlock === 0n) break;
-    toBlock = fromBlock - 1n;
+  for (let first = 0; first < LOG_SCAN_MAX_CHUNKS; first += LOG_SCAN_PARALLEL) {
+    const ranges: { fromBlock: bigint; toBlock: bigint }[] = [];
+    for (let i = first; i < Math.min(first + LOG_SCAN_PARALLEL, LOG_SCAN_MAX_CHUNKS); i++) {
+      const toBlock = latest - BigInt(i) * (LOG_SCAN_CHUNK_BLOCKS + 1n);
+      if (toBlock < 0n) break;
+      ranges.push({ fromBlock: toBlock > LOG_SCAN_CHUNK_BLOCKS ? toBlock - LOG_SCAN_CHUNK_BLOCKS : 0n, toBlock });
+    }
+    if (ranges.length === 0) break;
+    const batches = await Promise.all(
+      ranges.map((range) =>
+        client.getLogs({
+          address: UNISWAP_V4_ADDRESSES.poolManager as `0x${string}`,
+          event: POOL_MANAGER_ABI[0],
+          args: { currency0: NATIVE_ETH_CURRENCY, currency1: token },
+          ...range,
+        })
+      )
+    );
+    // Newest chunk with a match wins, exactly as the sequential scan did.
+    const found = batches.find((logs) => logs.length > 0);
+    if (found) return found;
+    if (ranges[ranges.length - 1].fromBlock === 0n) break;
   }
   return [];
 }
