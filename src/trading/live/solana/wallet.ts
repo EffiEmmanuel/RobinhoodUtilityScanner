@@ -72,8 +72,34 @@ const ALLOWED_PROGRAM_IDS = new Set([
   ComputeBudgetProgram.programId.toBase58(),
 ]);
 
-function assertTransactionAllowed(tx: VersionedTransaction): void {
-  const keys = tx.message.getAccountKeys();
+/**
+ * Confirmed live 2026-09-24: every real Jupiter swap is a v0 transaction with
+ * address-lookup-table accounts, and this hadn't been resolving them —
+ * getAccountKeys() throws "address table lookups were not resolved" for
+ * exactly that case (the same bug already fixed on the discovery-decoding
+ * side, see solanaOnchainDiscovery.ts), so this check crashed on essentially
+ * every live buy/sell before it could even reach a signature. Unlike a
+ * CONFIRMED transaction (which carries its resolved tx.meta.loadedAddresses),
+ * this one is unsigned and not yet sent, so the lookup tables have to be
+ * fetched from the chain directly.
+ */
+async function assertTransactionAllowed(tx: VersionedTransaction, conn: Connection): Promise<void> {
+  const lookups = tx.message.addressTableLookups;
+  let accountKeysFromLookups: { writable: PublicKey[]; readonly: PublicKey[] } | undefined;
+  if (lookups.length > 0) {
+    const writable: PublicKey[] = [];
+    const readonly: PublicKey[] = [];
+    for (const lookup of lookups) {
+      const { value: lookupTable } = await conn.getAddressLookupTable(lookup.accountKey);
+      if (!lookupTable) {
+        throw new Error(`refusing to sign: address lookup table ${lookup.accountKey.toBase58()} could not be resolved`);
+      }
+      for (const index of lookup.writableIndexes) writable.push(lookupTable.state.addresses[index]);
+      for (const index of lookup.readonlyIndexes) readonly.push(lookupTable.state.addresses[index]);
+    }
+    accountKeysFromLookups = { writable, readonly };
+  }
+  const keys = tx.message.getAccountKeys({ accountKeysFromLookups });
   for (const ix of tx.message.compiledInstructions) {
     const programId = keys.get(ix.programIdIndex);
     if (!programId) throw new Error("refusing to sign: transaction references an account index outside its own key table");
@@ -98,9 +124,9 @@ let sendQueue: Promise<unknown> = Promise.resolve();
  * signs, sends, and confirms it.
  */
 export function signAndSendSolanaTransaction(tx: VersionedTransaction): Promise<string> {
-  assertTransactionAllowed(tx);
   const task = sendQueue.then(async () => {
     const conn = getSolanaConnection();
+    await assertTransactionAllowed(tx, conn);
     const kp = getKeypair();
     tx.sign([kp]);
     const signature = await conn.sendTransaction(tx, { maxRetries: 3 });
