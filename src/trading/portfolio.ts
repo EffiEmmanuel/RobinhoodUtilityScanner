@@ -88,14 +88,13 @@ export async function getEthPriceUsd(): Promise<number | undefined> {
       // individually keeps a single slow one from blocking the rest; a
       // timeout is treated exactly like any other fetch failure below.
       const market = await withTimeout(fetchMarketForToken(token.chain, token.address), 3000, "ETH price candidate fetch");
-      // dex/client.ts's fetchMarketForToken prefers an ETH-quoted primaryPair
-      // when one exists, but this token's only pair(s) could all be quoted in
-      // something else (a tokenized stock, a stablecoin) — this guard is what
-      // actually stops that from being misread as an ETH rate (see
-      // executionFacade.ts's deriveEthPriceUsd for the confirmed-live bug this
-      // mirrors). Falls through to try the next candidate rather than
-      // fabricating a rate from whatever pair it does have.
-      const pair = market.primaryPair;
+      // ethPair, not primaryPair: the primary pair is the token's deepest pool
+      // whatever it's quoted in (a tokenized stock, a stablecoin), and reading
+      // that priceNative as an ETH rate is the confirmed-live bug
+      // executionFacade.ts's deriveEthPriceUsd guards against. The guard
+      // below stays as the load-bearing check. Falls through to try the next
+      // candidate rather than fabricating a rate from whatever pair it has.
+      const pair = market.ethPair;
       if (!pair || !isNativeEthQuoted(pair) || !pair.priceUsd || !pair.priceNative || pair.priceNative === 0) continue;
       const rate = pair.priceUsd / pair.priceNative;
       cachedEthPriceUsd = { rate, at: Date.now() };

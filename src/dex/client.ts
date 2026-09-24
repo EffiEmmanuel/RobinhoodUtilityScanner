@@ -182,6 +182,30 @@ export async function searchPairs(query: string): Promise<MarketPair[]> {
   return raw.pairs.map(normalizePair);
 }
 
+/**
+ * The primary pair is the token's real market: its deepest pool, whatever
+ * it's paired against. It used to be ETH-quoted-first, because execution
+ * could only ever trade a native-ETH v4 pool — but live/routing.ts now
+ * trades any Uniswap pool (hub-paired v4, WETH, v2/v3), and preferring the
+ * ETH pool made research, sizing, demand checks and charts read a thin
+ * arbitrage pool instead of the market (confirmed 2026-09-24: MUSETOWN's
+ * ETH pool showed $550 liquidity / $20K volume against its META pool's
+ * $48K / $518K). On Robinhood Chain, Uniswap pools rank first since those
+ * are the ones the bot can trade. The one thing that genuinely needs an ETH
+ * pair — deriving an ETH/USD rate from priceNative — gets its own field,
+ * ethPair; that misuse (a QQQ-quoted pair read as an ETH rate) is what the
+ * old ordering originally guarded against (see isNativeEthQuoted).
+ */
+export function selectMarketPairs(chainId: string, pairs: MarketPair[]): { primaryPair?: MarketPair; ethPair?: MarketPair } {
+  const byLiquidity = (a: MarketPair, b: MarketPair) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0);
+  const primaryPair =
+    chainId === "robinhood"
+      ? pairs.slice().sort((a, b) => Number(b.dexId === "uniswap") - Number(a.dexId === "uniswap") || byLiquidity(a, b))[0]
+      : pairs.slice().sort(byLiquidity)[0];
+  const ethPair = pairs.filter(isNativeEthQuoted).sort(byLiquidity)[0];
+  return { primaryPair, ethPair };
+}
+
 export async function fetchMarketForToken(
   chainId: string,
   tokenAddress: string
@@ -189,17 +213,5 @@ export async function fetchMarketForToken(
   const url = `${config.dexscreenerBaseUrl}/token-pairs/v1/${chainId}/${tokenAddress}`;
   const raw = await fetchJsonWithRetry<RawPair[]>(url);
   const pairs = (Array.isArray(raw) ? raw : []).map(normalizePair);
-  // ETH-quoted pairs first (ties broken by liquidity), non-ETH pairs after —
-  // never the reverse. Live execution can only ever route through an
-  // ETH-quoted v4 pool (poolDiscovery.ts hardcodes currency0 = native ETH),
-  // so a "primary pair" that isn't ETH-quoted is a pool we could never
-  // actually trade through anyway; picking it instead of a real, if smaller,
-  // ETH pair is what let OPAI's QQQ-quoted pair masquerade as the market
-  // (see isNativeEthQuoted's own doc comment). Liquidity still breaks ties
-  // within each group, so a deeper ETH pool is still preferred over a
-  // shallower one.
-  const primaryPair = pairs
-    .slice()
-    .sort((a, b) => Number(isNativeEthQuoted(b)) - Number(isNativeEthQuoted(a)) || (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))[0];
-  return { pairs, primaryPair };
+  return { pairs, ...selectMarketPairs(chainId, pairs) };
 }

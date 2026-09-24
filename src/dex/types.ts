@@ -60,7 +60,12 @@ export interface MarketPair {
 
 export interface MarketSummary {
   pairs: MarketPair[];
-  primaryPair?: MarketPair; // highest-liquidity pair
+  // The token's real market — its deepest pool, whatever it's paired against
+  // (see fetchMarketForToken). Use this for price, liquidity and activity.
+  primaryPair?: MarketPair;
+  // The deepest native-ETH-quoted pool, if any — the only pair whose
+  // priceNative is an ETH rate. Use this, never primaryPair, to derive ETH/USD.
+  ethPair?: MarketPair;
 }
 
 export interface TrendingMeta {
