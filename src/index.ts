@@ -1,4 +1,5 @@
 import dns from "node:dns";
+import net from "node:net";
 import { config, assertRuntimeConfig } from "./config";
 import { logger } from "./logger";
 import { db } from "./db";
@@ -16,6 +17,14 @@ import { startApiServer } from "./api/server";
 // any other host with the same "advertises AAAA, can't actually route it"
 // problem (RPC, DexScreener, X) gets the same fix for free.
 dns.setDefaultResultOrder("ipv4first");
+// Confirmed live 2026-09-24: ipv4first alone isn't enough. Node 20's
+// "happy eyeballs" connect still races every A and AAAA address and gives
+// each attempt only 250ms. From Railway's Singapore region, Neon (us-east-2)
+// is ~250ms away, and IPv6 can't route at all, so every attempt timed out.
+// Every DB query then failed with AggregateError, and the dashboard hung.
+// Turning the race off connects to the first (IPv4) address with the normal
+// OS timeout.
+net.setDefaultAutoSelectFamily(false);
 
 async function main() {
   const missing = assertRuntimeConfig();
