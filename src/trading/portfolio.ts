@@ -197,13 +197,23 @@ const PRICE_REFRESH_INTERVAL_MS = 90_000;
 // module-level side effect here would fire on every import, including from
 // the test suite (which shares this environment's DATABASE_URL), triggering
 // a real DB query and leaving a dangling setInterval with nothing to clear it.
-export function startBackgroundPriceRefresh(): void {
-  const refresh = () => {
-    void getEthPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background ETH/USD price refresh failed"));
-    void getSolPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background SOL/USD price refresh failed"));
+//
+// Resolves once the first refresh has settled, so startup can wait for real
+// rates before anything reads equity (see startTradingOrchestrator).
+// Idempotent: startup runs inside a retry, and a second call must not stack
+// a second interval.
+let firstPriceRefresh: Promise<void> | undefined;
+export function startBackgroundPriceRefresh(): Promise<void> {
+  if (firstPriceRefresh) return firstPriceRefresh;
+  const refresh = async () => {
+    await Promise.all([
+      getEthPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background ETH/USD price refresh failed")),
+      getSolPriceUsd().catch((err) => logger.warn({ err: String(err) }, "background SOL/USD price refresh failed")),
+    ]);
   };
-  refresh(); // populate the cache immediately on startup rather than waiting a full interval
-  setInterval(refresh, PRICE_REFRESH_INTERVAL_MS);
+  firstPriceRefresh = refresh(); // populate the cache immediately on startup rather than waiting a full interval
+  setInterval(() => void refresh(), PRICE_REFRESH_INTERVAL_MS);
+  return firstPriceRefresh;
 }
 
 /** True only when Solana trading is both enabled AND actually has a signer configured. */

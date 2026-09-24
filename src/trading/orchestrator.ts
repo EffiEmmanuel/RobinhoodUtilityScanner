@@ -1,6 +1,6 @@
 import { db } from "../db";
 import { logger } from "../logger";
-import { sleep } from "../util/http";
+import { sleep, withTimeout } from "../util/http";
 import { retryAsync } from "../util/retry";
 import { TradeCandidateStatus } from "../generated/prisma";
 import { tradingConfig } from "./config";
@@ -251,7 +251,14 @@ export async function startTradingOrchestrator(): Promise<() => void> {
   // Retried in case this is the first DB call of the process (cold Neon compute).
   await retryAsync("trading orchestrator startup", async () => {
     await ensurePaperWalletSeeded();
-    startBackgroundPriceRefresh();
+    // Wait for the first ETH/SOL rates before anything reads equity. Without
+    // them a live wallet's cash is left out: confirmed 2026-09-24, the first
+    // snapshot after a restart read $6.96 against a real ~$22.53, and the
+    // circuit breaker judged that day's loss against it. Bounded, so a price
+    // outage delays startup instead of blocking it.
+    await withTimeout(startBackgroundPriceRefresh(), 20_000, "first price refresh").catch((err) =>
+      logger.warn({ err: String(err) }, "first price refresh didn't finish — starting without current rates")
+    );
     await getActiveStrategyVersion(); // ensure a strategy version exists before anything else runs
     await recoverStuckCandidates();
     await recoverStuckPendingEntries();
