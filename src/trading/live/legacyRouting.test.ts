@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { decodeFunctionData, encodeFunctionData } from "viem";
 import { assertDestinationAllowed } from "./wallet";
 import { buildLegacyCalldata } from "./liveExecutionProvider";
-import { isLegacyRoute, routeLabel, type LegacyRoute } from "./routing";
+import { isLegacyRoute, routeLabel, v3PathFor, type LegacyRoute } from "./routing";
 import { ERC20_ALLOWANCE_ABI, ROBINHOOD_WETH, ROUTER_RECIPIENT, SWAP_ROUTER_02_ABI, UNISWAP_LEGACY_ADDRESSES, UNISWAP_V4_ADDRESSES } from "./contracts";
 
 const TOKEN = "0x5d102d1e69e77591d486aa4f663b3645151bbdf6" as const;
@@ -78,6 +78,33 @@ describe("buildLegacyCalldata", () => {
     const [minimum, recipient] = calls[1].args as [bigint, string];
     expect(minimum).toBe(900n);
     expect(recipient.toLowerCase()).toBe(WALLET);
+  });
+});
+
+describe("v3 hub routes", () => {
+  const META = "0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35" as const;
+  const route: LegacyRoute = {
+    venue: "v3",
+    pool: "0x1111111111111111111111111111111111111111",
+    fee: 10_000,
+    hub: { currency: META, pool: "0xa4bdb396a69617eb7f70e2cc1ef526f7340b1b0d", fee: 3000 },
+  };
+  const hex = (x: string) => x.toLowerCase().replace(/^0x/, "");
+  const fee = (f: number) => f.toString(16).padStart(6, "0");
+
+  it("packs WETH -> hub -> token for a buy and the exact reverse for a sell", () => {
+    expect(v3PathFor(route, TOKEN, true)).toBe(`0x${hex(ROBINHOOD_WETH)}${fee(3000)}${hex(META)}${fee(10_000)}${hex(TOKEN)}`);
+    expect(v3PathFor(route, TOKEN, false)).toBe(`0x${hex(TOKEN)}${fee(10_000)}${hex(META)}${fee(3000)}${hex(ROBINHOOD_WETH)}`);
+  });
+
+  it("buys through SwapRouter02 exactInput with that path, straight to the wallet", () => {
+    const outer = decodeFunctionData({ abi: SWAP_ROUTER_02_ABI, data: buildLegacyCalldata(route, TOKEN, true, 1_000n, 900n, WALLET) });
+    const [call] = (outer.args[1] as `0x${string}`[]).map((c) => decodeFunctionData({ abi: SWAP_ROUTER_02_ABI, data: c }));
+    expect(call.functionName).toBe("exactInput");
+    const params = call.args[0] as { path: string; recipient: string; amountIn: bigint; amountOutMinimum: bigint };
+    expect(params.path).toBe(v3PathFor(route, TOKEN, true));
+    expect(params.recipient.toLowerCase()).toBe(WALLET);
+    expect(params.amountOutMinimum).toBe(900n);
   });
 });
 

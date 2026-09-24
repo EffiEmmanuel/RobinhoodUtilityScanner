@@ -1,10 +1,11 @@
-import { encodeAbiParameters, getAddress, keccak256, type PublicClient } from "viem";
+import { encodeAbiParameters, encodePacked, getAddress, keccak256, type PublicClient } from "viem";
 import { logger } from "../../logger";
 import { fetchMarketForToken } from "../../dex/client";
 import {
   UNISWAP_V4_ADDRESSES,
   NATIVE_ETH_CURRENCY,
   ROBINHOOD_WETH,
+  ROBINHOOD_USDG,
   POSITION_MANAGER_POOL_KEYS_ABI,
   POOL_MANAGER_ABI,
   STATE_VIEW_ABI,
@@ -61,6 +62,30 @@ export interface LegacyRoute {
   venue: "v2" | "v3";
   pool: `0x${string}`;
   fee?: number; // v3 only
+  // The token's pool is paired against something other than WETH (a
+  // tokenized stock, USDG, VIRTUAL), reached through a WETH/hub pool of the
+  // same version first (fee is unused for v2).
+  hub?: { currency: `0x${string}`; pool: `0x${string}`; fee: number };
+}
+
+/** Uniswap v2 token path for a v2 route, in trade order. */
+export function v2PathFor(route: LegacyRoute, token: `0x${string}`, isBuy: boolean): `0x${string}`[] {
+  const buy: `0x${string}`[] = route.hub ? [ROBINHOOD_WETH, route.hub.currency, token] : [ROBINHOOD_WETH, token];
+  return isBuy ? buy : buy.slice().reverse();
+}
+
+/** Uniswap v3 packed path (token, fee, token, …) for a v3 route, in trade order. */
+export function v3PathFor(route: LegacyRoute, token: `0x${string}`, isBuy: boolean): `0x${string}` {
+  const fee = route.fee ?? 0;
+  if (!route.hub) {
+    return isBuy
+      ? encodePacked(["address", "uint24", "address"], [ROBINHOOD_WETH, fee, token])
+      : encodePacked(["address", "uint24", "address"], [token, fee, ROBINHOOD_WETH]);
+  }
+  const { currency, fee: hubFee } = route.hub;
+  return isBuy
+    ? encodePacked(["address", "uint24", "address", "uint24", "address"], [ROBINHOOD_WETH, hubFee, currency, fee, token])
+    : encodePacked(["address", "uint24", "address", "uint24", "address"], [token, fee, currency, hubFee, ROBINHOOD_WETH]);
 }
 
 export type AnyRoute = SwapRoute | LegacyRoute;
@@ -136,7 +161,8 @@ export function pathFor(
 
 export function routeLabel(route: AnyRoute, hubSymbols: Map<string, string> = new Map()): string {
   if (isLegacyRoute(route)) {
-    return `ETH(wrap)→WETH→token [${route.venue}${route.fee !== undefined ? ` ${route.fee / 10_000}%` : ""}]`;
+    const hub = route.hub ? `→${hubSymbols.get(route.hub.currency.toLowerCase()) ?? `${route.hub.currency.slice(0, 6)}…`}` : "";
+    return `ETH(wrap)→WETH${hub}→token [${route.venue}${route.fee !== undefined ? ` ${route.fee / 10_000}%` : ""}]`;
   }
   return [route.viaWeth ? "ETH(wrap)→WETH" : "ETH", ...route.hubs.map((h) => hubSymbols.get(h.toLowerCase()) ?? `${h.slice(0, 6)}…`), "token"].join("→");
 }
@@ -405,6 +431,25 @@ function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OU
  * direct discovery failed for an infra reason — "couldn't check" must never
  * read as "no route" (see poolDiscovery.ts).
  */
+const MAX_STRANDED_HUBS = 3;
+const MAX_EXTENDED_ROUTES_PER_HUB = 4;
+
+async function extendedRoutesVia(client: PublicClient, hubPool: TokenPool, token: `0x${string}`): Promise<SwapRoute[]> {
+  const pairing = hubPool.counter;
+  const pairingPools = (await listV4Pools(client, pairing)).filter((p) => !same(p.counter, token) && !same(p.counter, NATIVE_ETH_CURRENCY));
+  const routes: SwapRoute[] = [];
+  for (const outer of pairingPools) {
+    if (routes.length >= MAX_EXTENDED_ROUTES_PER_HUB) break;
+    if (same(outer.counter, ROBINHOOD_WETH)) {
+      routes.push({ pools: [outer.pool, hubPool.pool], hubs: [pairing], viaWeth: true });
+      continue;
+    }
+    const legs = await hubLegs(client, outer.counter);
+    for (const leg of legs.slice(0, 1)) routes.push({ pools: [leg, outer.pool, hubPool.pool], hubs: [outer.counter, pairing] });
+  }
+  return routes;
+}
+
 export async function candidateRoutes(
   client: PublicClient,
   tokenAddress: `0x${string}`,
@@ -452,10 +497,22 @@ export async function candidateRoutes(
   }
   const hubPools = listed.filter((p) => !same(p.counter, NATIVE_ETH_CURRENCY) && !same(p.counter, ROBINHOOD_WETH));
   const legsPerHub = await Promise.allSettled(hubPools.map((p) => hubLegs(client, p.counter)));
+  const strandedHubPools: TokenPool[] = [];
   legsPerHub.forEach((legs, i) => {
     if (legs.status !== "fulfilled") return;
+    if (legs.value.length === 0) strandedHubPools.push(hubPools[i]);
     for (const leg of legs.value) add({ pools: [leg, hubPools[i].pool], hubs: [hubPools[i].counter] });
   });
+
+  // A pairing currency with no native-ETH pool of its own (a smaller token, or
+  // a tokenized stock that only trades against USDG) is still reachable one
+  // hop further out: through one of ITS pools whose other side does have an
+  // ETH leg (ETH -> X -> pairing -> token), or is WETH (wrapped, WETH ->
+  // pairing -> token).
+  const extended = await Promise.allSettled(strandedHubPools.slice(0, MAX_STRANDED_HUBS).map((p) => extendedRoutesVia(client, p, token)));
+  for (const result of extended) {
+    if (result.status === "fulfilled") result.value.forEach(add);
+  }
 
   if (routes.length === 0 && directResult.status === "rejected" && isPoolDiscoveryInconclusiveError(directResult.reason)) {
     throw directResult.reason;
@@ -504,7 +561,29 @@ async function onChainLegacyRoutes(client: PublicClient, token: `0x${string}`): 
   v3.forEach((r, i) => {
     if (r.status === "fulfilled" && !same(r.value, ZERO_ADDRESS)) routes.push({ venue: "v3", pool: r.value, fee: V3_STANDARD_FEE_TIERS[i] });
   });
+  routes.push(...(await onChainUsdgRoutes(client, token)));
   onChainLegacyCache.set(key, { at: Date.now(), routes });
+  return routes;
+}
+
+/** The token's USDG-paired v2/v3 pools, straight from the factories, each reached through a WETH/USDG pool. */
+async function onChainUsdgRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
+  const [v2, ...v3] = await Promise.allSettled([
+    client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v2Factory as `0x${string}`, abi: V2_FACTORY_ABI, functionName: "getPair", args: [token, ROBINHOOD_USDG] }),
+    ...V3_STANDARD_FEE_TIERS.map((fee) =>
+      client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v3Factory as `0x${string}`, abi: V3_FACTORY_ABI, functionName: "getPool", args: [token, ROBINHOOD_USDG, fee] })
+    ),
+  ]);
+  const routes: LegacyRoute[] = [];
+  if (v2.status === "fulfilled" && !same(v2.value, ZERO_ADDRESS)) {
+    const hubPair = await v2HubPair(client, ROBINHOOD_USDG);
+    if (hubPair) routes.push({ venue: "v2", pool: v2.value, hub: { currency: ROBINHOOD_USDG, pool: hubPair, fee: 0 } });
+  }
+  const v3Pools = v3.flatMap((r, i) => (r.status === "fulfilled" && !same(r.value, ZERO_ADDRESS) ? [{ pool: r.value, fee: V3_STANDARD_FEE_TIERS[i] }] : []));
+  if (v3Pools.length > 0) {
+    const legs = await v3HubLegs(client, ROBINHOOD_USDG);
+    for (const p of v3Pools) for (const leg of legs) routes.push({ venue: "v3", pool: p.pool, fee: p.fee, hub: { currency: ROBINHOOD_USDG, pool: leg.pool, fee: leg.fee } });
+  }
   return routes;
 }
 
@@ -514,11 +593,76 @@ async function onChainLegacyRoutes(client: PublicClient, token: `0x${string}`): 
  */
 async function legacyRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
   if (!isRouterAllowed(UNISWAP_LEGACY_ADDRESSES.swapRouter02)) return [];
-  const [listed, onChain] = await Promise.allSettled([listedLegacyRoutes(client, token), onChainLegacyRoutes(client, token)]);
+  const [listed, onChain, viaHub] = await Promise.allSettled([listedLegacyRoutes(client, token), onChainLegacyRoutes(client, token), legacyHubRoutes(client, token)]);
   const routes: LegacyRoute[] = [];
-  for (const r of [...(listed.status === "fulfilled" ? listed.value : []), ...(onChain.status === "fulfilled" ? onChain.value : [])]) {
-    if (!routes.some((existing) => same(existing.pool, r.pool))) routes.push(r);
+  const id = (r: LegacyRoute) => `${r.hub?.pool.toLowerCase() ?? "weth"}>${r.pool.toLowerCase()}`;
+  for (const r of [listed, onChain, viaHub].flatMap((x) => (x.status === "fulfilled" ? x.value : []))) {
+    if (!routes.some((existing) => id(existing) === id(r))) routes.push(r);
   }
+  return routes;
+}
+
+// WETH/<hub> v3 pools per hub currency — a hub's pools don't change, so this
+// is cached for a while like v4 hub legs.
+const v3HubLegCache = new Map<string, { at: number; legs: { pool: `0x${string}`; fee: number }[] }>();
+
+async function v3HubLegs(client: PublicClient, hub: `0x${string}`): Promise<{ pool: `0x${string}`; fee: number }[]> {
+  const key = hub.toLowerCase();
+  const cached = v3HubLegCache.get(key);
+  if (cached && Date.now() - cached.at < HUB_LEG_TTL_MS) return cached.legs;
+  const pools = await Promise.allSettled(
+    V3_STANDARD_FEE_TIERS.map((fee) =>
+      client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v3Factory as `0x${string}`, abi: V3_FACTORY_ABI, functionName: "getPool", args: [ROBINHOOD_WETH, hub, fee] })
+    )
+  );
+  const legs: { pool: `0x${string}`; fee: number }[] = [];
+  pools.forEach((r, i) => {
+    if (r.status === "fulfilled" && !same(r.value, ZERO_ADDRESS)) legs.push({ pool: r.value, fee: V3_STANDARD_FEE_TIERS[i] });
+  });
+  v3HubLegCache.set(key, { at: Date.now(), legs });
+  return legs;
+}
+
+const v2HubPairCache = new Map<string, { at: number; pair: `0x${string}` | undefined }>();
+
+async function v2HubPair(client: PublicClient, hub: `0x${string}`): Promise<`0x${string}` | undefined> {
+  const key = hub.toLowerCase();
+  const cached = v2HubPairCache.get(key);
+  if (cached && Date.now() - cached.at < HUB_LEG_TTL_MS) return cached.pair;
+  const pair = await client.readContract({ address: UNISWAP_LEGACY_ADDRESSES.v2Factory as `0x${string}`, abi: V2_FACTORY_ABI, functionName: "getPair", args: [ROBINHOOD_WETH, hub] });
+  const result = same(pair, ZERO_ADDRESS) ? undefined : pair;
+  v2HubPairCache.set(key, { at: Date.now(), pair: result });
+  return result;
+}
+
+/**
+ * The token's v2/v3 pools paired against something other than WETH, each
+ * reached through a WETH/hub pool of the same version (a v2 path or a v3
+ * path is one SwapRouter02 call; mixing versions isn't).
+ */
+async function legacyHubRoutes(client: PublicClient, token: `0x${string}`): Promise<LegacyRoute[]> {
+  const market = await cachedMarket(token);
+  const pairs = market.pairs
+    .filter((p) => p.pairAddress?.length === 42 && p.dexId === "uniswap")
+    .map((p) => ({ pair: p, counter: same(p.baseTokenAddress ?? "", token) ? p.quoteTokenAddress : same(p.quoteTokenAddress ?? "", token) ? p.baseTokenAddress : undefined }))
+    .filter((x): x is { pair: typeof x.pair; counter: string } => Boolean(x.counter) && !same(x.counter!, ROBINHOOD_WETH))
+    .sort((a, b) => (b.pair.liquidityUsd ?? 0) - (a.pair.liquidityUsd ?? 0))
+    .slice(0, MAX_LEGACY_POOLS_PER_TOKEN);
+  const routes: LegacyRoute[] = [];
+  await Promise.allSettled(
+    pairs.map(async ({ pair, counter }) => {
+      const kind = await classifyLegacyPool(client, pair.pairAddress as `0x${string}`);
+      if (kind?.venue === "v2") {
+        const hubPair = await v2HubPair(client, counter as `0x${string}`);
+        if (hubPair) routes.push({ venue: "v2", pool: pair.pairAddress as `0x${string}`, hub: { currency: counter as `0x${string}`, pool: hubPair, fee: 0 } });
+        return;
+      }
+      if (kind?.venue !== "v3") return;
+      for (const leg of await v3HubLegs(client, counter as `0x${string}`)) {
+        routes.push({ venue: "v3", pool: pair.pairAddress as `0x${string}`, fee: kind.fee, hub: { currency: counter as `0x${string}`, pool: leg.pool, fee: leg.fee } });
+      }
+    })
+  );
   return routes;
 }
 
@@ -543,6 +687,15 @@ async function listedLegacyRoutes(client: PublicClient, token: `0x${string}`): P
 
 export async function quoteLegacyRoute(client: PublicClient, route: LegacyRoute, token: `0x${string}`, isBuy: boolean, amountIn: bigint): Promise<RouteQuote> {
   const [tokenIn, tokenOut] = isBuy ? [ROBINHOOD_WETH, token] : [token, ROBINHOOD_WETH];
+  if (route.venue === "v3" && route.hub) {
+    const { result } = await client.simulateContract({
+      address: UNISWAP_LEGACY_ADDRESSES.quoterV2 as `0x${string}`,
+      abi: QUOTER_V2_ABI,
+      functionName: "quoteExactInput",
+      args: [v3PathFor(route, token, isBuy), amountIn],
+    });
+    return { route, amountOut: result[0], gasEstimateUnits: result[3] };
+  }
   if (route.venue === "v3") {
     const { result } = await client.simulateContract({
       address: UNISWAP_LEGACY_ADDRESSES.quoterV2 as `0x${string}`,
@@ -556,7 +709,7 @@ export async function quoteLegacyRoute(client: PublicClient, route: LegacyRoute,
     address: UNISWAP_LEGACY_ADDRESSES.v2Router02 as `0x${string}`,
     abi: V2_ROUTER_QUOTE_ABI,
     functionName: "getAmountsOut",
-    args: [amountIn, [tokenIn, tokenOut]],
+    args: [amountIn, v2PathFor(route, token, isBuy)],
   });
   return { route, amountOut: amounts[amounts.length - 1], gasEstimateUnits: 0n };
 }
@@ -589,13 +742,20 @@ export async function quoteRoute(
 }
 
 /** Quotes every candidate route in parallel and returns the one that pays out the most. */
-export async function bestRouteQuote(
+/**
+ * Every route that produced a quote, best payout first. Callers execute the
+ * first one whose exact transaction also simulates cleanly — a hooked pool can
+ * quote better than it actually fills (confirmed live 2026-09-24: W0G's
+ * dynamic-fee pool failed the 3% slippage floor on 2 of 3 simulations), and
+ * the next-best route shouldn't be thrown away because of it.
+ */
+export async function rankedRouteQuotes(
   client: PublicClient,
   tokenAddress: `0x${string}`,
   isBuy: boolean,
   amountIn: bigint,
   options: { allowHighFeePools?: boolean } = {}
-): Promise<RouteQuote | undefined> {
+): Promise<RouteQuote[]> {
   const token = getAddress(tokenAddress);
   const [v4Result, legacyResult] = await Promise.allSettled([candidateRoutes(client, token, options), legacyRoutes(client, token)]);
   const v4Routes = v4Result.status === "fulfilled" ? v4Result.value : [];
@@ -606,27 +766,38 @@ export async function bestRouteQuote(
   if (v4Routes.length === 0 && legacy.length === 0) {
     // "Couldn't check" must never read as "no route" — see candidateRoutes.
     if (v4Result.status === "rejected") throw v4Result.reason;
-    return undefined;
+    return [];
   }
 
   const quotes = await Promise.allSettled([
     ...v4Routes.map((route) => quoteRoute(client, route, token, isBuy, amountIn)),
     ...legacy.map((route) => quoteLegacyRoute(client, route, token, isBuy, amountIn)),
   ]);
-  let best: RouteQuote | undefined;
-  for (const q of quotes) {
-    if (q.status === "fulfilled" && q.value.amountOut > 0n && (!best || q.value.amountOut > best.amountOut)) best = q.value;
-  }
+  const ranked = quotes
+    .flatMap((q) => (q.status === "fulfilled" && q.value.amountOut > 0n ? [q.value] : []))
+    .sort((a, b) => (b.amountOut > a.amountOut ? 1 : b.amountOut < a.amountOut ? -1 : 0));
   const candidates = v4Routes.length + legacy.length;
-  if (!best) {
+  if (ranked.length === 0) {
     const firstError = quotes.find((q): q is PromiseRejectedResult => q.status === "rejected");
     logger.warn({ token, routes: candidates, err: firstError ? String(firstError.reason).slice(0, 240) : undefined }, "no candidate route produced a quote");
-    return undefined;
+    return [];
   }
-  if (isLegacyRoute(best.route) || best.route.pools.length > 1 || best.route.viaWeth) {
-    logger.info({ token, route: routeLabel(best.route, hubSymbols), candidates, direction: isBuy ? "buy" : "sell" }, "best route is not a direct ETH pool");
+  const best = ranked[0].route;
+  if (isLegacyRoute(best) || best.pools.length > 1 || best.viaWeth) {
+    logger.info({ token, route: routeLabel(best, hubSymbols), candidates, direction: isBuy ? "buy" : "sell" }, "best route is not a direct ETH pool");
   }
-  return best;
+  return ranked;
+}
+
+/** The single best-paying route. */
+export async function bestRouteQuote(
+  client: PublicClient,
+  tokenAddress: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  options: { allowHighFeePools?: boolean } = {}
+): Promise<RouteQuote | undefined> {
+  return (await rankedRouteQuotes(client, tokenAddress, isBuy, amountIn, options))[0];
 }
 
 /** Current in-range liquidity of a pool — diagnostics only (see LiveQuote.poolLiquidity). */

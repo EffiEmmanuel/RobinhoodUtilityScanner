@@ -11,7 +11,7 @@ import {
   SWAP_ROUTER_02_ABI,
 } from "./contracts";
 import type { PoolKey } from "./poolDiscovery";
-import { bestRouteQuote, isLegacyRoute, pathFor, routeLabel, tokenSidePool, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
+import { bestRouteQuote, rankedRouteQuotes, isLegacyRoute, pathFor, routeLabel, tokenSidePool, v2PathFor, v3PathFor, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
 import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, type V4SwapSpec } from "./swapEncoding";
 import { ensureSellApprovals, ensureSwapRouter02Approval } from "./permit2Approvals";
 import { getPublicClient, getWalletAddress, signAndSendTransaction, isWalletConfigured } from "./wallet";
@@ -34,22 +34,29 @@ export interface LiveQuote {
  * Best real on-chain quote across every route from native ETH to the token
  * (see routing.ts) — `eth_call`-simulated via V4Quoter, never a state change.
  */
+export async function getLiveQuotes(
+  tokenAddress: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  options: { allowHighFeePools?: boolean } = {}
+): Promise<LiveQuote[]> {
+  const ranked = await rankedRouteQuotes(getPublicClient(), tokenAddress, isBuy, amountIn, options);
+  if (ranked.length === 0) logger.warn({ tokenAddress }, "no live route found for this token — cannot quote");
+  return ranked.map((q) => {
+    const base = { route: q.route, routeLabel: routeLabel(q.route), amountOut: q.amountOut, gasEstimateUnits: q.gasEstimateUnits };
+    if (isLegacyRoute(q.route)) return { ...base, poolId: q.route.pool };
+    const pool = tokenSidePool(q.route);
+    return { ...base, poolKey: pool.poolKey, poolId: pool.poolId };
+  });
+}
+
 export async function getLiveQuote(
   tokenAddress: `0x${string}`,
   isBuy: boolean,
   amountIn: bigint,
   options: { allowHighFeePools?: boolean } = {}
 ): Promise<LiveQuote | undefined> {
-  const client = getPublicClient();
-  const best = await bestRouteQuote(client, tokenAddress, isBuy, amountIn, options);
-  if (!best) {
-    logger.warn({ tokenAddress }, "no live V4 route found for this token — cannot quote");
-    return undefined;
-  }
-  const base = { route: best.route, routeLabel: routeLabel(best.route), amountOut: best.amountOut, gasEstimateUnits: best.gasEstimateUnits };
-  if (isLegacyRoute(best.route)) return { ...base, poolId: best.route.pool };
-  const pool = tokenSidePool(best.route);
-  return { ...base, poolKey: pool.poolKey, poolId: pool.poolId };
+  return (await getLiveQuotes(tokenAddress, isBuy, amountIn, options))[0];
 }
 
 export interface LiveSwapResult {
@@ -136,13 +143,19 @@ export function buildLegacyCalldata(
   const [tokenIn, tokenOut] = isBuy ? [ROBINHOOD_WETH, token] : [token, ROBINHOOD_WETH];
   const recipient = isBuy ? wallet : ROUTER_RECIPIENT.ADDRESS_THIS;
   const swap =
-    route.venue === "v3"
+    route.venue === "v3" && route.hub
+      ? encodeFunctionData({
+          abi: SWAP_ROUTER_02_ABI,
+          functionName: "exactInput",
+          args: [{ path: v3PathFor(route, token, isBuy), recipient, amountIn, amountOutMinimum }],
+        })
+      : route.venue === "v3"
       ? encodeFunctionData({
           abi: SWAP_ROUTER_02_ABI,
           functionName: "exactInputSingle",
           args: [{ tokenIn, tokenOut, fee: route.fee ?? 0, recipient, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n }],
         })
-      : encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "swapExactTokensForTokens", args: [amountIn, amountOutMinimum, [tokenIn, tokenOut], recipient] });
+      : encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "swapExactTokensForTokens", args: [amountIn, amountOutMinimum, v2PathFor(route, token, isBuy), recipient] });
   const calls = isBuy ? [swap] : [swap, encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "unwrapWETH9", args: [amountOutMinimum, wallet] })];
   const deadline = BigInt(Math.floor(Date.now() / 1000) + SWAP_DEADLINE_SECONDS);
   return encodeFunctionData({ abi: SWAP_ROUTER_02_ABI, functionName: "multicall", args: [deadline, calls] });
@@ -179,6 +192,38 @@ async function simulateExecute(to: `0x${string}`, data: `0x${string}`, value: bi
   }
 }
 
+// How many ranked routes to try before giving up on a trade.
+const MAX_ROUTE_ATTEMPTS = 3;
+
+/**
+ * The best-paying route whose exact transaction also simulates cleanly
+ * through the real router, trying up to MAX_ROUTE_ATTEMPTS in payout order.
+ * `prepare` runs before each simulation (sells: the approval that route's
+ * router needs).
+ */
+async function firstExecutableRoute(
+  quotes: LiveQuote[],
+  token: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  maxSlippageBps: number,
+  prepare?: (quote: LiveQuote) => Promise<void>
+): Promise<{ quote: LiveQuote; tx: ReturnType<typeof transactionFor>; amountOutMinimum: bigint } | { failures: string[] }> {
+  const failures: string[] = [];
+  for (const [i, quote] of quotes.slice(0, MAX_ROUTE_ATTEMPTS).entries()) {
+    const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
+    const tx = transactionFor(quote.route, token, isBuy, amountIn, amountOutMinimum);
+    await prepare?.(quote);
+    const sim = await simulateExecute(tx.to, tx.data, isBuy ? amountIn : 0n);
+    if (sim.ok) {
+      if (i > 0) logger.warn({ token, route: quote.routeLabel, skipped: failures }, "better-quoted route failed simulation — using the next-best one");
+      return { quote, tx, amountOutMinimum };
+    }
+    failures.push(`${quote.routeLabel}: ${String(sim.error).replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  return { failures };
+}
+
 /**
  * Everything executeLiveBuy does short of signing: best-route quote, the
  * exact calldata a buy would send, and an eth_call of it from the bot's
@@ -189,26 +234,23 @@ export async function dryRunLiveBuy(
   amountInWei: bigint,
   maxSlippageBps: number
 ): Promise<{ ok: boolean; routeLabel?: string; amountOut?: bigint; error?: string }> {
-  const quote = await getLiveQuote(tokenAddress, true, amountInWei);
-  if (!quote) return { ok: false, error: "no route" };
-  const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const tx = transactionFor(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
-  const sim = await simulateExecute(tx.to, tx.data, amountInWei);
-  return { ok: sim.ok, routeLabel: quote.routeLabel, amountOut: quote.amountOut, error: sim.error };
+  const quotes = await getLiveQuotes(tokenAddress, true, amountInWei);
+  if (quotes.length === 0) return { ok: false, error: "no route" };
+  const picked = await firstExecutableRoute(quotes, tokenAddress, true, amountInWei, maxSlippageBps);
+  if ("failures" in picked) return { ok: false, routeLabel: quotes[0].routeLabel, amountOut: quotes[0].amountOut, error: picked.failures.join(" | ") };
+  return { ok: true, routeLabel: picked.quote.routeLabel, amountOut: picked.quote.amountOut };
 }
 
 /** Buy: pay with native ETH (msg.value), no token approval needed. */
 export async function executeLiveBuy(tokenAddress: `0x${string}`, amountInWei: bigint, maxSlippageBps: number): Promise<LiveSwapResult> {
   if (!isWalletConfigured()) throw new Error("BOT_WALLET_PRIVATE_KEY is not set — cannot execute a live buy");
-  const quote = await getLiveQuote(tokenAddress, true, amountInWei);
-  if (!quote) throw new Error(`no live quote available for ${tokenAddress}`);
+  const quotes = await getLiveQuotes(tokenAddress, true, amountInWei);
+  if (quotes.length === 0) throw new Error(`no live quote available for ${tokenAddress}`);
 
-  const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const tx = transactionFor(quote.route, tokenAddress, true, amountInWei, amountOutMinimum);
+  const picked = await firstExecutableRoute(quotes, tokenAddress, true, amountInWei, maxSlippageBps);
+  if ("failures" in picked) throw new Error(`buy simulation reverted on every route, refusing to sign: ${picked.failures.join(" | ")}`);
 
-  const sim = await simulateExecute(tx.to, tx.data, amountInWei);
-  if (!sim.ok) throw new Error(`buy simulation reverted (route ${quote.routeLabel}), refusing to sign: ${sim.error}`);
-
+  const { quote, tx, amountOutMinimum } = picked;
   const txHash = await signAndSendTransaction({ to: tx.to, data: tx.data, value: amountInWei, purpose: "swap" });
   return { txHash, amountIn: amountInWei, amountOutMinimum, approvalTxHashes: [], routeLabel: quote.routeLabel, venue: tx.venue };
 }
@@ -218,21 +260,21 @@ export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: 
   if (!isWalletConfigured()) throw new Error("BOT_WALLET_PRIVATE_KEY is not set — cannot execute a live sell");
   // Exits may route through a predatory-fee pool when it's the only
   // venue — see DiscoverPoolOptions.allowHighFeePools. Entries never do.
-  const quote = await getLiveQuote(tokenAddress, false, tokenAmount, { allowHighFeePools: true });
-  if (!quote) throw new Error(`no live quote available for ${tokenAddress}`);
+  const quotes = await getLiveQuotes(tokenAddress, false, tokenAmount, { allowHighFeePools: true });
+  if (quotes.length === 0) throw new Error(`no live quote available for ${tokenAddress}`);
 
   // v2/v3 (SwapRouter02) pulls the token with a plain ERC20 approval; v4
-  // (Universal Router) pulls it through Permit2.
-  const approvalTxHashes = isLegacyRoute(quote.route)
-    ? await ensureSwapRouter02Approval(tokenAddress, tokenAmount)
-    : await ensureSellApprovals(tokenAddress, tokenAmount);
+  // (Universal Router) pulls it through Permit2 — whichever the route being
+  // tried needs has to be in place before it can simulate.
+  const approvalTxHashes: string[] = [];
+  const picked = await firstExecutableRoute(quotes, tokenAddress, false, tokenAmount, maxSlippageBps, async (quote) => {
+    approvalTxHashes.push(
+      ...(isLegacyRoute(quote.route) ? await ensureSwapRouter02Approval(tokenAddress, tokenAmount) : await ensureSellApprovals(tokenAddress, tokenAmount))
+    );
+  });
+  if ("failures" in picked) throw new Error(`sell simulation reverted on every route, refusing to sign: ${picked.failures.join(" | ")}`);
 
-  const amountOutMinimum = (quote.amountOut * BigInt(10_000 - maxSlippageBps)) / 10_000n;
-  const tx = transactionFor(quote.route, tokenAddress, false, tokenAmount, amountOutMinimum);
-
-  const sim = await simulateExecute(tx.to, tx.data, 0n);
-  if (!sim.ok) throw new Error(`sell simulation reverted (route ${quote.routeLabel}), refusing to sign: ${sim.error}`);
-
+  const { quote, tx, amountOutMinimum } = picked;
   const txHash = await signAndSendTransaction({ to: tx.to, data: tx.data, value: 0n, purpose: "swap" });
   return { txHash, amountIn: tokenAmount, amountOutMinimum, approvalTxHashes, routeLabel: quote.routeLabel, venue: tx.venue };
 }

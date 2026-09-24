@@ -51,6 +51,35 @@ describe("pathFor", () => {
   });
 });
 
+describe("pathFor — longer routes", () => {
+  const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as const;
+  const STOCK = "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C" as const;
+  const TOKEN = "0x51c7a88230f9e11945c25d058a583e6703e61e18" as const;
+  const pool = (currency0: `0x${string}`, currency1: `0x${string}`, fee: number) => ({
+    poolKey: { currency0, currency1, fee, tickSpacing: 60, hooks: "0x0000000000000000000000000000000000000000" as const },
+    poolId: "0x00" as const,
+  });
+
+  it("builds ETH -> USDG -> stock -> token for a three-hop buy, and reverses it for the sell", () => {
+    const route: SwapRoute = { pools: [pool(NATIVE_ETH_CURRENCY, USDG, 100), pool(USDG, STOCK, 3000), pool(TOKEN, STOCK, 10000)], hubs: [USDG, STOCK] };
+    const buy = pathFor(route, TOKEN, true);
+    expect(buy.currencyIn).toBe(NATIVE_ETH_CURRENCY);
+    expect(buy.path.map((p) => p.intermediateCurrency)).toEqual([USDG, STOCK, TOKEN]);
+    expect(buy.path.map((p) => p.fee)).toEqual([100, 3000, 10000]);
+    const sell = pathFor(route, TOKEN, false);
+    expect(sell.path.map((p) => p.intermediateCurrency)).toEqual([STOCK, USDG, NATIVE_ETH_CURRENCY]);
+    expect(sell.path.map((p) => p.fee)).toEqual([10000, 3000, 100]);
+  });
+
+  it("starts a two-pool route at WETH when its first pool is WETH-paired", () => {
+    const route: SwapRoute = { pools: [pool(ROBINHOOD_WETH, STOCK, 3000), pool(TOKEN, STOCK, 10000)], hubs: [STOCK], viaWeth: true };
+    const buy = pathFor(route, TOKEN, true);
+    expect(buy.currencyIn).toBe(ROBINHOOD_WETH);
+    expect(buy.path.map((p) => p.intermediateCurrency)).toEqual([STOCK, TOKEN]);
+    expect(pathFor(route, TOKEN, false).currencyOut).toBe(ROBINHOOD_WETH);
+  });
+});
+
 describe("zeroForOneFor", () => {
   it("follows currency ordering, not trade direction", () => {
     // ETH is always currency0 of a native pool.

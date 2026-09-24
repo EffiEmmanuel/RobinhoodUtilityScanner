@@ -62,6 +62,21 @@ export const LEGACY_POOL_ABI = [
 export const QUOTER_V2_ABI = [
   {
     type: "function",
+    name: "quoteExactInput",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "path", type: "bytes" },
+      { name: "amountIn", type: "uint256" },
+    ],
+    outputs: [
+      { name: "amountOut", type: "uint256" },
+      { name: "sqrtPriceX96AfterList", type: "uint160[]" },
+      { name: "initializedTicksCrossedList", type: "uint32[]" },
+      { name: "gasEstimate", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
     name: "quoteExactInputSingle",
     stateMutability: "nonpayable",
     inputs: [
@@ -128,6 +143,24 @@ export const SWAP_ROUTER_02_ABI = [
           { name: "amountIn", type: "uint256" },
           { name: "amountOutMinimum", type: "uint256" },
           { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+    ],
+    outputs: [{ name: "amountOut", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "exactInput",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "path", type: "bytes" },
+          { name: "recipient", type: "address" },
+          { name: "amountIn", type: "uint256" },
+          { name: "amountOutMinimum", type: "uint256" },
         ],
       },
     ],
@@ -202,6 +235,12 @@ export const ROUTER_RECIPIENT = {
 // There is no native-ETH/WETH v4 pool, so WETH-paired pools are reached by
 // having the router wrap/unwrap around the v4 swap.
 export const ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" as const;
+
+// Robinhood Chain's main stablecoin — the deepest non-ETH pairing currency
+// (8% of tokens' main pools, 2026-09-24), checked directly on-chain as a hub
+// so a USDG-paired v2/v3 position stays sellable even if DexScreener stops
+// listing its pool.
+export const ROBINHOOD_USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" as const;
 
 // Pools whose key carries this flag charge a fee the hook sets per swap, so
 // the key's fee field is a flag, not a fee — never compare it against
