@@ -1,6 +1,6 @@
 import { keccak256, encodeAbiParameters, getAddress, type PublicClient } from "viem";
 import { logger } from "../../logger";
-import { UNISWAP_V4_ADDRESSES, NATIVE_ETH_CURRENCY, POOL_MANAGER_ABI, STATE_VIEW_ABI, MAX_REASONABLE_POOL_FEE } from "./contracts";
+import { UNISWAP_V4_ADDRESSES, NATIVE_ETH_CURRENCY, POOL_MANAGER_ABI, STATE_VIEW_ABI, MAX_REASONABLE_POOL_FEE, DYNAMIC_FEE_FLAG } from "./contracts";
 
 export interface PoolKey {
   currency0: `0x${string}`;
@@ -333,7 +333,14 @@ async function pickPoolWithLiquidity(
   const errors: unknown[] = [];
 
   for (const candidate of candidates) {
-    if (candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
+    // Confirmed 2026-09-24: a dynamic-fee pool's key carries DYNAMIC_FEE_FLAG
+    // (8388608) in the fee field, which this check read as an "83,886%" fee
+    // and refused — silently making every token whose pool uses a
+    // dynamic-fee hook (common on launchpads) untradeable. Its real fee is
+    // whatever the hook charges per swap, which the live quote reflects and
+    // the price-impact limits already judge.
+    const isDynamicFee = (candidate.poolKey.fee & DYNAMIC_FEE_FLAG) !== 0;
+    if (!isDynamicFee && candidate.poolKey.fee > MAX_REASONABLE_POOL_FEE) {
       if (!options.allowHighFeePools) {
         logger.warn(
           { poolId: candidate.poolId, feeBps: candidate.poolKey.fee / 100 },

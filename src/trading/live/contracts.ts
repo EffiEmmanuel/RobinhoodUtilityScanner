@@ -29,9 +29,102 @@ export function getAllowedRouterAddresses(): string[] {
 // AI-summarized doc page, given what's at stake if these are wrong.
 export const V4_ACTIONS = {
   SWAP_EXACT_IN_SINGLE: 0x06,
+  // Multi-hop exact-input. Struct layout (ExactInputParams/PathKey in
+  // swapEncoding.ts) verified 2026-09-24 against v4-periphery main AND by a
+  // successful eth_call of real ETH->META->MUSETOWN calldata against this
+  // chain's deployed Universal Router.
+  SWAP_EXACT_IN: 0x07,
   SETTLE_ALL: 0x0c,
   TAKE_ALL: 0x0f,
 } as const;
+
+// Pools whose key carries this flag charge a fee the hook sets per swap, so
+// the key's fee field is a flag, not a fee — never compare it against
+// MAX_REASONABLE_POOL_FEE (v4-core LPFeeLibrary.DYNAMIC_FEE_FLAG). The live
+// quote already reflects whatever the hook actually charges.
+export const DYNAMIC_FEE_FLAG = 0x800000;
+
+const QUOTER_POOL_KEY = {
+  name: "poolKey",
+  type: "tuple",
+  components: [
+    { name: "currency0", type: "address" },
+    { name: "currency1", type: "address" },
+    { name: "fee", type: "uint24" },
+    { name: "tickSpacing", type: "int24" },
+    { name: "hooks", type: "address" },
+  ],
+} as const;
+
+const QUOTER_PATH = {
+  name: "path",
+  type: "tuple[]",
+  components: [
+    { name: "intermediateCurrency", type: "address" },
+    { name: "fee", type: "uint24" },
+    { name: "tickSpacing", type: "int24" },
+    { name: "hooks", type: "address" },
+    { name: "hookData", type: "bytes" },
+  ],
+} as const;
+
+// V4Quoter (IV4Quoter.sol) — eth_call-simulated quotes, never a state change.
+export const V4_QUOTER_ABI = [
+  {
+    type: "function",
+    name: "quoteExactInputSingle",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [QUOTER_POOL_KEY, { name: "zeroForOne", type: "bool" }, { name: "exactAmount", type: "uint128" }, { name: "hookData", type: "bytes" }],
+      },
+    ],
+    outputs: [
+      { name: "amountOut", type: "uint256" },
+      { name: "gasEstimate", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "quoteExactInput",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [{ name: "exactCurrency", type: "address" }, QUOTER_PATH, { name: "exactAmount", type: "uint128" }],
+      },
+    ],
+    outputs: [
+      { name: "amountOut", type: "uint256" },
+      { name: "gasEstimate", type: "uint256" },
+    ],
+  },
+] as const;
+
+// PositionManager.poolKeys(bytes25 truncatedPoolId) — returns the full
+// PoolKey for any pool that has had a position minted through the
+// PositionManager (i.e. essentially every pool with real liquidity) in a
+// single eth_call, instead of scanning up to ~12M blocks of Initialize
+// events. Callers must re-hash the returned key and compare it to the poolId
+// (a pool with no PositionManager positions returns an all-zero key).
+export const POSITION_MANAGER_POOL_KEYS_ABI = [
+  {
+    type: "function",
+    name: "poolKeys",
+    stateMutability: "view",
+    inputs: [{ name: "poolId", type: "bytes25" }],
+    outputs: [
+      { name: "currency0", type: "address" },
+      { name: "currency1", type: "address" },
+      { name: "fee", type: "uint24" },
+      { name: "tickSpacing", type: "int24" },
+      { name: "hooks", type: "address" },
+    ],
+  },
+] as const;
 
 export const UNIVERSAL_ROUTER_COMMANDS = {
   V4_SWAP: 0x10,

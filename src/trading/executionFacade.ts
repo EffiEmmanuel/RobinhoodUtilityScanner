@@ -17,7 +17,7 @@ import { isSolanaLiveModeReady, getSolanaLiveQuote, executeSolanaLiveBuy, execut
 import { getSolanaConnection, getSolanaWalletPublicKey } from "./live/solana/wallet";
 import { getSolanaMintDecimals, getSolanaTokenBalance } from "./live/solana/tokenUtils";
 import { SOL_MINT } from "./live/solana/jupiterClient";
-import { getSolPriceUsd } from "./portfolio";
+import { getSolPriceUsd, getCachedEthPriceUsd } from "./portfolio";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -63,6 +63,15 @@ function deriveEthPriceUsd(pair: Pick<MarketPair, "priceUsd" | "priceNative" | "
   return pair.priceUsd / pair.priceNative;
 }
 
+// Multi-hop routing (live/routing.ts) means a token no longer needs a
+// native-ETH pair to be tradeable — one that only trades against USDG or a
+// tokenized stock has no pair to derive an ETH rate from, so fall back to the
+// process-wide rate portfolio.ts keeps warm (itself derived only from
+// genuinely ETH-quoted pairs, never a stock/stable-quoted one).
+function ethPriceUsdFor(pair: Pick<MarketPair, "priceUsd" | "priceNative" | "quoteTokenAddress">): number | undefined {
+  return deriveEthPriceUsd(pair) ?? getCachedEthPriceUsd();
+}
+
 // Anything past this is almost certainly not "this token is just thin" —
 // legitimate liquidity doesn't produce impact in the hundreds of percent for
 // a normal position size. Confirmed live: a quote came back at 432% impact
@@ -75,7 +84,7 @@ const SUSPICIOUS_PRICE_IMPACT_PERCENT = 25;
 function logSuspiciousQuote(
   direction: "buy" | "sell",
   tokenAddress: string,
-  quote: { poolKey: PoolKey; poolId: string; poolLiquidity: bigint },
+  quote: { poolKey: PoolKey; poolId: string; poolLiquidity?: bigint; routeLabel?: string },
   priceImpactPercent: number,
   spotPriceUsd: number,
   effectivePriceUsd: number
@@ -88,11 +97,12 @@ function logSuspiciousQuote(
       priceImpactPercent,
       spotPriceUsd,
       effectivePriceUsd,
+      route: quote.routeLabel,
       poolId: quote.poolId,
       fee: quote.poolKey.fee,
       tickSpacing: quote.poolKey.tickSpacing,
       hooks: quote.poolKey.hooks,
-      poolLiquidity: quote.poolLiquidity.toString(),
+      poolLiquidity: quote.poolLiquidity?.toString(),
     },
     "quote has suspiciously high price impact — likely quoted against the wrong pool or one with too little real depth"
   );
@@ -164,7 +174,7 @@ export async function getBuyEstimate(
     return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, tokenAmount: tokenOut };
   }
 
-  const ethPriceUsd = deriveEthPriceUsd(pair);
+  const ethPriceUsd = ethPriceUsdFor(pair);
   if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, tokenAmount: 0 };
   const amountInWei = parseEther((positionSizeUsd / ethPriceUsd).toFixed(18));
   const quote = await getLiveQuote(tokenAddress as `0x${string}`, true, amountInWei);
@@ -213,7 +223,7 @@ export async function executeBuyFill(
 
   if (chain === "solana") return executeSolanaBuyFill(tokenAddress, positionSizeUsd, pair, chain, options);
 
-  const ethPriceUsd = deriveEthPriceUsd(pair);
+  const ethPriceUsd = ethPriceUsdFor(pair);
   if (!ethPriceUsd) throw new Error("cannot determine ETH/USD price for live buy sizing (missing priceNative)");
   const ethAmount = positionSizeUsd / ethPriceUsd;
   const amountInWei = parseEther(ethAmount.toFixed(18));
@@ -416,7 +426,7 @@ export async function getSellEstimate(
   const quote = await getLiveQuote(token, false, tokenAmountRaw, { allowHighFeePools: true });
   if (!quote) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
 
-  const ethPriceUsd = deriveEthPriceUsd(pair);
+  const ethPriceUsd = ethPriceUsdFor(pair);
   if (!ethPriceUsd) return { estimatedSlippageBps: Number.MAX_SAFE_INTEGER, estimatedPriceImpactPercent: 100, priceUsd: 0 };
   const proceedsUsd = Number(formatUnits(quote.amountOut, 18)) * ethPriceUsd;
   const effectivePriceUsd = tokenAmount > 0 ? proceedsUsd / tokenAmount : 0;
@@ -455,7 +465,7 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
 
   if (chain === "solana") return executeSolanaSellFill(tokenAddress, tokenAmount, pair, chain);
 
-  const ethPriceUsd = deriveEthPriceUsd(pair);
+  const ethPriceUsd = ethPriceUsdFor(pair);
   if (!ethPriceUsd) throw new Error("cannot determine ETH/USD price for live sell sizing (missing priceNative)");
 
   const client = getPublicClient();
