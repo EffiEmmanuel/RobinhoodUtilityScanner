@@ -38,6 +38,7 @@ import {
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
 import { getSolanaHolderSnapshot } from "./solanaHolderConcentration";
 import { getCohortSizeMultiplier } from "./cohortStats";
+import { attachPendingApprovalGas } from "./approvalGas";
 import { getPublicClient } from "./live/wallet";
 import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
 import { isPoolDiscoveryInconclusiveError } from "./live/poolDiscovery";
@@ -985,7 +986,7 @@ async function openTrade(input: {
     },
   });
 
-  await db.tradeExecution.create({
+  const buyExecution = await db.tradeExecution.create({
     data: {
       tradeId: trade.id,
       type: ExecutionType.BUY,
@@ -1005,6 +1006,7 @@ async function openTrade(input: {
 
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -input.positionSizeUsd, notes: `${fill.provider} buy${fill.txHash ? ` (${fill.txHash})` : ""}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+  attachPendingApprovalGas(fill, trade.id, buyExecution.id);
 
   // Confirmed live 2026-09-13 (SL/"Stonks Launch"): isSellable() above only
   // proves the POOL's quoter works — pure curve math, no wallet involved —
@@ -1017,16 +1019,22 @@ async function openTrade(input: {
   // give-up path for a stuck position that only reveals itself after this
   // check already passed).
   if (fill.provider === "live" && !(await canWalletTransferToken(input.tokenAddress, fill.tokenAmount, input.tokenChain))) {
+    // Net of the buy's gas, like every other realized figure (pnl.ts), and
+    // entered in the ledger too — confirmed 2026-09-24 that seven write-offs
+    // only ever set the trade's figure, splitting the dashboard's per-chain
+    // card from its combined total by $15.85.
+    const writtenOffPnlUsd = -(input.positionSizeUsd + fill.gasCostUsd);
     const closed = await db.trade.update({
       where: { id: trade.id },
       data: {
         status: TradeStatus.CLOSED,
         closedAt: new Date(),
-        realizedPnlUsd: -input.positionSizeUsd,
+        realizedPnlUsd: writtenOffPnlUsd,
         realizedMultiple: 0,
         exitReason: "written off immediately — wallet cannot transfer this token at all (honeypot blocks real sells, only the quoter works)",
       },
     });
+    await recordLedgerEntry({ type: LedgerEntryType.REALIZED_PNL, tradeId: trade.id, amountUsd: writtenOffPnlUsd, notes: "written off — wallet cannot transfer this token" });
     logger.error({ tradeId: trade.id, tokenAddress: input.tokenAddress, lossUsd: input.positionSizeUsd }, "bought into an unsellable token — written off immediately rather than left to retry forever");
     const tokenRow = await db.token.findUnique({ where: { id: input.tokenId } });
     void sendTradeClosedEmail({ token: tokenRow, trade: closed }).catch((err) =>

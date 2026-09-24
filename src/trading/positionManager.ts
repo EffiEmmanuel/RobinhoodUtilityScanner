@@ -18,6 +18,7 @@ import { normalizeTradeLane } from "./tradeLane";
 import { recordExecutionQuality } from "./executionQuality";
 import type { PositionStrategyDecision } from "../ai/schemas";
 import { evaluateChartVisionGate, resetChartVisionDeferStreak } from "./chartVisionGate";
+import { sellRealizedPnlUsd, tradeRealizedPnl } from "./pnl";
 
 // When an exit first started being refused by the slippage guard, per trade —
 // drives tradingConfig.stuckExitEscalateAfterMinutes. In memory on purpose:
@@ -704,13 +705,18 @@ async function executeSell(
   const proceedsUsd = soldTokens * fill.priceUsd;
   const buyTotals = await db.tradeExecution.aggregate({
     where: { tradeId: trade.id, type: "BUY" },
-    _sum: { tokenAmount: true, usdValue: true },
+    _sum: { tokenAmount: true, usdValue: true, gasCostUsd: true },
   });
   const totalBoughtTokens = buyTotals._sum.tokenAmount ?? trade.entryTokenAmount ?? soldTokens;
   const totalBuyUsd = buyTotals._sum.usdValue ?? trade.positionSizeUsd;
-  const averageCostPerToken = totalBoughtTokens > 0 ? totalBuyUsd / totalBoughtTokens : fill.priceUsd;
-  const costBasisForSoldTokens = soldTokens * averageCostPerToken;
-  const realizedPnlThisSell = proceedsUsd - costBasisForSoldTokens;
+  const realizedPnlThisSell = sellRealizedPnlUsd({
+    proceedsUsd,
+    soldTokens,
+    totalBoughtTokens,
+    totalBuyUsd,
+    totalBuyGasUsd: buyTotals._sum.gasCostUsd ?? 0,
+    sellGasUsd: fill.gasCostUsd,
+  });
 
   await db.tradeExecution.create({
     data: {
@@ -779,8 +785,10 @@ async function closeTrade(trade: Trade, exitReason: string, options: { realizedP
   const executions = await db.tradeExecution.findMany({ where: { tradeId: trade.id } });
   const totalBuyUsd = executions.filter((e) => e.type === "BUY").reduce((s, e) => s + (e.usdValue ?? 0), 0);
   const totalSellUsd = executions.filter((e) => e.type === "SELL").reduce((s, e) => s + (e.usdValue ?? 0), 0);
-  const realizedPnlUsd = options.realizedPnlUnknown ? null : totalSellUsd - totalBuyUsd;
-  const realizedMultiple = options.realizedPnlUnknown ? null : totalBuyUsd > 0 ? totalSellUsd / totalBuyUsd : undefined;
+  const totalGasUsd = executions.reduce((s, e) => s + (e.gasCostUsd ?? 0), 0);
+  const pnl = tradeRealizedPnl({ totalBuyUsd, totalSellUsd, totalGasUsd });
+  const realizedPnlUsd = options.realizedPnlUnknown ? null : pnl.realizedPnlUsd;
+  const realizedMultiple = options.realizedPnlUnknown ? null : pnl.realizedMultiple;
 
   // Confirmed live 2026-09-17 (QUORUM +49% net, CLIP +105% net): exitReason
   // only ever describes what triggered the LAST sell. When staged
@@ -809,6 +817,17 @@ async function closeTrade(trade: Trade, exitReason: string, options: { realizedP
       amountUsd: 0,
       notes: "external/manual wallet exit detected; proceeds and realized PnL were not observed by the bot",
     });
+  } else if (realizedPnlUsd !== null) {
+    // The dashboard's combined total sums REALIZED_PNL ledger rows while its
+    // per-chain cards sum Trade.realizedPnlUsd (portfolio.ts). Confirmed
+    // 2026-09-24 that the two had drifted ~$16 apart. Close out any gap here,
+    // so a pre-approval's gas confirming after the last sell, or rounding
+    // across partial sells, can never split them again.
+    const booked = await db.ledgerEntry.aggregate({ where: { tradeId: trade.id, type: LedgerEntryType.REALIZED_PNL }, _sum: { amountUsd: true } });
+    const drift = realizedPnlUsd - (booked._sum.amountUsd ?? 0);
+    if (Math.abs(drift) > 1e-9) {
+      await recordLedgerEntry({ type: LedgerEntryType.REALIZED_PNL, tradeId: trade.id, amountUsd: drift, notes: "close-out: ledger brought in line with the trade's realized P&L" });
+    }
   }
 
   logger.info({ tradeId: trade.id, realizedPnlUsd, realizedMultiple, exitReason: finalExitReason }, "trade closed");

@@ -48,6 +48,32 @@ export interface FillResult extends PaperQuote {
   // logging) only ever stores/displays this.
   txHash?: string;
   approvalTxHashes?: string[];
+  // Live EVM buys only: gas of the background sell pre-approval, in USD,
+  // resolving once it confirms (0 if none was needed or it failed). Kept off
+  // the buy's critical path — see attachPendingApprovalGas.
+  pendingApprovalGasUsd?: Promise<number>;
+}
+
+async function sumGasCostWei(client: ReturnType<typeof getPublicClient>, hashes: string[]): Promise<bigint> {
+  const receipts = await Promise.all(hashes.map((hash) => client.waitForTransactionReceipt({ hash: hash as `0x${string}` })));
+  return receipts.reduce((sum, r) => sum + r.gasUsed * r.effectiveGasPrice, 0n);
+}
+
+type CallFrame = { to?: string; value?: string; calls?: CallFrame[] };
+
+/** Native ETH the wallet received inside one transaction, from its call
+ * trace. Unlike a before/after balance read, nothing else the wallet does at
+ * the same moment can leak into it. */
+async function getEthReceivedFromTrace(client: ReturnType<typeof getPublicClient>, hash: `0x${string}`, wallet: string): Promise<bigint> {
+  const trace = (await (client.request as (args: { method: string; params: unknown[] }) => Promise<unknown>)({
+    method: "debug_traceTransaction",
+    params: [hash, { tracer: "callTracer" }],
+  })) as CallFrame;
+  const target = wallet.toLowerCase();
+  const walk = (frame: CallFrame, top: boolean): bigint =>
+    (!top && frame.to?.toLowerCase() === target && frame.value ? BigInt(frame.value) : 0n) +
+    (frame.calls ?? []).reduce((sum, child) => sum + walk(child, false), 0n);
+  return walk(trace, true);
 }
 
 // Confirmed live 2026-09-11: OPAI's primaryPair was quoted in QQQ (a
@@ -290,6 +316,9 @@ export async function executeBuyFill(
   preApproval.catch((err) =>
     logger.warn({ tokenAddress, err: String(err) }, "pre-approving this position for a future sell failed — will retry at sell time instead")
   );
+  const pendingApprovalGasUsd = preApproval
+    .then(async (hashes) => Number(formatUnits(await sumGasCostWei(client, hashes), 18)) * ethPriceUsd)
+    .catch(() => 0);
 
   return {
     priceUsd: tokenAmount > 0 ? positionSizeUsd / tokenAmount : 0,
@@ -300,6 +329,7 @@ export async function executeBuyFill(
     provider: "live",
     txHash: result.txHash,
     approvalTxHashes: result.approvalTxHashes,
+    pendingApprovalGasUsd,
   };
 }
 
@@ -527,10 +557,22 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
   const receipt = await client.waitForTransactionReceipt({ hash: result.txHash });
   if (receipt.status !== "success") throw new Error(`live sell transaction reverted on-chain: ${result.txHash}`);
 
-  const ethBalanceAfter = await client.getBalance({ address: wallet });
-  const gasCostWei = receipt.gasUsed * receipt.effectiveGasPrice;
-  // ETH received = balance delta plus what was spent on gas (gas already left the balance too)
-  const ethReceivedWei = ethBalanceAfter - ethBalanceBefore + gasCostWei;
+  // Any approvals this sell needed (sent inside executeLiveSell) are part of
+  // its cost — pnl.ts nets gasCostUsd out of realized P&L.
+  const approvalGasWei = await sumGasCostWei(client, result.approvalTxHashes).catch(() => 0n);
+  const gasCostWei = receipt.gasUsed * receipt.effectiveGasPrice + approvalGasWei;
+  // Confirmed 2026-09-24 (DUO): proceeds read as a before/after balance
+  // delta picked up another of the wallet's transactions landing in between,
+  // and a real ~$2.50 sell was recorded as $0.016. Read what the sell itself
+  // paid the wallet from its trace; fall back to the balance delta only if
+  // the RPC can't trace (or traces nothing, which a real sell never does).
+  const tracedWei = await getEthReceivedFromTrace(client, result.txHash, wallet).catch((err) => {
+    logger.warn({ tokenAddress, txHash: result.txHash, err: String(err) }, "could not trace the sell's ETH proceeds — falling back to the wallet balance delta");
+    return 0n;
+  });
+  // Balance delta plus every wei of gas spent since the "before" read (the
+  // swap's and the approvals' — both already left the balance too).
+  const ethReceivedWei = tracedWei > 0n ? tracedWei : (await client.getBalance({ address: wallet })) - ethBalanceBefore + gasCostWei;
   const ethReceived = Number(formatUnits(ethReceivedWei, 18));
   const gasCostUsd = Number(formatUnits(gasCostWei, 18)) * ethPriceUsd;
   const proceedsUsd = ethReceived * ethPriceUsd;

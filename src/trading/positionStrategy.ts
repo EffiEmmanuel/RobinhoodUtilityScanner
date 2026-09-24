@@ -14,6 +14,7 @@ import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./po
 import { executeBuyFill, getBuyEstimate, isSellable, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
 import { renderPositionChart } from "./chartVisionGate";
+import { attachPendingApprovalGas } from "./approvalGas";
 
 /**
  * The "smart" half of active management: a short-interval (not per-tick, but
@@ -324,7 +325,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
     return;
   }
 
-  await db.tradeExecution.create({
+  const buyExecution = await db.tradeExecution.create({
     data: {
       tradeId: trade.id,
       type: "BUY",
@@ -343,6 +344,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   });
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -trade.pendingReentryUsd, notes: `${fill.provider} re-entry — ${trade.pendingReentryReason ?? "AI-proposed dip buy"}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+  attachPendingApprovalGas(fill, trade.id, buyExecution.id);
 
   await db.trade.update({
     where: { id: trade.id },
