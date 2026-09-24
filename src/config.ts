@@ -237,6 +237,17 @@ export const config = {
   // SMTP & API -> API Keys). SMTP_USER/SMTP_PASS above stay as a fallback
   // when this isn't set.
   brevoApiKey: optStr("BREVO_API_KEY"),
+  // Resend key pool (user directive 2026-09-24), tried in this order:
+  // RESEND_API_KEYS (comma-separated, highest priority first), then the
+  // original single RESEND_API_KEY last — that account already hit its
+  // monthly cap once. Each key should be its own Resend account, so each
+  // carries its own free quota (100/day, 3,000/month); mailer.ts moves to
+  // the next key when one hits a limit. Takes precedence over Brevo/SMTP.
+  // Without a verified domain, Resend only sends from its shared test
+  // address, and only to the address the account was registered with — so
+  // each account here must be registered to ALERT_EMAIL_TO.
+  resendApiKeys: [...new Set([...csv("RESEND_API_KEYS"), ...csv("RESEND_API_KEY")])],
+  resendFrom: str("RESEND_FROM", "UtilityScout <onboarding@resend.dev>"),
 
   minUtilityProbability: num("MIN_UTILITY_PROBABILITY", 0.65),
   maxMemeProbability: num("MAX_MEME_PROBABILITY", 0.45),
@@ -270,9 +281,9 @@ export const config = {
 export function assertRuntimeConfig() {
   const missing: string[] = [];
   if (!config.geminiApiKey) missing.push("GEMINI_API_KEY");
-  // Either transport works (see mailer.ts) — only flag SMTP as missing when
-  // Brevo isn't configured as the alternative.
-  if (!config.brevoApiKey) {
+  // Any transport works (see mailer.ts) — only flag SMTP as missing when
+  // neither Resend nor Brevo is configured as the alternative.
+  if (config.resendApiKeys.length === 0 && !config.brevoApiKey) {
     if (!config.smtpUser) missing.push("SMTP_USER");
     if (!config.smtpPass) missing.push("SMTP_PASS");
   }

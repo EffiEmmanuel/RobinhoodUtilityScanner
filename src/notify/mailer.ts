@@ -91,6 +91,78 @@ async function sendViaBrevo(input: MailInput): Promise<string | undefined> {
   return result.messageId;
 }
 
+const RESEND_URL = "https://api.resend.com/emails";
+const RESEND_TIMEOUT_MS = 15_000;
+const resendCooldownUntil = new Map<string, number>();
+
+/**
+ * How long a Resend key sits out after Resend refuses it. Quota errors clear
+ * on their own (the daily one within a day), so the key is re-tried hourly.
+ * A 401/403 means the key can't deliver at all until a human fixes the
+ * account (revoked key, or testing mode refusing a recipient that isn't the
+ * account owner), so it's re-tried rarely. Anything else — the per-second
+ * rate limit, a 5xx, a timeout — only moves this one email to the next key.
+ */
+export function resendCooldownMs(status: number, errorName?: string): number {
+  if (errorName === "daily_quota_exceeded" || errorName === "monthly_quota_exceeded") return 60 * 60_000;
+  if (status === 401 || status === 403) return 6 * 60 * 60_000;
+  return 0;
+}
+
+/** Keys in priority order, minus the ones sitting out — or all of them when
+ * every key is, since a cooldown is only an estimate and dropping the email
+ * is worse than one more refused request. */
+export function resendKeyOrder(keys: string[], cooldownUntil: ReadonlyMap<string, number>, now: number): string[] {
+  const ready = keys.filter((key) => (cooldownUntil.get(key) ?? 0) <= now);
+  return ready.length > 0 ? ready : keys;
+}
+
+/**
+ * Resend is tried key by key in RESEND_API_KEYS priority order (config.ts),
+ * so one account hitting its free-tier cap doesn't stop alerts. Uses plain
+ * fetch rather than fetchJsonWithRetry: which key to try next depends on
+ * Resend's error name, and fetchJsonWithRetry's errors drop the body. The
+ * sender is always RESEND_FROM, since Resend refuses unverified sender
+ * domains like the gmail.com one in ALERT_EMAIL_FROM.
+ */
+async function sendViaResend(input: MailInput): Promise<string | undefined> {
+  let lastError = "no keys";
+  for (const key of resendKeyOrder(config.resendApiKeys, resendCooldownUntil, Date.now())) {
+    const keyNumber = config.resendApiKeys.indexOf(key) + 1; // never log the key itself
+    try {
+      const res = await fetch(RESEND_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          from: config.resendFrom,
+          to: [input.to],
+          subject: input.subject,
+          text: input.text,
+          ...(input.html ? { html: input.html } : {}),
+        }),
+        signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
+      });
+      const body = (await res.json().catch(() => ({}))) as { id?: string; name?: string; message?: string };
+      if (res.ok) {
+        resendCooldownUntil.delete(key);
+        logger.info({ to: input.to, subject: input.subject, messageId: body.id, keyNumber }, "email accepted by Resend");
+        return body.id;
+      }
+      const cooldownMs = resendCooldownMs(res.status, body.name);
+      if (cooldownMs > 0) resendCooldownUntil.set(key, Date.now() + cooldownMs);
+      lastError = `HTTP ${res.status} ${body.name ?? ""}: ${body.message ?? ""}`;
+      logger.warn(
+        { keyNumber, status: res.status, error: body.name, message: body.message, cooldownMinutes: cooldownMs / 60_000 },
+        "Resend refused the email on this key, trying the next one"
+      );
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.warn({ keyNumber, err: lastError }, "Resend request failed on this key, trying the next one");
+    }
+  }
+  throw new Error(`Resend send failed on every key: ${lastError}`);
+}
+
 async function sendViaSmtp(input: MailInput): Promise<string | undefined> {
   if (!config.smtpUser || !config.smtpPass) throw new Error("SMTP_USER/SMTP_PASS are not set");
   try {
@@ -111,6 +183,7 @@ async function sendViaSmtp(input: MailInput): Promise<string | undefined> {
 }
 
 export async function sendMail(input: MailInput): Promise<string | undefined> {
+  if (config.resendApiKeys.length > 0) return sendViaResend(input);
   if (config.brevoApiKey) return sendViaBrevo(input);
   return sendViaSmtp(input);
 }
