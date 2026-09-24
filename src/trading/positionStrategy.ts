@@ -317,10 +317,31 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
     return;
   }
 
+  // Claim the re-entry before spending on it. During a deploy Railway runs
+  // the old and new container side by side (~37s measured 2026-09-24), and
+  // both monitor the same positions: without an atomic claim, both could buy
+  // the same re-entry. Only the process whose conditional update lands buys.
+  const pending = {
+    pendingReentryTargetMcap: trade.pendingReentryTargetMcap,
+    pendingReentryUsd: trade.pendingReentryUsd,
+    pendingReentryExpiresAt: trade.pendingReentryExpiresAt,
+    pendingReentryReason: trade.pendingReentryReason,
+  };
+  const claim = await db.trade.updateMany({
+    where: { id: trade.id, reentryCount: trade.reentryCount, pendingReentryTargetMcap: trade.pendingReentryTargetMcap },
+    data: { reentryCount: { increment: 1 }, pendingReentryTargetMcap: null, pendingReentryUsd: null, pendingReentryExpiresAt: null, pendingReentryReason: null },
+  });
+  if (claim.count !== 1) {
+    logger.info({ tradeId: trade.id }, "re-entry already claimed by another process — skipping");
+    return;
+  }
+
   let fill: FillResult;
   try {
     fill = await executeBuyFill(token.address, trade.pendingReentryUsd, pair, token.chain);
   } catch (err) {
+    // Put the claim back so the next tick retries, same as before the claim existed.
+    await db.trade.update({ where: { id: trade.id }, data: { ...pending, reentryCount: { decrement: 1 } } });
     logger.error({ tradeId: trade.id, err: String(err) }, "re-entry buy execution failed — will retry next tick");
     return;
   }
@@ -345,17 +366,6 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -trade.pendingReentryUsd, notes: `${fill.provider} re-entry — ${trade.pendingReentryReason ?? "AI-proposed dip buy"}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
   attachPendingApprovalGas(fill, trade.id, buyExecution.id);
-
-  await db.trade.update({
-    where: { id: trade.id },
-    data: {
-      reentryCount: { increment: 1 },
-      pendingReentryTargetMcap: null,
-      pendingReentryUsd: null,
-      pendingReentryExpiresAt: null,
-      pendingReentryReason: null,
-    },
-  });
 
   logger.info({ tradeId: trade.id, usdSpent: trade.pendingReentryUsd, tokenAmount: fill.tokenAmount, provider: fill.provider }, "re-entry buy executed — price reached the AI-proposed target");
 }

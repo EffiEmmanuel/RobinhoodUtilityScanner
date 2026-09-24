@@ -155,34 +155,43 @@ async function recordWalletTransfer(
         ? "POSSIBLE_SELL"
         : "SELF_TRANSFER";
 
-  await db.trackedWalletEvent.create({
-    data: {
-      walletId,
-      tokenId: tokenRecord?.id,
-      chain: config.targetChainId,
-      tokenAddress: transfer.tokenAddress.toLowerCase(),
-      txHash: transfer.txHash,
-      logIndex: transfer.logIndex,
-      blockNumber: transfer.blockNumber,
-      blockTimestamp: timestamp,
-      direction: transfer.direction,
-      classification,
-      confidence: transfer.direction === WalletEventDirection.SELF_TRANSFER ? 0.1 : 0.55,
-      rawAmount: transfer.rawAmount.toString(),
-      tokenAmount: amount,
-      usdValue: amount !== undefined && pair?.priceUsd !== undefined ? amount * pair.priceUsd : undefined,
-      marketCapUsd: pair?.marketCapUsd,
-      liquidityUsd: pair?.liquidityUsd,
-      discoveredToken,
-      rawEvent: {
-        from: transfer.from,
-        to: transfer.to,
+  try {
+    await db.trackedWalletEvent.create({
+      data: {
+        walletId,
+        tokenId: tokenRecord?.id,
+        chain: config.targetChainId,
+        tokenAddress: transfer.tokenAddress.toLowerCase(),
         txHash: transfer.txHash,
         logIndex: transfer.logIndex,
-        blockNumber: transfer.blockNumber.toString(),
-      } as unknown as object,
-    },
-  });
+        blockNumber: transfer.blockNumber,
+        blockTimestamp: timestamp,
+        direction: transfer.direction,
+        classification,
+        confidence: transfer.direction === WalletEventDirection.SELF_TRANSFER ? 0.1 : 0.55,
+        rawAmount: transfer.rawAmount.toString(),
+        tokenAmount: amount,
+        usdValue: amount !== undefined && pair?.priceUsd !== undefined ? amount * pair.priceUsd : undefined,
+        marketCapUsd: pair?.marketCapUsd,
+        liquidityUsd: pair?.liquidityUsd,
+        discoveredToken,
+        rawEvent: {
+          from: transfer.from,
+          to: transfer.to,
+          txHash: transfer.txHash,
+          logIndex: transfer.logIndex,
+          blockNumber: transfer.blockNumber.toString(),
+        } as unknown as object,
+      },
+    });
+  } catch (err) {
+    // The same transfer was recorded between the findUnique above and this
+    // create. Confirmed live 2026-09-24 on every deploy: Railway runs the old
+    // and new container side by side for ~37s, both polling the same
+    // wallets, and the loser's create failed the whole poll.
+    if ((err as { code?: string })?.code !== "P2002") throw err;
+    return { created: false, discoveredToken: false };
+  }
 
   return { created: true, discoveredToken };
 }
