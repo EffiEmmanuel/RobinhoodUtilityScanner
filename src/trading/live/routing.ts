@@ -291,7 +291,7 @@ async function resolvePoolKey(client: PublicClient, poolId: `0x${string}`, creat
   return key;
 }
 
-interface TokenPool {
+export interface TokenPool {
   pool: RoutePool;
   counter: `0x${string}`;
   liquidityUsd: number;
@@ -450,6 +450,81 @@ async function extendedRoutesVia(client: PublicClient, hubPool: TokenPool, token
   return routes;
 }
 
+/** Routes through a set of the token's own pools: direct, WETH-wrapped, via a hub, or one hop further out. */
+async function routesThroughPools(client: PublicClient, token: `0x${string}`, pools: TokenPool[]): Promise<SwapRoute[]> {
+  const routes: SwapRoute[] = [];
+  for (const p of pools) {
+    if (same(p.counter, NATIVE_ETH_CURRENCY)) routes.push({ pools: [p.pool], hubs: [] });
+    else if (same(p.counter, ROBINHOOD_WETH)) routes.push({ pools: [p.pool], hubs: [], viaWeth: true });
+  }
+  const hubPools = pools.filter((p) => !same(p.counter, NATIVE_ETH_CURRENCY) && !same(p.counter, ROBINHOOD_WETH));
+  const legsPerHub = await Promise.allSettled(hubPools.map((p) => hubLegs(client, p.counter)));
+  const strandedHubPools: TokenPool[] = [];
+  legsPerHub.forEach((legs, i) => {
+    if (legs.status !== "fulfilled") return;
+    if (legs.value.length === 0) strandedHubPools.push(hubPools[i]);
+    for (const leg of legs.value) routes.push({ pools: [leg, hubPools[i].pool], hubs: [hubPools[i].counter] });
+  });
+  // A pairing currency with no native-ETH pool of its own (a smaller token, or
+  // a tokenized stock that only trades against USDG) is still reachable one
+  // hop further out: through one of ITS pools whose other side does have an
+  // ETH leg (ETH -> X -> pairing -> token), or is WETH (wrapped, WETH ->
+  // pairing -> token).
+  const extended = await Promise.allSettled(strandedHubPools.slice(0, MAX_STRANDED_HUBS).map((p) => extendedRoutesVia(client, p, token)));
+  for (const result of extended) {
+    if (result.status === "fulfilled") routes.push(...result.value);
+  }
+  return routes;
+}
+
+// Every v4 pool the token is in, whatever it's paired against — straight
+// from PoolManager's Initialize events (the token can sit in either currency
+// slot, so both are searched). A token's pools are created around its launch,
+// so the newest-first scan stops a little past the first chunk that has any.
+const ON_CHAIN_V4_TTL_MS = 30 * 60_000;
+const ON_CHAIN_V4_EXTRA_CHUNKS = 2;
+const onChainV4Cache = new Map<string, { at: number; pools: TokenPool[] }>();
+
+export async function onChainV4Pools(client: PublicClient, token: `0x${string}`): Promise<TokenPool[]> {
+  const key = token.toLowerCase();
+  const cached = onChainV4Cache.get(key);
+  if (cached && Date.now() - cached.at < ON_CHAIN_V4_TTL_MS) return cached.pools;
+
+  const latest = await client.getBlockNumber();
+  const found: { id: `0x${string}`; key: PoolKey }[] = [];
+  let lastChunk = POOL_ID_SCAN_MAX_CHUNKS;
+  for (let i = 0; i < Math.min(POOL_ID_SCAN_MAX_CHUNKS, lastChunk); i++) {
+    const toBlock = latest - BigInt(i) * (POOL_ID_SCAN_CHUNK_BLOCKS + 1n);
+    if (toBlock < 0n) break;
+    const fromBlock = toBlock > POOL_ID_SCAN_CHUNK_BLOCKS ? toBlock - POOL_ID_SCAN_CHUNK_BLOCKS : 0n;
+    const range = { address: UNISWAP_V4_ADDRESSES.poolManager as `0x${string}`, event: POOL_MANAGER_ABI[0], fromBlock, toBlock };
+    const [asCurrency0, asCurrency1] = await Promise.all([
+      client.getLogs({ ...range, args: { currency0: token } }),
+      client.getLogs({ ...range, args: { currency1: token } }),
+    ]);
+    for (const log of [...asCurrency0, ...asCurrency1]) {
+      const poolKey = keyFromInitializeLog([log]);
+      if (poolKey && log.args.id) found.push({ id: log.args.id, key: poolKey });
+    }
+    if (found.length > 0 && lastChunk === POOL_ID_SCAN_MAX_CHUNKS) lastChunk = i + 1 + ON_CHAIN_V4_EXTRA_CHUNKS;
+    if (fromBlock === 0n) break;
+  }
+
+  // Keep only pools with liquidity in range right now — a drained pool
+  // (confirmed: KVRA/ACTR/POCKA's WETH pools, pulled) can't fill anything.
+  const withLiquidity = await Promise.allSettled(found.map((f) => readPoolLiquidity(client, f.id)));
+  const pools: TokenPool[] = [];
+  withLiquidity.forEach((r, i) => {
+    if (r.status !== "fulfilled" || r.value === 0n) return;
+    const { id, key: poolKey } = found[i];
+    poolKeyById.set(id.toLowerCase(), poolKey);
+    pools.push({ pool: { poolKey, poolId: id }, counter: otherCurrency(poolKey, token), liquidityUsd: 0 });
+  });
+  onChainV4Cache.set(key, { at: Date.now(), pools });
+  if (pools.length > 0) logger.info({ token, pools: pools.length }, "found live v4 pools on-chain that DexScreener doesn't list");
+  return pools;
+}
+
 export async function candidateRoutes(
   client: PublicClient,
   tokenAddress: `0x${string}`,
@@ -491,27 +566,18 @@ export async function candidateRoutes(
   if (listedResult.status === "rejected") {
     logger.warn({ token, err: String(listedResult.reason) }, "listing a token's v4 pools failed — quoting direct-ETH routes only");
   }
-  for (const p of listed) {
-    if (same(p.counter, NATIVE_ETH_CURRENCY)) add({ pools: [p.pool], hubs: [] });
-    else if (same(p.counter, ROBINHOOD_WETH)) add({ pools: [p.pool], hubs: [], viaWeth: true });
-  }
-  const hubPools = listed.filter((p) => !same(p.counter, NATIVE_ETH_CURRENCY) && !same(p.counter, ROBINHOOD_WETH));
-  const legsPerHub = await Promise.allSettled(hubPools.map((p) => hubLegs(client, p.counter)));
-  const strandedHubPools: TokenPool[] = [];
-  legsPerHub.forEach((legs, i) => {
-    if (legs.status !== "fulfilled") return;
-    if (legs.value.length === 0) strandedHubPools.push(hubPools[i]);
-    for (const leg of legs.value) add({ pools: [leg, hubPools[i].pool], hubs: [hubPools[i].counter] });
-  });
+  (await routesThroughPools(client, token, listed)).forEach(add);
 
-  // A pairing currency with no native-ETH pool of its own (a smaller token, or
-  // a tokenized stock that only trades against USDG) is still reachable one
-  // hop further out: through one of ITS pools whose other side does have an
-  // ETH leg (ETH -> X -> pairing -> token), or is WETH (wrapped, WETH ->
-  // pairing -> token).
-  const extended = await Promise.allSettled(strandedHubPools.slice(0, MAX_STRANDED_HUBS).map((p) => extendedRoutesVia(client, p, token)));
-  for (const result of extended) {
-    if (result.status === "fulfilled") result.value.forEach(add);
+  // DexScreener drops pools — confirmed 2026-09-24 that QPULL's WETH pool
+  // still held real liquidity while DexScreener listed only two dust pools
+  // for it. With nothing usable listed, go to PoolManager's own records.
+  // This is also what keeps an open position sellable after a restart.
+  if (routes.length === 0) {
+    try {
+      (await routesThroughPools(client, token, await onChainV4Pools(client, token))).forEach(add);
+    } catch (err) {
+      logger.warn({ token, err: String(err).slice(0, 200) }, "on-chain v4 pool search failed");
+    }
   }
 
   if (routes.length === 0 && directResult.status === "rejected" && isPoolDiscoveryInconclusiveError(directResult.reason)) {
