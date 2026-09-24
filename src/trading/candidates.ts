@@ -1,7 +1,7 @@
 import { db } from "../db";
 import { logger } from "../logger";
 import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/prisma";
-import { evaluateCandidate } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { classifyTradeLane } from "./tradeLane";
 import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
@@ -68,7 +68,7 @@ export async function generateTradeCandidates(): Promise<number> {
     }
 
     const primaryPair = (
-      run.rawResearch as { market?: { primaryPair?: { liquidityUsd?: number; buys1h?: number; sells1h?: number } } } | null
+      run.rawResearch as { market?: { primaryPair?: { dexId?: string; liquidityUsd?: number; buys1h?: number; sells1h?: number } } } | null
     )?.market?.primaryPair;
 
     const evaluation = evaluateCandidate({
@@ -77,6 +77,8 @@ export async function generateTradeCandidates(): Promise<number> {
       contractScore: run.contractScore ?? 0,
       liquidityUsd: primaryPair?.liquidityUsd ?? 0,
       hardReject: run.hardReject,
+      chain: token.chain,
+      onBondingCurve: isBondingCurvePair(primaryPair),
     });
     const utilityGate = evaluateUtilityOnlyGate(
       utilityGateInputFromRawResearch(run.rawResearch, {

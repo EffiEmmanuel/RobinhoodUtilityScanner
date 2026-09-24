@@ -15,6 +15,19 @@ export interface CandidateRiskInput {
   contractScore: number;
   liquidityUsd: number;
   hardReject: boolean;
+  chain: string;
+  // Pre-bond pump.fun pair — see isBondingCurvePair.
+  onBondingCurve: boolean;
+}
+
+/**
+ * A pre-bond pump.fun pair: DexScreener reports no liquidity for a bonding
+ * curve at all, so a min-liquidity check reads it as $0 and rejects every
+ * one. Exit-ability is still enforced for real at entry time by the
+ * executable buy-quote (slippage/price-impact) and sell-quote checks.
+ */
+export function isBondingCurvePair(pair: { dexId?: string; liquidityUsd?: number } | undefined): boolean {
+  return pair?.dexId === "pumpfun" && pair.liquidityUsd === undefined;
 }
 
 export interface CandidateRiskResult {
@@ -32,8 +45,11 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
 
   const qualityScoreOk = input.qualityScore >= tradingConfig.minTradeQualityScore;
   const confidenceOk = input.researchConfidence >= tradingConfig.minTradeResearchConfidence;
-  const contractScoreOk = input.contractScore >= tradingConfig.minTradeContractScore;
-  const liquidityOk = input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
+  // Solana has no contract research (its score is a fixed placeholder, which
+  // failed every Solana token against this bar). Mint/freeze authority is
+  // enforced instead by the Solana honeypot gate right before entry.
+  const contractScoreOk = input.chain === "solana" || input.contractScore >= tradingConfig.minTradeContractScore;
+  const liquidityOk = input.onBondingCurve || input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
   if (!qualityScoreOk) {
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }

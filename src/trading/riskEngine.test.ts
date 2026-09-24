@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
+  isBondingCurvePair,
   calculatePositionSize,
   validateEntry,
   validatePosition,
@@ -46,6 +47,8 @@ describe("evaluateCandidate", () => {
       contractScore: 99,
       liquidityUsd: 1_000_000,
       hardReject: true,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(false);
     expect(result.riskBucket).toBe("REJECT");
@@ -58,6 +61,8 @@ describe("evaluateCandidate", () => {
       contractScore: 90,
       liquidityUsd: 100_000,
       hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(false);
   });
@@ -69,6 +74,8 @@ describe("evaluateCandidate", () => {
       contractScore: 90,
       liquidityUsd: 100_000,
       hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("LOW");
@@ -81,6 +88,8 @@ describe("evaluateCandidate", () => {
       contractScore: 76,
       liquidityUsd: 15_000,
       hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(true);
     expect(result.riskBucket).toBe("HIGH");
@@ -101,6 +110,8 @@ describe("evaluateCandidate", () => {
       contractScore: 100,
       liquidityUsd: 20_783,
       hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(false);
   });
@@ -112,8 +123,62 @@ describe("evaluateCandidate", () => {
       contractScore: 100,
       liquidityUsd: 5_000,
       hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
     });
     expect(result.eligible).toBe(false);
+  });
+
+  // User directive 2026-09-24 (DESKS): a Solana token's contract score is a
+  // fixed placeholder (no Solana contract research exists), and a pre-bond
+  // pump.fun pair reports no liquidity at all — both used to fail every such
+  // token regardless of quality.
+  it("does not hold a Solana token to the contract-score bar it can't be measured against", () => {
+    const result = evaluateCandidate({
+      qualityScore: tradingConfig.minTradeQualityScore + 5,
+      researchConfidence: tradingConfig.minTradeResearchConfidence + 5,
+      contractScore: 50,
+      liquidityUsd: tradingConfig.minTradeLiquidityUsd * 2,
+      hardReject: false,
+      chain: "solana",
+      onBondingCurve: false,
+    });
+    expect(result.eligible).toBe(true);
+  });
+
+  it("still enforces the contract-score bar on EVM", () => {
+    const result = evaluateCandidate({
+      qualityScore: tradingConfig.minTradeQualityScore + 5,
+      researchConfidence: tradingConfig.minTradeResearchConfidence + 5,
+      contractScore: 50,
+      liquidityUsd: tradingConfig.minTradeLiquidityUsd * 2,
+      hardReject: false,
+      chain: "robinhood",
+      onBondingCurve: false,
+    });
+    expect(result.eligible).toBe(false);
+  });
+
+  it("does not reject a bonding-curve pair for reporting no liquidity", () => {
+    const result = evaluateCandidate({
+      qualityScore: tradingConfig.minTradeQualityScore + 5,
+      researchConfidence: tradingConfig.minTradeResearchConfidence + 5,
+      contractScore: 50,
+      liquidityUsd: 0,
+      hardReject: false,
+      chain: "solana",
+      onBondingCurve: true,
+    });
+    expect(result.eligible).toBe(true);
+  });
+});
+
+describe("isBondingCurvePair", () => {
+  it("is true only for a pump.fun pair with no reported liquidity", () => {
+    expect(isBondingCurvePair({ dexId: "pumpfun" })).toBe(true);
+    expect(isBondingCurvePair({ dexId: "pumpfun", liquidityUsd: 29_000 })).toBe(false);
+    expect(isBondingCurvePair({ dexId: "pumpswap" })).toBe(false);
+    expect(isBondingCurvePair(undefined)).toBe(false);
   });
 });
 

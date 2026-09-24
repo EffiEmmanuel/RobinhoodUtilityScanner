@@ -9,7 +9,7 @@ import { callStructured } from "../ai/provider";
 import { NarrativeQualitySchema, NARRATIVE_QUALITY_JSON_SCHEMA } from "../ai/schemas";
 import { NARRATIVE_QUALITY_CLASSIFIER_SYSTEM, buildNarrativeQualityPrompt } from "../ai/prompts";
 import { evaluateHoneypotRisk, isHoneypotCheckInconclusiveError } from "./honeypotCheck";
-import { evaluateCandidate } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 
@@ -327,6 +327,8 @@ async function createNarrativeCandidate(input: {
     contractScore,
     liquidityUsd,
     hardReject,
+    chain: token.chain,
+    onBondingCurve: isBondingCurvePair(input.pair),
   });
   const strategy = await getActiveStrategyVersion();
   const candidate = await db.tradeCandidate.create({

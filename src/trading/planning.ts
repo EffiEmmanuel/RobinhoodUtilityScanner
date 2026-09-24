@@ -5,7 +5,7 @@ import { callStructured } from "../ai/provider";
 import { TradeAnalysisSchema, TRADE_ANALYSIS_JSON_SCHEMA } from "./schemas";
 import { TRADE_ANALYSIS_SYSTEM, buildTradeAnalysisPrompt } from "./prompts";
 import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesForPrompt } from "./marketAnalysis";
-import { evaluateCandidate } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
@@ -55,6 +55,8 @@ export async function planCandidate(candidateId: string): Promise<void> {
     contractScore: run.contractScore ?? 0,
     liquidityUsd,
     hardReject: run.hardReject,
+    chain: candidate.token.chain,
+    onBondingCurve: isBondingCurvePair(market.primaryPair),
   });
   const utilityGate = evaluateUtilityOnlyGate(
     utilityGateInputFromRawResearch(run.rawResearch, {
