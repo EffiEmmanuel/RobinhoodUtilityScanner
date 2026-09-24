@@ -17,12 +17,20 @@ export interface FactorResult {
   score: number; // 0-100
   confidence: Confidence;
   reasoning?: string;
+  // True when the input behind this factor was never collected at all (not
+  // "collected and looked bad"). Excluded from finalScore/confidence rather
+  // than averaged in as a fake middling number — see computeScore.
+  unmeasured?: boolean;
 }
 
 export interface ScoringInputs {
   classification: BrandingInput;
   synthesis: ResearchSynthesis;
   onchain: OnchainResearchResult;
+  // False for chains with no on-chain contract research (Solana today — its
+  // mint/freeze-authority safety is enforced by the honeypot gate right
+  // before any trade instead). Defaults to true.
+  onchainApplicable?: boolean;
   market: MarketSummary;
   holders?: {
     top1Percent: number;
@@ -84,7 +92,10 @@ function fromFactorScore(f: FactorScore): FactorResult {
   return { score: clamp(f.score), confidence: f.confidence, reasoning: f.reasoning };
 }
 
-function contractSafetyScore(onchain: OnchainResearchResult): FactorResult {
+function contractSafetyScore(onchain: OnchainResearchResult, applicable: boolean): FactorResult {
+  if (!applicable) {
+    return { score: 50, confidence: "LOW", reasoning: "not applicable on this chain (checked by the entry-time honeypot gate)", unmeasured: true };
+  }
   if (onchain.status === "UNAVAILABLE") {
     return { score: 50, confidence: "LOW", reasoning: "on-chain RPC unreachable" };
   }
@@ -132,7 +143,9 @@ function contractSafetyScore(onchain: OnchainResearchResult): FactorResult {
 
 function liquidityScore(pair?: MarketPair): FactorResult {
   if (!pair || pair.liquidityUsd === undefined) {
-    return { score: 40, confidence: "LOW", reasoning: "no liquidity data available" };
+    // e.g. every pre-bond pump.fun pair — DexScreener reports no liquidity
+    // for a bonding curve at all.
+    return { score: 40, confidence: "LOW", reasoning: "no liquidity data available", unmeasured: true };
   }
   const liq = pair.liquidityUsd;
   let score = Math.min(60, (liq / config.minLiquidityUsd) * 30);
@@ -169,7 +182,7 @@ function brandingScore(classification: BrandingInput): FactorResult {
 
 function holderDistributionScore(snapshot: ScoringInputs["holders"]): FactorResult {
   if (!snapshot) {
-    return { score: 50, confidence: "LOW", reasoning: "holder distribution data not available" };
+    return { score: 50, confidence: "LOW", reasoning: "holder distribution data not available", unmeasured: true };
   }
   let score = 100;
   const notes: string[] = [];
@@ -229,7 +242,7 @@ export function computeScore(inputs: ScoringInputs): ScoringResult {
 
   const factors: ScoringResult["factors"] = {
     utility: fromFactorScore(inputs.synthesis.utility),
-    contract: contractSafetyScore(inputs.onchain),
+    contract: contractSafetyScore(inputs.onchain, inputs.onchainApplicable ?? true),
     credibility: fromFactorScore(inputs.synthesis.credibility),
     website: fromFactorScore(inputs.synthesis.website),
     social: fromFactorScore(inputs.synthesis.social),
@@ -240,29 +253,24 @@ export function computeScore(inputs: ScoringInputs): ScoringResult {
     branding: brandingScore(inputs.classification),
   };
 
-  const finalScore =
-    factors.utility.score * WEIGHTS.utility +
-    factors.contract.score * WEIGHTS.contract +
-    factors.credibility.score * WEIGHTS.credibility +
-    factors.website.score * WEIGHTS.website +
-    factors.social.score * WEIGHTS.social +
-    factors.liquidity.score * WEIGHTS.liquidity +
-    factors.market.score * WEIGHTS.market +
-    factors.holders.score * WEIGHTS.holders +
-    factors.team.score * WEIGHTS.team +
-    factors.branding.score * WEIGHTS.branding;
-
-  const confidence =
-    CONFIDENCE_NUMERIC[factors.utility.confidence] * WEIGHTS.utility +
-    CONFIDENCE_NUMERIC[factors.contract.confidence] * WEIGHTS.contract +
-    CONFIDENCE_NUMERIC[factors.credibility.confidence] * WEIGHTS.credibility +
-    CONFIDENCE_NUMERIC[factors.website.confidence] * WEIGHTS.website +
-    CONFIDENCE_NUMERIC[factors.social.confidence] * WEIGHTS.social +
-    CONFIDENCE_NUMERIC[factors.liquidity.confidence] * WEIGHTS.liquidity +
-    CONFIDENCE_NUMERIC[factors.market.confidence] * WEIGHTS.market +
-    CONFIDENCE_NUMERIC[factors.holders.confidence] * WEIGHTS.holders +
-    CONFIDENCE_NUMERIC[factors.team.confidence] * WEIGHTS.team +
-    CONFIDENCE_NUMERIC[factors.branding.confidence] * WEIGHTS.branding;
+  // User directive 2026-09-24 (DESKS): a pre-bond Solana token had 35% of its
+  // weight scored as fake-middling numbers for data we never collect —
+  // contract (no Solana on-chain research), liquidity (bonding curves report
+  // none) — which alone capped every such token below the watchlist bar no
+  // matter how good it was. Weights are re-normalized over what was actually
+  // measured instead.
+  let weightedScore = 0;
+  let weightedConfidence = 0;
+  let measuredWeight = 0;
+  for (const key of Object.keys(WEIGHTS) as (keyof typeof WEIGHTS)[]) {
+    const factor = factors[key];
+    if (factor.unmeasured) continue;
+    weightedScore += factor.score * WEIGHTS[key];
+    weightedConfidence += CONFIDENCE_NUMERIC[factor.confidence] * WEIGHTS[key];
+    measuredWeight += WEIGHTS[key];
+  }
+  const finalScore = measuredWeight > 0 ? weightedScore / measuredWeight : 0;
+  const confidence = measuredWeight > 0 ? weightedConfidence / measuredWeight : 0;
 
   const rejectionReasons = computeHardRejections(inputs.onchain, inputs.synthesis, primaryPair);
 

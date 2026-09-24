@@ -1,5 +1,6 @@
 import { db } from "../db";
 import { config } from "../config";
+import { tradingConfig } from "../trading/config";
 import { logger } from "../logger";
 import { captureMarketSnapshot, formatMarketForPrompt } from "../research/market";
 import { researchWebsite, formatWebsiteResultForPrompt, type WebsiteResearchResult } from "../research/website";
@@ -110,7 +111,13 @@ export async function researchToken(tokenId: string): Promise<void> {
   const walletSignals = await getWalletSignalsForToken(tokenId, token.address);
 
   const linkList = buildLinksList(profile, website, market.primaryPair?.url);
-  const linksText = linkList.map((l) => `${l.label}: ${l.url}`).join("\n") || "No links found.";
+  const paidProfile = Boolean(profile?.icon || profile?.header);
+  const linksText = [
+    paidProfile
+      ? "DexScreener profile: paid/updated profile present (icon, banner and links submitted)."
+      : "DexScreener profile: none submitted.",
+    ...linkList.map((l) => `${l.label}: ${l.url}`),
+  ].join("\n");
 
   let synthesis;
   try {
@@ -121,7 +128,11 @@ export async function researchToken(tokenId: string): Promise<void> {
         token,
         market: formatMarketForPrompt(market),
         website: formatWebsiteResultForPrompt(website),
-        onchain: formatOnchainResultForPrompt(onchain),
+        // Not "RPC unreachable" for Solana — that wording had the AI listing
+        // "zero on-chain visibility due to RPC failure" as a red flag.
+        onchain: isEvmChain
+          ? formatOnchainResultForPrompt(onchain)
+          : "Not applicable on this chain — EVM contract checks don't apply here. Mint/freeze authority is verified separately right before any trade, so missing contract data here is not a red flag.",
         links: linksText,
         xResearch: formatXFindingsForPrompt(token.xFindings),
         walletSignals: formatWalletSignalsForPrompt(walletSignals),
@@ -144,6 +155,7 @@ export async function researchToken(tokenId: string): Promise<void> {
     classification: { brandingQuality: classification.brandingQuality, reasoningSummary: classification.reasoningSummary as string[] },
     synthesis,
     onchain,
+    onchainApplicable: isEvmChain,
     market,
     holders,
   });
@@ -182,7 +194,12 @@ export async function researchToken(tokenId: string): Promise<void> {
   // pipeline. The score bar alone decides now.
   let newStatus: TokenStatus;
   const meetsAlertBar = !score.hardReject && score.finalScore >= config.alertThreshold && score.confidence >= config.minConfidenceToAlert;
-  const meetsWatchlistBar = !score.hardReject && score.finalScore >= config.watchlistThreshold;
+  // Only WATCHLISTED/ALERTED tokens ever become trade candidates, so this bar
+  // can never sit above the trade gate's own quality bar — confirmed
+  // 2026-09-24 it had (70 here vs 48 there), silently discarding everything
+  // in between before the trade gate ever saw it.
+  const watchlistBar = Math.min(config.watchlistThreshold, tradingConfig.minTradeQualityScore);
+  const meetsWatchlistBar = !score.hardReject && score.finalScore >= watchlistBar;
 
   if (meetsAlertBar) {
     newStatus = TokenStatus.ALERTED;
