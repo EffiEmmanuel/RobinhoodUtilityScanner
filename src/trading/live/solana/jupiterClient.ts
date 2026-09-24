@@ -43,8 +43,18 @@ export interface JupiterQuote {
  * the way the EVM check's getLiveQuote is. No manual pool discovery needed:
  * Jupiter routes across Raydium/Orca/pump.fun/etc. itself.
  */
-export async function getJupiterQuote(inputMint: string, outputMint: string, amount: bigint, slippageBps: number): Promise<JupiterQuote | undefined> {
-  const url = `${config.solanaJupiterBaseUrl}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount.toString()}&slippageBps=${slippageBps}`;
+export async function getJupiterQuote(
+  inputMint: string,
+  outputMint: string,
+  amount: bigint,
+  slippageBps: number,
+  // Caps how many accounts the route may use (Jupiter's own default is 64);
+  // a lower cap means a simpler route that fits in one transaction.
+  maxAccounts?: number
+): Promise<JupiterQuote | undefined> {
+  const url =
+    `${config.solanaJupiterBaseUrl}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount.toString()}&slippageBps=${slippageBps}` +
+    (maxAccounts ? `&maxAccounts=${maxAccounts}` : "");
   try {
     const raw = await fetchJsonWithRetry<RawJupiterQuoteResponse>(url, { headers: jupiterHeaders() });
     return {
