@@ -4,6 +4,7 @@ import { fetchMarketForToken } from "../../dex/client";
 import {
   UNISWAP_V4_ADDRESSES,
   NATIVE_ETH_CURRENCY,
+  ROBINHOOD_WETH,
   POSITION_MANAGER_POOL_KEYS_ABI,
   POOL_MANAGER_ABI,
   STATE_VIEW_ABI,
@@ -37,6 +38,10 @@ export interface SwapRoute {
   // Currencies strictly between consecutive pools, in ETH -> token order
   // (empty for a direct route).
   hubs: `0x${string}`[];
+  // The ETH side is WETH, wrapped on the way in and unwrapped on the way out
+  // by the router — Robinhood Chain has no native-ETH/WETH v4 pool, so this is
+  // the only way into a WETH-paired pool.
+  viaWeth?: boolean;
 }
 
 export interface RouteQuote {
@@ -82,7 +87,7 @@ export function zeroForOneFor(key: PoolKey, currencyIn: string): boolean {
 
 /** The currencies a trade passes through, in the order it passes through them. */
 export function currencySequence(route: SwapRoute, token: `0x${string}`, isBuy: boolean): `0x${string}`[] {
-  const buyOrder: `0x${string}`[] = [NATIVE_ETH_CURRENCY, ...route.hubs, token];
+  const buyOrder: `0x${string}`[] = [route.viaWeth ? ROBINHOOD_WETH : NATIVE_ETH_CURRENCY, ...route.hubs, token];
   return isBuy ? buyOrder : buyOrder.slice().reverse();
 }
 
@@ -105,7 +110,7 @@ export function pathFor(
 }
 
 export function routeLabel(route: SwapRoute, hubSymbols: Map<string, string> = new Map()): string {
-  return ["ETH", ...route.hubs.map((h) => hubSymbols.get(h.toLowerCase()) ?? `${h.slice(0, 6)}…`), "token"].join("→");
+  return [route.viaWeth ? "ETH(wrap)→WETH" : "ETH", ...route.hubs.map((h) => hubSymbols.get(h.toLowerCase()) ?? `${h.slice(0, 6)}…`), "token"].join("→");
 }
 
 /** The pool that holds the token itself — the one whose depth actually limits the trade. */
@@ -378,7 +383,7 @@ export async function candidateRoutes(
   const routes: SwapRoute[] = [];
   const seen = new Set<string>();
   const add = (route: SwapRoute) => {
-    const id = route.pools.map((p) => p.poolId.toLowerCase()).join(">");
+    const id = `${route.viaWeth ? "weth:" : ""}${route.pools.map((p) => p.poolId.toLowerCase()).join(">")}`;
     if (seen.has(id)) return;
     if (!allowFeeTraps && route.pools.some((p) => isPredatoryFee(p.poolKey))) return;
     seen.add(id);
@@ -395,8 +400,9 @@ export async function candidateRoutes(
   }
   for (const p of listed) {
     if (same(p.counter, NATIVE_ETH_CURRENCY)) add({ pools: [p.pool], hubs: [] });
+    else if (same(p.counter, ROBINHOOD_WETH)) add({ pools: [p.pool], hubs: [], viaWeth: true });
   }
-  const hubPools = listed.filter((p) => !same(p.counter, NATIVE_ETH_CURRENCY));
+  const hubPools = listed.filter((p) => !same(p.counter, NATIVE_ETH_CURRENCY) && !same(p.counter, ROBINHOOD_WETH));
   const legsPerHub = await Promise.allSettled(hubPools.map((p) => hubLegs(client, p.counter)));
   legsPerHub.forEach((legs, i) => {
     if (legs.status !== "fulfilled") return;

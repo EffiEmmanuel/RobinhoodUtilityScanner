@@ -1,10 +1,10 @@
-import { encodeFunctionData } from "viem";
+import { encodeAbiParameters, encodeFunctionData } from "viem";
 import { logger } from "../../logger";
 import { tradingConfig } from "../config";
-import { UNISWAP_V4_ADDRESSES, UNIVERSAL_ROUTER_COMMANDS, UNIVERSAL_ROUTER_EXECUTE_ABI } from "./contracts";
+import { UNISWAP_V4_ADDRESSES, UNIVERSAL_ROUTER_COMMANDS, UNIVERSAL_ROUTER_EXECUTE_ABI, ROUTER_RECIPIENT } from "./contracts";
 import type { PoolKey } from "./poolDiscovery";
 import { bestRouteQuote, pathFor, routeLabel, tokenSidePool, zeroForOneFor, type SwapRoute } from "./routing";
-import { encodeV4SwapExactIn, encodeV4SwapExactInSingle } from "./swapEncoding";
+import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, type V4SwapSpec } from "./swapEncoding";
 import { ensureSellApprovals } from "./permit2Approvals";
 import { getPublicClient, getWalletAddress, signAndSendTransaction, isWalletConfigured } from "./wallet";
 
@@ -56,27 +56,61 @@ export interface LiveSwapResult {
   routeLabel: string;
 }
 
-function buildExecuteCalldata(route: SwapRoute, token: `0x${string}`, isBuy: boolean, amountIn: bigint, amountOutMinimum: bigint) {
+export function routerCommands(...commands: number[]): `0x${string}` {
+  return `0x${commands.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** The (commands, inputs) pair for one Universal Router execute() that trades `route`. */
+export function buildRouterPlan(
+  route: SwapRoute,
+  token: `0x${string}`,
+  isBuy: boolean,
+  amountIn: bigint,
+  amountOutMinimum: bigint
+): { commands: `0x${string}`; inputs: `0x${string}`[] } {
   const { currencyIn, currencyOut, path } = pathFor(route, token, isBuy);
-  // Direct routes keep the single-hop encoding that has been trading live
-  // since day one; only multi-hop routes use SWAP_EXACT_IN.
-  const swapInput =
+  const swap: V4SwapSpec =
     route.pools.length === 1
-      ? encodeV4SwapExactInSingle({
-          poolKey: route.pools[0].poolKey,
-          zeroForOne: zeroForOneFor(route.pools[0].poolKey, currencyIn),
-          amountIn,
-          amountOutMinimum,
-          settleCurrency: currencyIn,
-          takeCurrency: currencyOut,
-        })
-      : encodeV4SwapExactIn({ currencyIn, path, amountIn, amountOutMinimum, currencyOut });
+      ? { kind: "single", poolKey: route.pools[0].poolKey, zeroForOne: zeroForOneFor(route.pools[0].poolKey, currencyIn) }
+      : { kind: "multi", path };
+
+  if (!route.viaWeth) {
+    // Direct routes keep the single-hop encoding that has been trading live
+    // since day one; only multi-hop routes use SWAP_EXACT_IN.
+    const swapInput =
+      swap.kind === "single"
+        ? encodeV4SwapExactInSingle({ poolKey: swap.poolKey, zeroForOne: swap.zeroForOne, amountIn, amountOutMinimum, settleCurrency: currencyIn, takeCurrency: currencyOut })
+        : encodeV4SwapExactIn({ currencyIn, path, amountIn, amountOutMinimum, currencyOut });
+    return { commands: routerCommands(UNIVERSAL_ROUTER_COMMANDS.V4_SWAP), inputs: [swapInput] };
+  }
+
+  const recipientAndAmount = (recipient: `0x${string}`, amount: bigint) =>
+    encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [recipient, amount]);
+  if (isBuy) {
+    // msg.value -> WETH held by the router -> the v4 swap pays with it.
+    return {
+      commands: routerCommands(UNIVERSAL_ROUTER_COMMANDS.WRAP_ETH, UNIVERSAL_ROUTER_COMMANDS.V4_SWAP),
+      inputs: [
+        recipientAndAmount(ROUTER_RECIPIENT.ADDRESS_THIS, amountIn),
+        encodeV4Swap({ swap, currencyIn, currencyOut, amountIn, amountOutMinimum, settleFrom: "router", takeTo: "user" }),
+      ],
+    };
+  }
+  // Token (via Permit2) -> WETH left with the router -> unwrapped to ETH for
+  // the wallet, which is where the slippage floor is enforced.
+  return {
+    commands: routerCommands(UNIVERSAL_ROUTER_COMMANDS.V4_SWAP, UNIVERSAL_ROUTER_COMMANDS.UNWRAP_WETH),
+    inputs: [
+      encodeV4Swap({ swap, currencyIn, currencyOut, amountIn, amountOutMinimum, settleFrom: "user", takeTo: "router" }),
+      recipientAndAmount(ROUTER_RECIPIENT.MSG_SENDER, amountOutMinimum),
+    ],
+  };
+}
+
+function buildExecuteCalldata(route: SwapRoute, token: `0x${string}`, isBuy: boolean, amountIn: bigint, amountOutMinimum: bigint) {
+  const { commands, inputs } = buildRouterPlan(route, token, isBuy, amountIn, amountOutMinimum);
   const deadline = BigInt(Math.floor(Date.now() / 1000) + SWAP_DEADLINE_SECONDS);
-  return encodeFunctionData({
-    abi: UNIVERSAL_ROUTER_EXECUTE_ABI,
-    functionName: "execute",
-    args: [`0x${UNIVERSAL_ROUTER_COMMANDS.V4_SWAP.toString(16).padStart(2, "0")}`, [swapInput], deadline],
-  });
+  return encodeFunctionData({ abi: UNIVERSAL_ROUTER_EXECUTE_ABI, functionName: "execute", args: [commands, inputs, deadline] });
 }
 
 /**

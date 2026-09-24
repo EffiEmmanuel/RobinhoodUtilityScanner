@@ -34,9 +34,27 @@ export const V4_ACTIONS = {
   // successful eth_call of real ETH->META->MUSETOWN calldata against this
   // chain's deployed Universal Router.
   SWAP_EXACT_IN: 0x07,
+  // (currency, amount, payerIsUser) — payerIsUser=false pays from the
+  // router's own balance, e.g. WETH it just wrapped.
+  SETTLE: 0x0b,
   SETTLE_ALL: 0x0c,
+  // (currency, recipient, amount) — amount 0 (OPEN_DELTA) takes the full credit.
+  TAKE: 0x0e,
   TAKE_ALL: 0x0f,
 } as const;
+
+// v4-periphery ActionConstants / Universal Router Constants recipients.
+export const ROUTER_RECIPIENT = {
+  MSG_SENDER: "0x0000000000000000000000000000000000000001",
+  ADDRESS_THIS: "0x0000000000000000000000000000000000000002",
+} as const;
+
+// Robinhood Chain's WETH — the quote token of every WETH-paired pool
+// DexScreener lists, and (confirmed by a successful WRAP_ETH dry-run through
+// the deployed router, 2026-09-24) the WETH9 the Universal Router wraps into.
+// There is no native-ETH/WETH v4 pool, so WETH-paired pools are reached by
+// having the router wrap/unwrap around the v4 swap.
+export const ROBINHOOD_WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" as const;
 
 // Pools whose key carries this flag charge a fee the hook sets per swap, so
 // the key's fee field is a flag, not a fee — never compare it against
@@ -127,6 +145,10 @@ export const POSITION_MANAGER_POOL_KEYS_ABI = [
 ] as const;
 
 export const UNIVERSAL_ROUTER_COMMANDS = {
+  // (recipient, amountMin) — wraps the router's ETH balance (msg.value).
+  WRAP_ETH: 0x0b,
+  // (recipient, amountMin) — unwraps the router's WETH and sends ETH on.
+  UNWRAP_WETH: 0x0c,
   V4_SWAP: 0x10,
 } as const;
 

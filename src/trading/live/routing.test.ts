@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { decodeAbiParameters } from "viem";
 import { computePoolId, currencySequence, isPredatoryFee, pathFor, zeroForOneFor, type SwapRoute } from "./routing";
-import { encodeV4SwapExactIn, PATH_KEY_ARRAY_TYPE } from "./swapEncoding";
-import { NATIVE_ETH_CURRENCY } from "./contracts";
+import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, PATH_KEY_ARRAY_TYPE } from "./swapEncoding";
+import { NATIVE_ETH_CURRENCY, ROBINHOOD_WETH } from "./contracts";
+import { buildRouterPlan } from "./liveExecutionProvider";
 
 // Real Robinhood Chain pools, keys resolved via PositionManager.poolKeys and
 // confirmed to hash to DexScreener's pool ids on 2026-09-24.
@@ -65,6 +66,51 @@ describe("isPredatoryFee", () => {
     expect(isPredatoryFee({ ...ETH_META.poolKey, fee: 810_000 })).toBe(true);
     expect(isPredatoryFee({ ...ETH_META.poolKey, fee: 3000 })).toBe(false);
     expect(isPredatoryFee({ ...ETH_META.poolKey, fee: 0x800000 })).toBe(false);
+  });
+});
+
+describe("encodeV4Swap", () => {
+  it("reproduces the live single-hop encoding byte-for-byte for a plain user-settled swap", () => {
+    const common = { poolKey: ETH_META.poolKey, zeroForOne: true, amountIn: 1_000n, amountOutMinimum: 900n };
+    const legacy = encodeV4SwapExactInSingle({ ...common, settleCurrency: NATIVE_ETH_CURRENCY, takeCurrency: META });
+    const general = encodeV4Swap({
+      swap: { kind: "single", poolKey: common.poolKey, zeroForOne: true },
+      currencyIn: NATIVE_ETH_CURRENCY,
+      currencyOut: META,
+      amountIn: common.amountIn,
+      amountOutMinimum: common.amountOutMinimum,
+      settleFrom: "user",
+      takeTo: "user",
+    });
+    expect(general).toBe(legacy);
+  });
+});
+
+describe("buildRouterPlan", () => {
+  const WETH_QPULL = {
+    poolKey: { currency0: ROBINHOOD_WETH, currency1: "0x648bf8a42d4546fdb9c840cb6ed78379e80bb0dd" as const, fee: 0x800000, tickSpacing: 60, hooks: "0x0000000000000000000000000000000000000000" as const },
+    poolId: "0x00" as const,
+  };
+  const wethRoute: SwapRoute = { pools: [WETH_QPULL], hubs: [], viaWeth: true };
+
+  it("wraps before the swap on a WETH-route buy", () => {
+    const plan = buildRouterPlan(wethRoute, WETH_QPULL.poolKey.currency1, true, 1_000n, 900n);
+    expect(plan.commands).toBe("0x0b10");
+    expect(plan.inputs).toHaveLength(2);
+  });
+
+  it("unwraps after the swap on a WETH-route sell", () => {
+    const plan = buildRouterPlan(wethRoute, WETH_QPULL.poolKey.currency1, false, 1_000n, 900n);
+    expect(plan.commands).toBe("0x100c");
+  });
+
+  it("keeps a single V4_SWAP command for native-ETH routes", () => {
+    expect(buildRouterPlan(twoHop, MUSETOWN, true, 1_000n, 900n).commands).toBe("0x10");
+    expect(buildRouterPlan(twoHop, MUSETOWN, false, 1_000n, 900n).commands).toBe("0x10");
+  });
+
+  it("starts a WETH route's currency sequence at WETH", () => {
+    expect(currencySequence(wethRoute, WETH_QPULL.poolKey.currency1, true)[0]).toBe(ROBINHOOD_WETH);
   });
 });
 
