@@ -1,58 +1,54 @@
 import { describe, expect, it } from "vitest";
-import { shouldRetryPlanningForTransientMomentumMarket, tacticalScoutActionForWatchOnly } from "./planning";
+import { liquidityWaitDecision, tacticalScoutActionForWatchOnly } from "./planning";
+import type { CandidateRiskResult } from "./riskEngine";
+import { tradingConfig } from "./config";
 import { TradePlanAction } from "../generated/prisma";
 
-describe("shouldRetryPlanningForTransientMomentumMarket", () => {
-  it("retries a momentum candidate when fresh planning liquidity comes back as zero", () => {
-    const result = shouldRetryPlanningForTransientMomentumMarket({
-      qualificationPath: "MOMENTUM_OVERRIDE",
-      evaluation: {
-        eligible: false,
-        reasons: ["qualityScore 61.7 < 65", "researchConfidence 58 < 65", "liquidityUsd 0 < 8000"],
-      },
-      pair: { liquidityUsd: 0 },
-    });
+// User directive 2026-09-24 (MUSETOWN: researched with $0.69 in a pool that
+// had just opened, permanently rejected, then ran 63x) — a candidate held
+// back only by pool depth waits for liquidity instead of being rejected.
+describe("liquidityWaitDecision", () => {
+  const liquidityOnly: CandidateRiskResult = {
+    eligible: false,
+    riskBucket: "REJECT",
+    reasons: ["liquidityUsd 1 < 8000"],
+    failedChecks: ["liquidity"],
+  };
+  const createdAt = new Date("2026-09-24T00:00:00Z");
+  const hoursLater = (h: number) => new Date(createdAt.getTime() + h * 3_600_000);
 
-    expect(result).toBe(true);
+  it("waits when pool depth is the only thing failing", () => {
+    expect(
+      liquidityWaitDecision({ evaluation: liquidityOnly, utilityGatePassed: true, isFirstPlan: true, candidateCreatedAt: createdAt, now: hoursLater(1) })
+    ).toBe("WAIT");
   });
 
-  it("retries a momentum candidate when the fresh planning pair is missing", () => {
-    const result = shouldRetryPlanningForTransientMomentumMarket({
-      qualificationPath: "MOMENTUM_OVERRIDE",
-      evaluation: {
-        eligible: false,
-        reasons: ["liquidityUsd 0 < 8000"],
-      },
-      pair: undefined,
-    });
-
-    expect(result).toBe(true);
+  it("gives up once the wait window has passed", () => {
+    expect(
+      liquidityWaitDecision({
+        evaluation: liquidityOnly,
+        utilityGatePassed: true,
+        isFirstPlan: true,
+        candidateCreatedAt: createdAt,
+        now: hoursLater(tradingConfig.liquidityWaitMaxHours),
+      })
+    ).toBe("GIVE_UP");
   });
 
-  it("does not retry normal candidates", () => {
-    const result = shouldRetryPlanningForTransientMomentumMarket({
-      qualificationPath: "NORMAL",
-      evaluation: {
-        eligible: false,
-        reasons: ["liquidityUsd 0 < 8000"],
-      },
-      pair: { liquidityUsd: 0 },
-    });
-
-    expect(result).toBe(false);
+  it("does not wait when anything besides liquidity failed", () => {
+    const alsoLowQuality: CandidateRiskResult = { ...liquidityOnly, failedChecks: ["quality", "liquidity"] };
+    expect(
+      liquidityWaitDecision({ evaluation: alsoLowQuality, utilityGatePassed: true, isFirstPlan: true, candidateCreatedAt: createdAt, now: hoursLater(1) })
+    ).toBe("NOT_APPLICABLE");
+    expect(
+      liquidityWaitDecision({ evaluation: liquidityOnly, utilityGatePassed: false, isFirstPlan: true, candidateCreatedAt: createdAt, now: hoursLater(1) })
+    ).toBe("NOT_APPLICABLE");
   });
 
-  it("does not retry real nonzero low-liquidity failures", () => {
-    const result = shouldRetryPlanningForTransientMomentumMarket({
-      qualificationPath: "MOMENTUM_OVERRIDE",
-      evaluation: {
-        eligible: false,
-        reasons: ["liquidityUsd 500 < 8000"],
-      },
-      pair: { liquidityUsd: 500 },
-    });
-
-    expect(result).toBe(false);
+  it("does not wait on a replan — liquidity collapsing on a watched candidate still rejects", () => {
+    expect(
+      liquidityWaitDecision({ evaluation: liquidityOnly, utilityGatePassed: true, isFirstPlan: false, candidateCreatedAt: createdAt, now: hoursLater(1) })
+    ).toBe("NOT_APPLICABLE");
   });
 });
 

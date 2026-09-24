@@ -214,7 +214,13 @@ function holderDistributionScore(snapshot: ScoringInputs["holders"]): FactorResu
   };
 }
 
-export function computeHardRejections(onchain: OnchainResearchResult, synthesis: ResearchSynthesis, pair?: MarketPair): string[] {
+// Liquidity is deliberately NOT a hard rejection here: research often runs
+// seconds after a pool opens, before liquidity is added (MUSETOWN,
+// 2026-09-23: $0.69 at research, permanently rejected, then ran 63x). Pool
+// depth is a moment-in-time market condition, not a property of the
+// project — it's enforced with fresh data at planning/entry instead, where a
+// thin pool waits for liquidity rather than killing the token.
+export function computeHardRejections(onchain: OnchainResearchResult, synthesis: ResearchSynthesis): string[] {
   const reasons: string[] = [];
 
   if (onchain.status !== "UNAVAILABLE" && onchain.isContract === "FAIL") {
@@ -226,9 +232,6 @@ export function computeHardRejections(onchain: OnchainResearchResult, synthesis:
   }
   if (activeOwner && onchain.blacklistCapability === "FAIL") {
     reasons.push("Active (non-renounced) owner can blacklist wallets — may prevent normal selling.");
-  }
-  if (pair?.liquidityUsd !== undefined && pair.liquidityUsd < config.minLiquidityUsd * 0.2) {
-    reasons.push(`Liquidity ($${Math.round(pair.liquidityUsd)}) is far below the emergency safety floor.`);
   }
   if (synthesis.impersonationSuspected) {
     reasons.push("Website/branding is suspected to impersonate another real project.");
@@ -272,7 +275,7 @@ export function computeScore(inputs: ScoringInputs): ScoringResult {
   const finalScore = measuredWeight > 0 ? weightedScore / measuredWeight : 0;
   const confidence = measuredWeight > 0 ? weightedConfidence / measuredWeight : 0;
 
-  const rejectionReasons = computeHardRejections(inputs.onchain, inputs.synthesis, primaryPair);
+  const rejectionReasons = computeHardRejections(inputs.onchain, inputs.synthesis);
 
   return {
     factors,

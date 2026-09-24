@@ -32,31 +32,43 @@ const CIRCUIT_BREAKER_ALERT_INTERVAL_SECONDS = 20;
 const CLAIM_IDLE_DELAY_MS = 3000;
 const QUALIFIED_CLAIM_BATCH_SIZE = 50;
 
-async function claimNextQualifiedCandidate(): Promise<string | undefined> {
-  const candidates = await db.tradeCandidate.findMany({
-    where: { status: TradeCandidateStatus.QUALIFIED },
-    orderBy: { createdAt: "asc" },
-    take: QUALIFIED_CLAIM_BATCH_SIZE,
-    select: {
-      id: true,
-      decisions: {
-        where: { stage: "planning_retry" },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { deterministicRules: true },
-      },
-    },
-  });
-  const now = Date.now();
-  for (const candidate of candidates) {
-    const retryAfterMs = getPlanningRetryAfterMs(candidate.decisions[0]?.deterministicRules);
-    if (retryAfterMs !== undefined && retryAfterMs > now) continue;
+// Candidates waiting for pool liquidity (planning.ts's liquidityWaitDecision)
+// sit in QUALIFIED for up to LIQUIDITY_WAIT_MAX_HOURS, oldest first — so a
+// single fixed-size page could fill up entirely with not-yet-due waiters and
+// starve every newer candidate. Paging past them keeps new ones plannable.
+const QUALIFIED_CLAIM_MAX_PAGES = 20;
 
-    const result = await db.tradeCandidate.updateMany({
-      where: { id: candidate.id, status: TradeCandidateStatus.QUALIFIED },
-      data: { status: TradeCandidateStatus.PLANNING },
+async function claimNextQualifiedCandidate(): Promise<string | undefined> {
+  const now = Date.now();
+  let cursor: string | undefined;
+  for (let page = 0; page < QUALIFIED_CLAIM_MAX_PAGES; page++) {
+    const candidates = await db.tradeCandidate.findMany({
+      where: { status: TradeCandidateStatus.QUALIFIED },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: QUALIFIED_CLAIM_BATCH_SIZE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        decisions: {
+          where: { stage: "planning_retry" },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { deterministicRules: true },
+        },
+      },
     });
-    if (result.count === 1) return candidate.id;
+    for (const candidate of candidates) {
+      const retryAfterMs = getPlanningRetryAfterMs(candidate.decisions[0]?.deterministicRules);
+      if (retryAfterMs !== undefined && retryAfterMs > now) continue;
+
+      const result = await db.tradeCandidate.updateMany({
+        where: { id: candidate.id, status: TradeCandidateStatus.QUALIFIED },
+        data: { status: TradeCandidateStatus.PLANNING },
+      });
+      if (result.count === 1) return candidate.id;
+    }
+    if (candidates.length < QUALIFIED_CLAIM_BATCH_SIZE) return undefined;
+    cursor = candidates[candidates.length - 1].id;
   }
   return undefined;
 }

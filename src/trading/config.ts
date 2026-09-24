@@ -641,6 +641,17 @@ export const tradingConfig = {
   // failing EVM swap can spend gas on every attempt, which is why automatic
   // entries still reject on the first non-transient failure.
   manualBuyAndHoldMaxExecutionFailures: num("MANUAL_BUY_AND_HOLD_MAX_EXECUTION_FAILURES", 30),
+  // User directive 2026-09-24, after MUSETOWN (researched with $0.69 in its
+  // brand-new pool, permanently rejected, then ran 63x): "we can still invest
+  // in these kinds of tokens even if the pool just opened, instead of
+  // rejecting them outright." A candidate that clears every gate except pool
+  // depth waits — re-checked against fresh market data every
+  // liquidityWaitRetryMinutes, planned the moment liquidity reaches
+  // MIN_TRADE_LIQUIDITY_USD — and is only given up on after
+  // liquidityWaitMaxHours with no liquidity ever arriving. Each re-check is a
+  // DexScreener poll, no AI call.
+  liquidityWaitRetryMinutes: num("LIQUIDITY_WAIT_RETRY_MINUTES", 2),
+  liquidityWaitMaxHours: num("LIQUIDITY_WAIT_MAX_HOURS", 24),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)

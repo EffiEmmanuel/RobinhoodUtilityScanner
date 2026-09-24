@@ -18,6 +18,13 @@ export interface CandidateRiskInput {
   chain: string;
   // Pre-bond pump.fun pair — see isBondingCurvePair.
   onBondingCurve: boolean;
+  // A live on-chain quote confirmed our smallest position can be bought
+  // within the price-impact limit AND sold back (planning.ts's
+  // canExecuteMinimumPosition). Overrides the reported-liquidity bar, which
+  // only sees the ETH-quoted pool we execute through — MUSETOWN
+  // (2026-09-23) showed $550 there at a $290K mcap, its real market being a
+  // META-quoted pool.
+  executableAtMinimumSize?: boolean;
 }
 
 /**
@@ -30,18 +37,32 @@ export function isBondingCurvePair(pair: { dexId?: string; liquidityUsd?: number
   return pair?.dexId === "pumpfun" && pair.liquidityUsd === undefined;
 }
 
+export type CandidateCheck = "hardReject" | "quality" | "confidence" | "contract" | "liquidity";
+
 export interface CandidateRiskResult {
   eligible: boolean;
   riskBucket: RiskBucket;
   reasons: string[];
+  failedChecks: CandidateCheck[];
+}
+
+/**
+ * True when the ONLY thing standing between a candidate and eligibility is
+ * pool depth — a timing condition (a pool that just opened, liquidity not
+ * added yet), not a verdict on the project. Callers wait for liquidity
+ * instead of rejecting on this.
+ */
+export function failedOnlyOnLiquidity(result: CandidateRiskResult): boolean {
+  return !result.eligible && result.failedChecks.length === 1 && result.failedChecks[0] === "liquidity";
 }
 
 export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResult {
   const reasons: string[] = [];
 
   if (input.hardReject) {
-    return { eligible: false, riskBucket: "REJECT", reasons: ["hardReject == true (never trade — §9)"] };
+    return { eligible: false, riskBucket: "REJECT", reasons: ["hardReject == true (never trade — §9)"], failedChecks: ["hardReject"] };
   }
+  const failedChecks: CandidateCheck[] = [];
 
   const qualityScoreOk = input.qualityScore >= tradingConfig.minTradeQualityScore;
   const confidenceOk = input.researchConfidence >= tradingConfig.minTradeResearchConfidence;
@@ -49,17 +70,22 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   // failed every Solana token against this bar). Mint/freeze authority is
   // enforced instead by the Solana honeypot gate right before entry.
   const contractScoreOk = input.chain === "solana" || input.contractScore >= tradingConfig.minTradeContractScore;
-  const liquidityOk = input.onBondingCurve || input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
+  const liquidityOk =
+    input.onBondingCurve || input.executableAtMinimumSize === true || input.liquidityUsd >= tradingConfig.minTradeLiquidityUsd;
   if (!qualityScoreOk) {
+    failedChecks.push("quality");
     reasons.push(`qualityScore ${input.qualityScore} < ${tradingConfig.minTradeQualityScore}`);
   }
   if (!confidenceOk) {
+    failedChecks.push("confidence");
     reasons.push(`researchConfidence ${input.researchConfidence} < ${tradingConfig.minTradeResearchConfidence}`);
   }
   if (!contractScoreOk) {
+    failedChecks.push("contract");
     reasons.push(`contractScore ${input.contractScore} < ${tradingConfig.minTradeContractScore}`);
   }
   if (!liquidityOk) {
+    failedChecks.push("liquidity");
     reasons.push(`liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd}`);
   }
 
@@ -72,7 +98,7 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   // classify-stage override for the rest of that mechanism. Contract safety
   // was always unwaived here; now nothing is.
   if (reasons.length > 0) {
-    return { eligible: false, riskBucket: "REJECT", reasons };
+    return { eligible: false, riskBucket: "REJECT", reasons, failedChecks };
   }
 
   // Risk bucket from how comfortably it cleared the bars, not just pass/fail.
@@ -85,7 +111,7 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
     riskBucket = "HIGH";
   }
 
-  return { eligible: true, riskBucket, reasons: ["cleared all trade-eligibility gates"] };
+  return { eligible: true, riskBucket, reasons: ["cleared all trade-eligibility gates"], failedChecks: [] };
 }
 
 // ---------------------------------------------------------------------------

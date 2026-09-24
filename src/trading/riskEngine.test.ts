@@ -3,6 +3,7 @@ import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
   isBondingCurvePair,
+  failedOnlyOnLiquidity,
   calculatePositionSize,
   validateEntry,
   validatePosition,
@@ -170,6 +171,32 @@ describe("evaluateCandidate", () => {
       onBondingCurve: true,
     });
     expect(result.eligible).toBe(true);
+  });
+});
+
+describe("failedOnlyOnLiquidity", () => {
+  const base = {
+    qualityScore: tradingConfig.minTradeQualityScore + 5,
+    researchConfidence: tradingConfig.minTradeResearchConfidence + 5,
+    contractScore: 100,
+    hardReject: false,
+    chain: "robinhood",
+    onBondingCurve: false,
+  };
+
+  it("is true when a thin pool is the only failing check", () => {
+    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, liquidityUsd: 1 }))).toBe(true);
+  });
+
+  it("treats a thin pool as liquid enough once a live quote proved our minimum position executes", () => {
+    const result = evaluateCandidate({ ...base, liquidityUsd: 550, executableAtMinimumSize: true });
+    expect(result.eligible).toBe(true);
+  });
+
+  it("is false when anything else failed too, or nothing failed", () => {
+    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, qualityScore: 0, liquidityUsd: 1 }))).toBe(false);
+    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, hardReject: true, liquidityUsd: 1 }))).toBe(false);
+    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, liquidityUsd: tradingConfig.minTradeLiquidityUsd * 2 }))).toBe(false);
   });
 });
 

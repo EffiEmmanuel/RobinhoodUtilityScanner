@@ -126,4 +126,27 @@ describe("computeScore", () => {
     const result = computeScore(inputs);
     expect(result.hardReject).toBe(true);
   });
+
+  // MUSETOWN (2026-09-23): researched with $0.69 in a pool that had just
+  // opened, permanently hard-rejected on it, then ran 63x.
+  it("does not hard-reject a pool that just opened with almost no liquidity", () => {
+    const result = computeScore({
+      classification: { brandingQuality: 0.8, reasoningSummary: [] },
+      synthesis: baseSynthesis(),
+      onchain: safeOnchain(),
+      market: {
+        pairs: [],
+        primaryPair: {
+          dexId: "uniswap",
+          pairAddress: "0xpair",
+          url: "https://dexscreener.com/robinhood/0xpair",
+          liquidityUsd: 0.69,
+          marketCapUsd: 4421,
+          websites: [],
+          socials: [],
+        },
+      },
+    });
+    expect(result.hardReject).toBe(false);
+  });
 });

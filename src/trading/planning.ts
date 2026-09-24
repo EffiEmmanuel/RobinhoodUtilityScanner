@@ -5,8 +5,9 @@ import { callStructured } from "../ai/provider";
 import { TradeAnalysisSchema, TRADE_ANALYSIS_JSON_SCHEMA } from "./schemas";
 import { TRADE_ANALYSIS_SYSTEM, buildTradeAnalysisPrompt } from "./prompts";
 import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesForPrompt } from "./marketAnalysis";
-import { evaluateCandidate, isBondingCurvePair } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair, failedOnlyOnLiquidity, type CandidateRiskResult } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
+import { getBuyEstimate, isSellable } from "./executionFacade";
 import { tradingConfig } from "./config";
 import { classifyTradeLane } from "./tradeLane";
 import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
@@ -14,8 +15,6 @@ import { TradeCandidateStatus, TradePlanAction, PendingEntryStatus, TradeDecisio
 import { sendTradePlanEmail } from "./notifications";
 import type { MarketPair } from "../dex/types";
 import { formatWalletSignalsForPrompt, getWalletSignalsForToken } from "../walletTracking/signals";
-
-const MOMENTUM_PLANNING_DATA_RETRY_MINUTES = 2;
 
 /**
  * §14: turns a QUALIFIED candidate into BUY_NOW / WAIT_FOR_ENTRY / WATCH_ONLY
@@ -49,6 +48,12 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const walletSignals = await getWalletSignalsForToken(candidate.tokenId, candidate.token.address);
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
+  const onBondingCurve = isBondingCurvePair(market.primaryPair);
+  // Only pays for a live quote when the reported number alone would fail.
+  const executableAtMinimumSize =
+    !onBondingCurve && liquidityUsd < tradingConfig.minTradeLiquidityUsd && market.primaryPair
+      ? await canExecuteMinimumPosition(candidate.token.address, market.primaryPair, candidate.token.chain)
+      : false;
   const freshEval = evaluateCandidate({
     qualityScore: candidate.qualityScore ?? 0,
     researchConfidence: candidate.researchConfidence ?? 0,
@@ -56,7 +61,8 @@ export async function planCandidate(candidateId: string): Promise<void> {
     liquidityUsd,
     hardReject: run.hardReject,
     chain: candidate.token.chain,
-    onBondingCurve: isBondingCurvePair(market.primaryPair),
+    onBondingCurve,
+    executableAtMinimumSize,
   });
   const utilityGate = evaluateUtilityOnlyGate(
     utilityGateInputFromRawResearch(run.rawResearch, {
@@ -74,7 +80,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const qualificationPath = "NORMAL";
   const tradeEligibilityEvaluation = utilityGate.passed
     ? freshEval
-    : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
+    : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons, failedChecks: [] };
   const lane = classifyTradeLane({
     evaluation: tradeEligibilityEvaluation,
     qualificationPath,
@@ -90,35 +96,67 @@ export async function planCandidate(candidateId: string): Promise<void> {
   const planningUtilityReasons = utilityGate.reasons;
 
   if (!freshEval.eligible || !utilityGate.passed) {
-    if (shouldRetryPlanningForTransientMomentumMarket({ qualificationPath, evaluation: freshEval, pair: market.primaryPair })) {
-      const retryAfter = new Date(Date.now() + MOMENTUM_PLANNING_DATA_RETRY_MINUTES * 60_000);
-      const reasons = [
-        `planning retry: momentum candidate has missing/zero fresh market liquidity; retrying after ${retryAfter.toISOString()} instead of rejecting`,
-        ...freshEval.reasons,
-        ...utilityGate.reasons,
-      ];
-      await recordDecision(candidate.id, null, TradeDecision.WAIT, "planning_retry", strategy.id, {
-        market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
-        project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
-        technical,
-        walletSignals,
-        reasons,
-        deterministic: { retryAfter: retryAfter.toISOString(), retryMinutes: MOMENTUM_PLANNING_DATA_RETRY_MINUTES, qualificationPath, tradeLane: lane.tradeLane },
+    const now = new Date();
+    const liquidityWait = liquidityWaitDecision({
+      evaluation: freshEval,
+      utilityGatePassed: utilityGate.passed,
+      isFirstPlan,
+      candidateCreatedAt: candidate.createdAt,
+      now,
+    });
+    if (liquidityWait === "WAIT") {
+      const retryAfter = new Date(now.getTime() + tradingConfig.liquidityWaitRetryMinutes * 60_000);
+      // One row per candidate, updated in place — a pool that stays thin for
+      // hours would otherwise write a new decision row every retry.
+      const deterministicRules = {
+        retryAfter: retryAfter.toISOString(),
+        retryMinutes: tradingConfig.liquidityWaitRetryMinutes,
+        waitingForLiquiditySince: candidate.createdAt.toISOString(),
+        liquidityUsd,
+        qualificationPath,
+        tradeLane: lane.tradeLane,
+      };
+      const existingWait = await db.tradeDecisionSnapshot.findFirst({
+        where: { candidateId: candidate.id, stage: "planning_retry" },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
       });
+      if (existingWait) {
+        await db.tradeDecisionSnapshot.update({ where: { id: existingWait.id }, data: { deterministicRules } });
+      } else {
+        await recordDecision(candidate.id, null, TradeDecision.WAIT, "planning_retry", strategy.id, {
+          market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+          project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
+          technical,
+          walletSignals,
+          reasons: [
+            `pool too thin to enter yet ($${Math.round(liquidityUsd)} < $${tradingConfig.minTradeLiquidityUsd}) — waiting for liquidity, re-checking every ${tradingConfig.liquidityWaitRetryMinutes} min for up to ${tradingConfig.liquidityWaitMaxHours}h`,
+            ...freshEval.reasons,
+          ],
+          deterministic: deterministicRules,
+        });
+        logger.info({ candidateId, liquidityUsd, retryMinutes: tradingConfig.liquidityWaitRetryMinutes }, "candidate is waiting for pool liquidity instead of being rejected");
+      }
       await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.QUALIFIED, qualificationPath, tradeLane: lane.tradeLane } });
-      logger.warn({ candidateId, retryAfter: retryAfter.toISOString(), reasons: freshEval.reasons }, "momentum candidate planning deferred because fresh market data looked transiently unavailable");
       return;
     }
 
+    const rejectReasons = [
+      ...(liquidityWait === "GIVE_UP"
+        ? [`liquidity never reached $${tradingConfig.minTradeLiquidityUsd} within ${tradingConfig.liquidityWaitMaxHours}h of qualifying`]
+        : []),
+      ...freshEval.reasons,
+      ...utilityGate.reasons,
+    ];
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
       market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       walletSignals,
-      reasons: [...freshEval.reasons, ...utilityGate.reasons],
+      reasons: rejectReasons,
     });
     await db.tradeCandidate.update({ where: { id: candidateId }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
-    logger.info({ candidateId, reasons: [...freshEval.reasons, ...utilityGate.reasons] }, "candidate rejected at planning (eligibility/utility moved since qualification)");
+    logger.info({ candidateId, reasons: rejectReasons }, "candidate rejected at planning (eligibility/utility moved since qualification)");
     return;
   }
 
@@ -134,7 +172,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
         researchConfidence: candidate.researchConfidence ?? 0,
         tradeLane: lane.tradeLane,
         laneReasons: lane.reasons,
-        marketText: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd, market.primaryPair?.priceUsd),
+        marketText: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd, market.primaryPair?.priceUsd, executableAtMinimumSize),
         technicalText: formatTechnicalFeaturesForPrompt(technical),
         walletSignalsText: formatWalletSignalsForPrompt(walletSignals),
       }),
@@ -327,19 +365,47 @@ function isExtremeMomentum(pair: MarketPair | undefined): boolean {
   return buyRatio1h >= tradingConfig.extremeMomentumOverrideMinBuyRatio1h;
 }
 
-export function shouldRetryPlanningForTransientMomentumMarket(input: {
-  qualificationPath: string | null | undefined;
-  evaluation: { eligible: boolean; reasons: string[] };
-  pair: Pick<MarketPair, "liquidityUsd"> | undefined;
-}): boolean {
-  if (input.evaluation.eligible) return false;
-  if (input.qualificationPath !== "MOMENTUM_OVERRIDE") return false;
+/**
+ * User directive 2026-09-24: "we can still invest in these kinds of tokens
+ * even if the pool just opened." What actually matters for our position
+ * sizes is whether the smallest position we'd ever take (the gas-viable
+ * floor entryMonitor.ts sizes down to) can be bought within the
+ * price-impact/slippage limits and sold back — a live on-chain quote, not
+ * DexScreener's reported liquidity, which only sees the ETH-quoted pool we
+ * execute through and badly understates depth on Robinhood Chain (MUSETOWN:
+ * $550 reported at a $290K mcap). Any quote failure counts as "not yet" —
+ * the candidate keeps waiting via liquidityWaitDecision, never rejects on it.
+ */
+async function canExecuteMinimumPosition(tokenAddress: string, pair: MarketPair, chain: string): Promise<boolean> {
+  const minimumPositionUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
+  try {
+    const quote = await getBuyEstimate(tokenAddress, minimumPositionUsd, pair, chain);
+    if (quote.estimatedPriceImpactPercent > tradingConfig.maxBuyPriceImpactPercent) return false;
+    if (quote.estimatedSlippageBps > tradingConfig.defaultMaxBuySlippageBps) return false;
+    return await isSellable(tokenAddress, pair, chain, quote.tokenAmount);
+  } catch (err) {
+    logger.debug({ tokenAddress, chain, err: String(err) }, "minimum-position executability quote failed — treating the pool as not yet liquid enough");
+    return false;
+  }
+}
 
-  const liquidity = input.pair?.liquidityUsd;
-  const freshMarketUnavailable = !input.pair || liquidity === undefined || liquidity <= 0;
-  if (!freshMarketUnavailable) return false;
-
-  return input.evaluation.reasons.some((reason) => reason.startsWith("liquidityUsd "));
+/**
+ * Whether a candidate held back only by pool depth should keep waiting for
+ * liquidity (WAIT), has waited long enough (GIVE_UP), or doesn't qualify for
+ * waiting at all (NOT_APPLICABLE — anything else failed too). Only a first
+ * plan waits: a WAITING candidate whose liquidity collapses on a replan is a
+ * rug signal and still rejects.
+ */
+export function liquidityWaitDecision(input: {
+  evaluation: CandidateRiskResult;
+  utilityGatePassed: boolean;
+  isFirstPlan: boolean;
+  candidateCreatedAt: Date;
+  now: Date;
+}): "WAIT" | "GIVE_UP" | "NOT_APPLICABLE" {
+  if (!input.isFirstPlan || !input.utilityGatePassed || !failedOnlyOnLiquidity(input.evaluation)) return "NOT_APPLICABLE";
+  const waitedMs = input.now.getTime() - input.candidateCreatedAt.getTime();
+  return waitedMs >= tradingConfig.liquidityWaitMaxHours * 3_600_000 ? "GIVE_UP" : "WAIT";
 }
 
 /**
@@ -453,10 +519,13 @@ function strategyTtlMs(strategy: { configuration: unknown }): number {
   return (strategyConfig.defaultEntryPlanTtlMinutes ?? tradingConfig.defaultEntryPlanTtlMinutes) * 60_000;
 }
 
-function summarizeMarket(mcap: number | undefined, liquidity: number, price?: number): string {
+function summarizeMarket(mcap: number | undefined, liquidity: number, price?: number, executableAtMinimumSize?: boolean): string {
   const parts = [
     mcap !== undefined ? `Market cap: $${Math.round(mcap).toLocaleString()}` : "Market cap: unknown",
     `Liquidity: $${Math.round(liquidity).toLocaleString()}`,
+    executableAtMinimumSize
+      ? "Note: that liquidity figure is DexScreener's reading of the one pool we execute through, and badly understates real depth on this chain — a live on-chain quote just confirmed our position size buys within the price-impact limit and can be sold back, so don't treat the low figure as thin liquidity."
+      : undefined,
     price !== undefined ? `Price: $${price}` : undefined,
   ].filter(Boolean);
   return parts.join("\n");

@@ -1,7 +1,7 @@
 import { db } from "../db";
 import { logger } from "../logger";
 import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/prisma";
-import { evaluateCandidate, isBondingCurvePair } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair, failedOnlyOnLiquidity } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { classifyTradeLane } from "./tradeLane";
 import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
@@ -95,7 +95,7 @@ export async function generateTradeCandidates(): Promise<number> {
     const qualificationPath = "NORMAL";
     const tradeEligibilityEvaluation = utilityGate.passed
       ? evaluation
-      : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons };
+      : { eligible: false, riskBucket: "REJECT" as const, reasons: utilityGate.reasons, failedChecks: [] };
     const lane = classifyTradeLane({
       evaluation: tradeEligibilityEvaluation,
       qualificationPath,
@@ -108,8 +108,15 @@ export async function generateTradeCandidates(): Promise<number> {
       liquidityUsd: primaryPair?.liquidityUsd ?? 0,
     });
 
+    // Research-time liquidity is a snapshot, often taken seconds after the
+    // pool opened — a candidate held back only by that stays QUALIFIED so
+    // planning re-checks it against fresh market data (and keeps waiting for
+    // liquidity there) instead of being rejected here for good.
+    const waitingForLiquidity = utilityGate.passed && failedOnlyOnLiquidity(evaluation);
+
     const strategy = await getActiveStrategyVersion();
     const finalReasons = [
+      ...(waitingForLiquidity ? ["pool too thin at research time — waiting for liquidity instead of rejecting"] : []),
       ...evaluation.reasons,
       ...utilityGate.reasons,
       ...lane.reasons,
@@ -117,7 +124,7 @@ export async function generateTradeCandidates(): Promise<number> {
     await db.tradeDecisionSnapshot.create({
       data: {
         candidateId: candidate.id,
-        decision: evaluation.eligible && utilityGate.passed ? TradeDecision.WAIT : TradeDecision.SKIP,
+        decision: (evaluation.eligible && utilityGate.passed) || waitingForLiquidity ? TradeDecision.WAIT : TradeDecision.SKIP,
         stage: "candidate_eligibility",
         strategyVersionId: strategy.id,
         marketState: {},
@@ -129,7 +136,7 @@ export async function generateTradeCandidates(): Promise<number> {
       },
     });
 
-    if (!evaluation.eligible || !utilityGate.passed) {
+    if ((!evaluation.eligible || !utilityGate.passed) && !waitingForLiquidity) {
       await db.tradeCandidate.update({ where: { id: candidate.id }, data: { status: TradeCandidateStatus.REJECTED, qualificationPath, tradeLane: lane.tradeLane } });
     } else {
       // "Learn which entry pathway actually pays" (user directive
