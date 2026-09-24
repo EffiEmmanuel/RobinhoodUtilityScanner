@@ -2587,6 +2587,24 @@
                   ? c.researchConfidence.toFixed(0)
                   : "—";
               var lane = c.tradeLane || c.qualificationPath || "—";
+              // QUALIFIED with a liquidity-wait row = planning keeps
+              // re-checking a pool too thin to trade yet (see the API's
+              // candidateListInclude), not a stuck candidate.
+              var liqWait =
+                c.status === "QUALIFIED" && c.decisions && c.decisions.length > 0
+                  ? c.decisions[0]
+                  : null;
+              var badgeClass = liqWait ? "WAITING" : c.status;
+              var badgeText = liqWait ? "WAITING FOR LIQUIDITY" : c.status;
+              if (liqWait) {
+                var rules = liqWait.deterministicRules || {};
+                lane =
+                  "no tradeable pool yet ($" +
+                  Math.round(rules.liquidityUsd || 0) +
+                  " liquidity) · rechecking every " +
+                  (rules.retryMinutes || 2) +
+                  " min";
+              }
               var outcomeBits = [];
               if (c.outcome && c.outcome.feasibleHit10000x) outcomeBits.push("feasible 100x");
               else if (c.outcome && c.outcome.feasibleHit5000x) outcomeBits.push("feasible 50x");
@@ -2605,9 +2623,9 @@
                 '<div class="line1"><span class="name">' +
                 tokenLabel(c.token) +
                 '</span><span class="badge ' +
-                esc(c.status) +
+                esc(badgeClass) +
                 '">' +
-                esc(c.status) +
+                esc(badgeText) +
                 "</span></div>" +
                 '<div class="line1"><span class="meta">quality ' +
                 q +

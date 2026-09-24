@@ -353,6 +353,21 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     };
   });
 
+  // The latest liquidity-wait row (planning.ts writes stage "planning_retry"
+  // only while a candidate waits for a pool it can actually trade) lets the
+  // dashboard show "waiting for liquidity" instead of a bare QUALIFIED that
+  // looks stuck.
+  const candidateListInclude = {
+    token: true,
+    outcome: true,
+    decisions: {
+      where: { stage: "planning_retry" },
+      orderBy: { createdAt: "desc" as const },
+      take: 1,
+      select: { createdAt: true, finalReasons: true, deterministicRules: true },
+    },
+  };
+
   app.get("/trade-candidates", async (req) => {
     const { status, limit, offset, q } = req.query as { status?: string; limit?: string; offset?: string; q?: string };
     const take = Math.min(Number(limit) || 50, 200);
@@ -383,7 +398,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
         orderBy: { createdAt: "desc" },
         take,
         skip,
-        include: { token: true, outcome: true },
+        include: candidateListInclude,
       });
     }
 
@@ -391,14 +406,14 @@ export function registerTradingRoutes(app: FastifyInstance): void {
       db.tradeCandidate.findMany({
         where: { status: "WAITING" as never, ...searchFilter },
         orderBy: { createdAt: "desc" },
-        include: { token: true, outcome: true },
+        include: candidateListInclude,
       }),
       db.tradeCandidate.findMany({
         where: { status: { not: "WAITING" as never }, ...searchFilter },
         orderBy: { createdAt: "desc" },
         take,
         skip,
-        include: { token: true, outcome: true },
+        include: candidateListInclude,
       }),
     ]);
     return { candidates: [...waiting, ...rest], hasMore: rest.length === take };
