@@ -469,6 +469,14 @@ describe("validatePosition", () => {
     expect(validatePosition(base).riskExitTriggered).toBe(false);
   });
 
+  it("holds through price-only exits when holdThroughDrawdowns is set, but not through a broken token", () => {
+    const hold = { ...base, holdThroughDrawdowns: true };
+    expect(validatePosition({ ...hold, unrealizedPnlPercent: -80 }).riskExitTriggered).toBe(false);
+    expect(validatePosition({ ...hold, buySellRatio5m: 0.05, totalTxns5m: 50 }).riskExitTriggered).toBe(false);
+    expect(validatePosition({ ...hold, sellQuoteAvailable: false }).severity).toBe("CRITICAL");
+    expect(validatePosition({ ...hold, liquidityUsd: 5_000 }).severity).toBe("CRITICAL");
+  });
+
   it("does not trigger extreme sell pressure on a near-empty 5-minute window", () => {
     // PERPSHOOD, 2026-09-11: sold on "extreme sell pressure (buy ratio 0%)"
     // from a 5-minute window with 0 buys AND 0 sells — the ratio's own

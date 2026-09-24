@@ -183,4 +183,51 @@ describe("evaluateExits", () => {
     expect(result?.peakMultiple).toBeUndefined();
     expect(result?.retracePercent).toBeUndefined();
   });
+
+  describe("manual buy-and-hold", () => {
+    // WageFlow, 2026-09-24: bought by hand at a $62K mcap, sold 2 minutes
+    // later on the -35.6% catastrophic stop, then ran to $150K.
+    const underwater = {
+      plan: { invalidationMcap: 80_000 },
+      exitRules,
+      currentMcap: 40_000,
+      currentMultiple: 0.64,
+      unrealizedPnlPercent: -36,
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.1,
+      totalTxns5m: 40,
+      sellQuoteAvailable: true,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+      manualHold: true,
+    };
+
+    it("holds through a launch drawdown that would trip every price-based exit", () => {
+      // -36% is past maxLossPercent (25), below the plan's invalidation
+      // floor, under heavy sell pressure, and past maxHoldMinutes while
+      // underwater; -60% is past catastrophicLossPercent (40) as well.
+      expect(evaluateExits({ ...underwater, trade: trade() })).toBeNull();
+      expect(evaluateExits({ ...underwater, trade: trade(), unrealizedPnlPercent: -60, currentMultiple: 0.4 })).toBeNull();
+    });
+
+    it("still exits when the token itself breaks", () => {
+      expect(evaluateExits({ ...underwater, trade: trade(), sellQuoteAvailable: false })).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+      expect(evaluateExits({ ...underwater, trade: trade(), liquidityUsd: 10_000 })).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+    });
+
+    it("keeps the trailing stop once the position has been well in profit", () => {
+      const result = evaluateExits({
+        ...underwater,
+        trade: trade({ mfePercent: 200 }), // peaked at 3x
+        currentMcap: 200_000,
+        currentMultiple: 2,
+        unrealizedPnlPercent: 100,
+      });
+      expect(result).toMatchObject({ type: "TRAILING_EXIT" });
+    });
+
+    it("leaves the same drawdown to the normal exits for a trade that isn't a manual hold", () => {
+      expect(evaluateExits({ ...underwater, trade: trade(), manualHold: false })).toMatchObject({ isEmergency: true });
+    });
+  });
 });

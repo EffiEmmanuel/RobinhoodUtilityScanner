@@ -413,6 +413,11 @@ export interface PositionRiskInput {
   // silent window as 100% sellers. It went on to reach 1.68x.
   totalTxns5m: number | undefined;
   sellQuoteAvailable: boolean;
+  // Skips the price-only exits (catastrophic loss, max loss, sell pressure)
+  // and keeps the two that mean the token itself is broken (can't be sold,
+  // liquidity pulled). Set for manual buy-and-hold positions — see
+  // positionManager.ts's resolveExitRules.
+  holdThroughDrawdowns?: boolean;
 }
 
 export interface PositionRiskResult {
@@ -427,11 +432,14 @@ export function validatePosition(input: PositionRiskInput): PositionRiskResult {
   if (!input.sellQuoteAvailable) {
     return { riskExitTriggered: true, severity: "CRITICAL", reasons: ["sell quote unavailable — attempt emergency exit"] };
   }
-  if (input.unrealizedPnlPercent <= -input.catastrophicLossPercent) {
+  if (!input.holdThroughDrawdowns && input.unrealizedPnlPercent <= -input.catastrophicLossPercent) {
     return { riskExitTriggered: true, severity: "CRITICAL", reasons: [`catastrophic loss ${input.unrealizedPnlPercent.toFixed(1)}%`] };
   }
   if (input.liquidityUsd < input.liquidityAtEntryUsd * 0.5) {
     return { riskExitTriggered: true, severity: "CRITICAL", reasons: ["liquidity dropped more than 50% since entry — possible liquidity removal"] };
+  }
+  if (input.holdThroughDrawdowns) {
+    return { riskExitTriggered: false, severity: "INFO", reasons: [] };
   }
   if (input.unrealizedPnlPercent <= -input.maxLossPercent) {
     reasons.push(`loss ${input.unrealizedPnlPercent.toFixed(1)}% reached max tolerated loss`);

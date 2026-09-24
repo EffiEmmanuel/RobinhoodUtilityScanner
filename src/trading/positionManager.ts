@@ -84,7 +84,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const token = await db.token.findUniqueOrThrow({ where: { id: trade.tokenId } });
   const plan = trade.tradePlanId ? await db.tradePlan.findUnique({ where: { id: trade.tradePlanId } }) : null;
   const strategy = await getActiveStrategyVersion();
-  const { exitRules, tier } = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
+  const { exitRules, tier, manualHold } = await resolveExitRules(trade, strategy.exitRules as unknown as ExitRules);
 
   // Same fix as entryMonitor.ts: an open position is checked every tick here,
   // but Token.lastSeenAt otherwise only reflects the base discovery poll's
@@ -204,7 +204,10 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
     }
     if (aiDecision) {
-      const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision, tier);
+      const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision, tier, {
+        manualHold,
+        currentMultiple,
+      });
       if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
     }
   }
@@ -222,6 +225,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     sellQuoteAvailable: await isSellable(token.address, pair, token.chain, remainingTokens),
     remainingTokens,
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
+    manualHold,
   });
 
   if (!decision) return;
@@ -287,13 +291,23 @@ async function applyAiStrategyDecision(
   remainingTokens: number,
   totalBoughtTokens: number,
   decision: PositionStrategyDecision,
-  tier: ProjectTier
+  tier: ProjectTier,
+  hold: { manualHold: boolean; currentMultiple: number }
 ): Promise<boolean> {
   if (decision.action === "SET_REENTRY_TARGET") {
     await applyReentryTarget(trade, decision, tier);
     return false;
   }
   if (decision.action === "HOLD") return false;
+  // A manual buy-and-hold is held through drawdowns (resolveExitRules): the
+  // AI review may bank profit on it, never sell it underwater.
+  if (hold.manualHold && hold.currentMultiple < 1) {
+    logger.info(
+      { tradeId: trade.id, action: decision.action, currentMultiple: hold.currentMultiple },
+      "AI strategy proposed selling a manual buy-and-hold position at a loss — holding instead"
+    );
+    return false;
+  }
 
   if (!pair) {
     logger.warn({ tradeId: trade.id, action: decision.action }, "AI strategy proposed an exit but no market data to fill against — will retry next review");
@@ -346,12 +360,28 @@ async function applyAiStrategyDecision(
  * the full DCA/re-entry budget in positionStrategy.ts (this function's tier
  * return value is what that reads).
  */
-async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<{ exitRules: ExitRules; tier: ProjectTier }> {
-  const { fastFlip, goodProject } = baseExitRules;
-
+async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise<{ exitRules: ExitRules; tier: ProjectTier; manualHold: boolean }> {
   const candidate = trade.candidateId
-    ? await db.tradeCandidate.findUnique({ where: { id: trade.candidateId }, select: { qualityScore: true, researchRunId: true } })
+    ? await db.tradeCandidate.findUnique({
+        where: { id: trade.candidateId },
+        select: { qualityScore: true, researchRunId: true, qualificationPath: true },
+      })
     : null;
+  // User directive 2026-09-24, after WageFlow: a token the user submitted
+  // by hand to buy and hold is held through drawdowns. It was bought at a
+  // $62K mcap, sold 2 minutes later on the -35.6% catastrophic stop at
+  // ~$41K during a normal launch wick, then ran to $150K. Only the exits
+  // that mean the token itself is broken still fire (evaluateExits).
+  const manualHold = candidate?.qualificationPath === "MANUAL_BUY_AND_HOLD";
+  return { ...(await resolveTier(trade, baseExitRules, candidate)), manualHold };
+}
+
+async function resolveTier(
+  trade: Trade,
+  baseExitRules: ExitRules,
+  candidate: { qualityScore: number | null; researchRunId: string | null } | null
+): Promise<{ exitRules: ExitRules; tier: ProjectTier }> {
+  const { fastFlip, goodProject } = baseExitRules;
   const qualityScore = candidate?.qualityScore ?? undefined;
 
   if (fastFlip) {
@@ -416,6 +446,10 @@ export function evaluateExits(ctx: {
   sellQuoteAvailable: boolean;
   remainingTokens: number;
   totalBoughtTokens: number;
+  // Manual buy-and-hold (resolveExitRules): no price-driven exit may sell
+  // it at a loss — only an unsellable token or pulled liquidity, plus the
+  // trailing stop, which only arms once the position is well in profit.
+  manualHold?: boolean;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
 
@@ -429,6 +463,7 @@ export function evaluateExits(ctx: {
     buySellRatio5m: ctx.buySellRatio5m,
     totalTxns5m: ctx.totalTxns5m,
     sellQuoteAvailable: ctx.sellQuoteAvailable,
+    holdThroughDrawdowns: ctx.manualHold,
   });
   if (positionRisk.riskExitTriggered && positionRisk.severity === "CRITICAL") {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
@@ -436,7 +471,7 @@ export function evaluateExits(ctx: {
 
   const tradeLane = normalizeTradeLane(trade.tradeLane);
   const holdingMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
-  if (tradeLane === "NARRATIVE_TACTICAL" && holdingMinutes >= tradingConfig.narrativeVolumeExitAfterMinutes) {
+  if (!ctx.manualHold && tradeLane === "NARRATIVE_TACTICAL" && holdingMinutes >= tradingConfig.narrativeVolumeExitAfterMinutes) {
     if ((ctx.totalTxns5m ?? 0) < tradingConfig.narrativeMinTxns5mToHold) {
       return {
         type: "RISK_EXIT",
@@ -470,7 +505,7 @@ export function evaluateExits(ctx: {
   // is not a discretionary trim; it should never wait in that queue at all —
   // TRAILING_EXIT/PARTIAL_PROFIT/AI_STRATEGY_EXIT stay non-emergency since
   // those are genuinely discretionary.
-  if (invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
+  if (!ctx.manualHold && invalidationFloor !== undefined && ctx.currentMcap !== undefined && ctx.currentMcap <= invalidationFloor) {
     return {
       type: "INVALIDATION_EXIT",
       sellPercentOfRemaining: 100,
@@ -533,7 +568,7 @@ export function evaluateExits(ctx: {
   // it only ever fires while the position is currently underwater (currentMultiple < 1),
   // freeing up capital tied up in a thesis that hasn't played out rather than
   // capping the upside of one that's working.
-  if (holdingMinutes >= exitRules.maxHoldMinutes && ctx.currentMultiple < 1) {
+  if (!ctx.manualHold && holdingMinutes >= exitRules.maxHoldMinutes && ctx.currentMultiple < 1) {
     return applyVerifiedRunnerGuard({
       trade,
       remainingTokens: ctx.remainingTokens,
