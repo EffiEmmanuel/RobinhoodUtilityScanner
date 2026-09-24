@@ -23,6 +23,13 @@ describe("liquidityWaitDecision", () => {
     ).toBe("WAIT");
   });
 
+  it("also waits when no route executes yet (e.g. a launch hook blocking outside swaps)", () => {
+    const blocked: CandidateRiskResult = { eligible: false, riskBucket: "REJECT", reasons: ["no route executes"], failedChecks: ["execution"] };
+    expect(
+      liquidityWaitDecision({ evaluation: blocked, utilityGatePassed: true, isFirstPlan: true, candidateCreatedAt: createdAt, now: hoursLater(1) })
+    ).toBe("WAIT");
+  });
+
   it("gives up once the wait window has passed", () => {
     expect(
       liquidityWaitDecision({

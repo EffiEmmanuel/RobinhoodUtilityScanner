@@ -5,7 +5,7 @@ import { callStructured } from "../ai/provider";
 import { TradeAnalysisSchema, TRADE_ANALYSIS_JSON_SCHEMA } from "./schemas";
 import { TRADE_ANALYSIS_SYSTEM, buildTradeAnalysisPrompt } from "./prompts";
 import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesForPrompt } from "./marketAnalysis";
-import { evaluateCandidate, isBondingCurvePair, failedOnlyOnLiquidity, type CandidateRiskResult } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair, failedOnlyOnMarketAccess, type CandidateRiskResult } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { getBuyEstimate, isSellable } from "./executionFacade";
 import { isLiveModeReady, warmRoutes } from "./live/liveExecutionProvider";
@@ -57,11 +57,16 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
   const liquidityUsd = market.primaryPair?.liquidityUsd ?? 0;
   const onBondingCurve = isBondingCurvePair(market.primaryPair);
-  // Only pays for a live quote when the reported number alone would fail.
+  // Checked on every first plan, not only for thin pools: a token can show
+  // plenty of liquidity and still have no route that executes (BITS,
+  // 2026-09-24: $30K pool whose hook rejects outside swaps) — better caught
+  // here, as a wait, than after an AI plan and at entry. Replans only check
+  // thin pools, as before; a watched candidate is revalidated at entry.
+  // undefined = not checked / couldn't check, which never counts against it.
   const executableAtMinimumSize =
-    !onBondingCurve && liquidityUsd < tradingConfig.minTradeLiquidityUsd && market.primaryPair
+    !onBondingCurve && market.primaryPair && (isFirstPlan || liquidityUsd < tradingConfig.minTradeLiquidityUsd)
       ? await canExecuteMinimumPosition(candidate.token.address, market.primaryPair, candidate.token.chain)
-      : false;
+      : undefined;
   const freshEval = evaluateCandidate({
     qualityScore: candidate.qualityScore ?? 0,
     researchConfidence: candidate.researchConfidence ?? 0,
@@ -138,7 +143,11 @@ export async function planCandidate(candidateId: string): Promise<void> {
           technical,
           walletSignals,
           reasons: [
-            `pool too thin to enter yet ($${Math.round(liquidityUsd)} < $${tradingConfig.minTradeLiquidityUsd}) — waiting for liquidity, re-checking every ${tradingConfig.liquidityWaitRetryMinutes} min for up to ${tradingConfig.liquidityWaitMaxHours}h`,
+            `${
+              freshEval.failedChecks.includes("execution")
+                ? "no route executes our minimum position yet"
+                : `pool too thin to enter yet ($${Math.round(liquidityUsd)} < $${tradingConfig.minTradeLiquidityUsd})`
+            } — waiting, re-checking every ${tradingConfig.liquidityWaitRetryMinutes} min for up to ${tradingConfig.liquidityWaitMaxHours}h`,
             ...freshEval.reasons,
           ],
           deterministic: deterministicRules,
@@ -151,7 +160,11 @@ export async function planCandidate(candidateId: string): Promise<void> {
 
     const rejectReasons = [
       ...(liquidityWait === "GIVE_UP"
-        ? [`liquidity never reached $${tradingConfig.minTradeLiquidityUsd} within ${tradingConfig.liquidityWaitMaxHours}h of qualifying`]
+        ? [
+            freshEval.failedChecks.includes("execution")
+              ? `no route ever executed our minimum position within ${tradingConfig.liquidityWaitMaxHours}h of qualifying`
+              : `liquidity never reached $${tradingConfig.minTradeLiquidityUsd} within ${tradingConfig.liquidityWaitMaxHours}h of qualifying`,
+          ]
         : []),
       ...freshEval.reasons,
       ...utilityGate.reasons,
@@ -384,7 +397,7 @@ function isExtremeMomentum(pair: MarketPair | undefined): boolean {
  * $550 reported at a $290K mcap). Any quote failure counts as "not yet" —
  * the candidate keeps waiting via liquidityWaitDecision, never rejects on it.
  */
-async function canExecuteMinimumPosition(tokenAddress: string, pair: MarketPair, chain: string): Promise<boolean> {
+async function canExecuteMinimumPosition(tokenAddress: string, pair: MarketPair, chain: string): Promise<boolean | undefined> {
   const minimumPositionUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
   try {
     const quote = await getBuyEstimate(tokenAddress, minimumPositionUsd, pair, chain);
@@ -392,8 +405,9 @@ async function canExecuteMinimumPosition(tokenAddress: string, pair: MarketPair,
     if (quote.estimatedSlippageBps > tradingConfig.defaultMaxBuySlippageBps) return false;
     return await isSellable(tokenAddress, pair, chain, quote.tokenAmount);
   } catch (err) {
-    logger.debug({ tokenAddress, chain, err: String(err) }, "minimum-position executability quote failed — treating the pool as not yet liquid enough");
-    return false;
+    // Couldn't check (RPC/discovery trouble) is not "doesn't execute".
+    logger.debug({ tokenAddress, chain, err: String(err) }, "minimum-position executability check failed — unknown, not held against the candidate");
+    return undefined;
   }
 }
 
@@ -411,7 +425,7 @@ export function liquidityWaitDecision(input: {
   candidateCreatedAt: Date;
   now: Date;
 }): "WAIT" | "GIVE_UP" | "NOT_APPLICABLE" {
-  if (!input.isFirstPlan || !input.utilityGatePassed || !failedOnlyOnLiquidity(input.evaluation)) return "NOT_APPLICABLE";
+  if (!input.isFirstPlan || !input.utilityGatePassed || !failedOnlyOnMarketAccess(input.evaluation)) return "NOT_APPLICABLE";
   const waitedMs = input.now.getTime() - input.candidateCreatedAt.getTime();
   return waitedMs >= tradingConfig.liquidityWaitMaxHours * 3_600_000 ? "GIVE_UP" : "WAIT";
 }

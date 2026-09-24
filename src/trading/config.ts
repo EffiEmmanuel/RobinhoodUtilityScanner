@@ -641,6 +641,13 @@ export const tradingConfig = {
   // failing EVM swap can spend gas on every attempt, which is why automatic
   // entries still reject on the first non-transient failure.
   manualBuyAndHoldMaxExecutionFailures: num("MANUAL_BUY_AND_HOLD_MAX_EXECUTION_FAILURES", 30),
+  // An autonomous entry whose buy fails only its pre-sign simulation (nothing
+  // was sent, no gas spent) retries on the same cooldown up to this many times
+  // before being rejected, instead of on the first failure. Confirmed live
+  // 2026-09-24: W0G's hooked pool failed the 3% slippage floor on 2 of 3
+  // simulations seconds apart and passed on the third. A real on-chain revert
+  // still rejects immediately (repeat attempts would burn gas).
+  entrySimulationRevertRetries: num("ENTRY_SIMULATION_REVERT_RETRIES", 5),
   // User directive 2026-09-24, after MUSETOWN (researched with $0.69 in its
   // brand-new pool, permanently rejected, then ran 63x): "we can still invest
   // in these kinds of tokens even if the pool just opened, instead of

@@ -3,7 +3,7 @@ import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
   isBondingCurvePair,
-  failedOnlyOnLiquidity,
+  failedOnlyOnMarketAccess,
   calculatePositionSize,
   validateEntry,
   validatePosition,
@@ -174,7 +174,7 @@ describe("evaluateCandidate", () => {
   });
 });
 
-describe("failedOnlyOnLiquidity", () => {
+describe("failedOnlyOnMarketAccess", () => {
   const base = {
     qualityScore: tradingConfig.minTradeQualityScore + 5,
     researchConfidence: tradingConfig.minTradeResearchConfidence + 5,
@@ -185,7 +185,7 @@ describe("failedOnlyOnLiquidity", () => {
   };
 
   it("is true when a thin pool is the only failing check", () => {
-    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, liquidityUsd: 1 }))).toBe(true);
+    expect(failedOnlyOnMarketAccess(evaluateCandidate({ ...base, liquidityUsd: 1 }))).toBe(true);
   });
 
   it("treats a thin pool as liquid enough once a live quote proved our minimum position executes", () => {
@@ -193,10 +193,21 @@ describe("failedOnlyOnLiquidity", () => {
     expect(result.eligible).toBe(true);
   });
 
+  it("counts a checked-and-unexecutable route as a market-access failure, not a verdict", () => {
+    const result = evaluateCandidate({ ...base, liquidityUsd: tradingConfig.minTradeLiquidityUsd * 4, executableAtMinimumSize: false });
+    expect(result.eligible).toBe(false);
+    expect(result.failedChecks).toEqual(["execution"]);
+    expect(failedOnlyOnMarketAccess(result)).toBe(true);
+  });
+
+  it("never holds an unchecked route against a candidate", () => {
+    expect(evaluateCandidate({ ...base, liquidityUsd: tradingConfig.minTradeLiquidityUsd * 4, executableAtMinimumSize: undefined }).eligible).toBe(true);
+  });
+
   it("is false when anything else failed too, or nothing failed", () => {
-    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, qualityScore: 0, liquidityUsd: 1 }))).toBe(false);
-    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, hardReject: true, liquidityUsd: 1 }))).toBe(false);
-    expect(failedOnlyOnLiquidity(evaluateCandidate({ ...base, liquidityUsd: tradingConfig.minTradeLiquidityUsd * 2 }))).toBe(false);
+    expect(failedOnlyOnMarketAccess(evaluateCandidate({ ...base, qualityScore: 0, liquidityUsd: 1 }))).toBe(false);
+    expect(failedOnlyOnMarketAccess(evaluateCandidate({ ...base, hardReject: true, liquidityUsd: 1 }))).toBe(false);
+    expect(failedOnlyOnMarketAccess(evaluateCandidate({ ...base, liquidityUsd: tradingConfig.minTradeLiquidityUsd * 2 }))).toBe(false);
   });
 });
 

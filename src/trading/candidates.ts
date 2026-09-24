@@ -1,7 +1,7 @@
 import { db } from "../db";
 import { logger } from "../logger";
 import { TokenStatus, TradeCandidateStatus, TradeDecision } from "../generated/prisma";
-import { evaluateCandidate, isBondingCurvePair, failedOnlyOnLiquidity } from "./riskEngine";
+import { evaluateCandidate, isBondingCurvePair, failedOnlyOnMarketAccess } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { classifyTradeLane } from "./tradeLane";
 import { evaluateUtilityOnlyGate, utilityGateInputFromRawResearch } from "./utilityGate";
@@ -112,7 +112,7 @@ export async function generateTradeCandidates(): Promise<number> {
     // pool opened — a candidate held back only by that stays QUALIFIED so
     // planning re-checks it against fresh market data (and keeps waiting for
     // liquidity there) instead of being rejected here for good.
-    const waitingForLiquidity = utilityGate.passed && failedOnlyOnLiquidity(evaluation);
+    const waitingForLiquidity = utilityGate.passed && failedOnlyOnMarketAccess(evaluation);
 
     const strategy = await getActiveStrategyVersion();
     const finalReasons = [

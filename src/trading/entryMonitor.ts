@@ -173,23 +173,24 @@ function transientEntryCooldownMs(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60_000;
 }
 
-// A manual buy-and-hold's non-transient execution failure that still has
-// retry budget left (see openTrade) — routed through the same cooldown-and-
-// retry handling as a transient infra error instead of a permanent reject.
-class ManualBuyRetryableError extends Error {
+// A buy failure that still has retry budget left (see openTrade: a manual
+// buy-and-hold, or a pre-sign simulation revert) — routed through the same
+// cooldown-and-retry handling as a transient infra error instead of a
+// permanent reject.
+class RetryableBuyError extends Error {
   constructor(cause: unknown) {
-    super(`manual buy-and-hold execution failed, will retry: ${String(cause)}`);
+    super(`buy failed, will retry: ${String(cause)}`);
   }
 }
 
 // Keyed by candidateId. In-memory like sellPathUnavailableSince — a restart
 // just resets the budget, never shrinks it.
-const manualBuyFailureCounts = new Map<string, number>();
+const buyFailureCounts = new Map<string, number>();
 
 function isTransientEntryInfraError(err: unknown): boolean {
   const message = String(err).toLowerCase();
   return (
-    err instanceof ManualBuyRetryableError ||
+    err instanceof RetryableBuyError ||
     isPoolDiscoveryInconclusiveError(err) ||
     isHoneypotCheckInconclusiveError(err) ||
     message.includes("too many requests") ||
@@ -940,21 +941,29 @@ async function openTrade(input: {
       error: String(err),
     });
     if (!transientInfra) {
-      if (input.manualBuyAndHold) {
-        const failures = (manualBuyFailureCounts.get(input.candidateId) ?? 0) + 1;
-        if (failures < tradingConfig.manualBuyAndHoldMaxExecutionFailures) {
-          if (manualBuyFailureCounts.size >= 1000) manualBuyFailureCounts.clear();
-          manualBuyFailureCounts.set(input.candidateId, failures);
-          throw new ManualBuyRetryableError(err);
+      // Nothing is sent when the pre-sign simulation reverts, so retrying
+      // costs no gas — see tradingConfig.entrySimulationRevertRetries.
+      const simulationOnly = String(err).includes("simulation reverted");
+      const retryBudget = input.manualBuyAndHold
+        ? tradingConfig.manualBuyAndHoldMaxExecutionFailures
+        : simulationOnly
+          ? tradingConfig.entrySimulationRevertRetries
+          : 0;
+      if (retryBudget > 0) {
+        const failures = (buyFailureCounts.get(input.candidateId) ?? 0) + 1;
+        if (failures < retryBudget) {
+          if (buyFailureCounts.size >= 1000) buyFailureCounts.clear();
+          buyFailureCounts.set(input.candidateId, failures);
+          throw new RetryableBuyError(err);
         }
-        manualBuyFailureCounts.delete(input.candidateId);
-        logger.error({ candidateId: input.candidateId, failures }, "manual buy-and-hold exhausted its execution retry budget — rejecting");
+        buyFailureCounts.delete(input.candidateId);
+        logger.error({ candidateId: input.candidateId, failures, manualBuyAndHold: input.manualBuyAndHold }, "buy exhausted its retry budget — rejecting");
       }
       await db.tradeCandidate.update({ where: { id: input.candidateId }, data: { status: TradeCandidateStatus.REJECTED } });
     }
     throw err;
   }
-  manualBuyFailureCounts.delete(input.candidateId);
+  buyFailureCounts.delete(input.candidateId);
   recordBuySuccess();
 
   const trade = await db.trade.create({

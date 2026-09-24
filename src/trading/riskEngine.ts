@@ -18,12 +18,13 @@ export interface CandidateRiskInput {
   chain: string;
   // Pre-bond pump.fun pair — see isBondingCurvePair.
   onBondingCurve: boolean;
-  // A live on-chain quote confirmed our smallest position can be bought
-  // within the price-impact limit AND sold back (planning.ts's
-  // canExecuteMinimumPosition). Overrides the reported-liquidity bar, which
-  // only sees the ETH-quoted pool we execute through — MUSETOWN
-  // (2026-09-23) showed $550 there at a $290K mcap, its real market being a
-  // META-quoted pool.
+  // Whether a live quote showed our smallest position can be bought within
+  // the price-impact limit AND sold back (planning.ts's
+  // canExecuteMinimumPosition): true overrides the reported-liquidity bar
+  // (MUSETOWN, 2026-09-23: $550 reported in the pool we could see, its real
+  // market elsewhere); false means it was checked and nothing executes (a
+  // hook that blocks outside swaps, a drained pool); undefined means not
+  // checked or couldn't be checked — never treated as a failure.
   executableAtMinimumSize?: boolean;
 }
 
@@ -37,7 +38,7 @@ export function isBondingCurvePair(pair: { dexId?: string; liquidityUsd?: number
   return pair?.dexId === "pumpfun" && pair.liquidityUsd === undefined;
 }
 
-export type CandidateCheck = "hardReject" | "quality" | "confidence" | "contract" | "liquidity";
+export type CandidateCheck = "hardReject" | "quality" | "confidence" | "contract" | "liquidity" | "execution";
 
 export interface CandidateRiskResult {
   eligible: boolean;
@@ -46,14 +47,18 @@ export interface CandidateRiskResult {
   failedChecks: CandidateCheck[];
 }
 
+const MARKET_ACCESS_CHECKS: CandidateCheck[] = ["liquidity", "execution"];
+
 /**
- * True when the ONLY thing standing between a candidate and eligibility is
- * pool depth — a timing condition (a pool that just opened, liquidity not
- * added yet), not a verdict on the project. Callers wait for liquidity
- * instead of rejecting on this.
+ * True when the only things standing between a candidate and eligibility are
+ * about reaching its market right now — pool depth, or no route that
+ * executes — timing conditions (a pool that just opened, a launch hook that
+ * blocks outside trades for its first minutes, a pool DexScreener
+ * momentarily stopped listing), not a verdict on the project. Callers wait
+ * and recheck instead of rejecting on these.
  */
-export function failedOnlyOnLiquidity(result: CandidateRiskResult): boolean {
-  return !result.eligible && result.failedChecks.length === 1 && result.failedChecks[0] === "liquidity";
+export function failedOnlyOnMarketAccess(result: CandidateRiskResult): boolean {
+  return !result.eligible && result.failedChecks.length > 0 && result.failedChecks.every((c) => MARKET_ACCESS_CHECKS.includes(c));
 }
 
 export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResult {
@@ -87,6 +92,10 @@ export function evaluateCandidate(input: CandidateRiskInput): CandidateRiskResul
   if (!liquidityOk) {
     failedChecks.push("liquidity");
     reasons.push(`liquidityUsd ${Math.round(input.liquidityUsd)} < ${tradingConfig.minTradeLiquidityUsd}`);
+  }
+  if (input.executableAtMinimumSize === false) {
+    failedChecks.push("execution");
+    reasons.push("no route executes our minimum position within limits right now (hook-restricted, drained or unlisted pool)");
   }
 
   // User directive 2026-09-18: retired the momentum override that used to
