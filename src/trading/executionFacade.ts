@@ -308,9 +308,7 @@ export async function executeBuyFill(
  * the recorded fill; read the wallet's actual before/after balance), just
  * against an ATA instead of an ERC20 balanceOf, and no approval step (SPL
  * has no allowance model — Jupiter's transaction already handles ATA
- * creation). No RPC read-after-write retry loop here — unlike Robinhood
- * Chain's ~100ms blocks, this hasn't been exercised against real Solana RPC
- * behavior yet, so this may need the same defensive backoff once it has. */
+ * creation). Same read-after-write retry as the EVM path — see below. */
 async function executeSolanaBuyFill(
   tokenAddress: string,
   positionSizeUsd: number,
@@ -332,7 +330,19 @@ async function executeSolanaBuyFill(
 
   const balanceBefore = await getSolanaTokenBalance(conn, mint, wallet);
   const result = await executeSolanaLiveBuy(tokenAddress, amountInLamports, options.maxSlippageBps ?? tradingConfig.defaultMaxBuySlippageBps);
-  const balanceAfter = await getSolanaTokenBalance(conn, mint, wallet);
+  // Confirmed live 2026-09-24 (.agent, DESKS x2): the swap confirmed and the
+  // tokens landed, but a single balance read straight after confirmation
+  // still saw no token account (the swap itself creates the ATA, and the
+  // RPC node answering the read hadn't caught up). Throwing there rejected
+  // the candidate and left real tokens in the wallet with no Trade — nothing
+  // managing an exit — and a manual buy-and-hold's retry bought a second
+  // time. Retry the read before accepting a delta this suspicious.
+  const BALANCE_READ_BACKOFF_MS = [0, 1500, 3000, 6000];
+  let balanceAfter = await getSolanaTokenBalance(conn, mint, wallet);
+  for (let attempt = 0; balanceAfter <= balanceBefore && attempt < BALANCE_READ_BACKOFF_MS.length; attempt++) {
+    await sleep(BALANCE_READ_BACKOFF_MS[attempt]);
+    balanceAfter = await getSolanaTokenBalance(conn, mint, wallet);
+  }
   if (balanceAfter <= balanceBefore) {
     throw new Error(
       `live solana buy tx ${result.signature} confirmed but the wallet's token balance didn't increase — refusing to record a phantom buy. Verify the wallet's actual token balance and reconcile manually.`
