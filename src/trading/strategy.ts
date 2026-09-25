@@ -59,13 +59,18 @@ export interface ExitRules {
   // default until a strategy version sets it) disables the distinction
   // entirely and every trade uses the profile above, unchanged from before
   // this field existed.
+  //
+  // The profile overrides below are each optional: v1.9 drops the early
+  // trail and profit steps (see costRecovery) and keeps only the tighter,
+  // underwater-only maxHoldMinutes. The FAST_FLIP tier itself still exists
+  // either way — it also sets the re-entry budget (positionStrategy.ts).
   fastFlip?: {
     qualityScoreThreshold: number;
     largeMcapUsd: number;
     veryGoodQualityScoreThreshold: number;
-    profitSteps: ProfitStep[];
-    trailingActivationMultiple: number;
-    trailingPercent: number;
+    profitSteps?: ProfitStep[];
+    trailingActivationMultiple?: number;
+    trailingPercent?: number;
     maxHoldMinutes: number;
   };
 
@@ -86,6 +91,31 @@ export interface ExitRules {
     minSocialScoreToQualify: number;
     maxHoldMinutes: number;
   };
+
+  // v1.9 (2026-09-25): one deterministic profit-take, then a runner. When
+  // a position first reaches triggerMultiple, sell just enough of it to get
+  // back everything it has cost (buys, their gas, and this sell's own
+  // estimated gas, plus sellCostBufferPercent for quote drift) — ~53% at 2x.
+  // What's left rides with a moonbagTrailingPercent trailing stop from its
+  // peak, and nothing else sells it while it's above entry: not the AI
+  // review, not the time exit (underwater-only anyway). The loss stops still
+  // apply. Manual buy-and-hold positions never get this (resolveExitRules
+  // strips it). This overrides the 2026-09-22 "no fixed profit-taking
+  // multiples" directive for any version that sets it, so it only takes
+  // effect once the user promotes such a version. Undefined (every version
+  // up to v1.8) keeps the AI review as the only profit-taker. Evidence
+  // (live trades 09-11 to 09-24): the runners sold far below their peaks
+  // went out on the old 1.5x/2x steps (CLIP had sold 90% by 2x and peaked
+  // at 5.2x) and on fastFlip's 1.2x/12% trail (SWARM sold at 1.19x from a
+  // 1.36x peak, later ran to 5.8x); of 66 autonomous trades only 11 ever
+  // offered a 2x.
+  costRecovery?: CostRecoveryRules;
+}
+
+export interface CostRecoveryRules {
+  triggerMultiple: number;
+  sellCostBufferPercent: number;
+  moonbagTrailingPercent: number;
 }
 
 export interface EntryRules {

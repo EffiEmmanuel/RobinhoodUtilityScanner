@@ -70,14 +70,26 @@ function formatPositionState(input: {
 // value can be far larger than this and still mean "no real cap."
 const NO_REAL_HOLD_CAP_MINUTES = 60 * 24 * 365;
 
-function formatExitRulesState(exitRules: ExitRules, currentMultiple: number): string {
+export function formatExitRulesState(exitRules: ExitRules, currentMultiple: number, costRecovered = false): string {
   const holdCapText =
     exitRules.maxHoldMinutes >= NO_REAL_HOLD_CAP_MINUTES
       ? "no real cap — hold as long as the thesis holds"
       : `${(exitRules.maxHoldMinutes / 60).toFixed(0)}h`;
+  const recovery = exitRules.costRecovery;
+  const profitLines = !recovery
+    ? ["No fixed profit-taking multiples exist — deciding if/when/how much profit to take is entirely your call, from the chart and data below."]
+    : costRecovered
+      ? [
+          `This position has already sold enough to get back everything it cost. What's left is a runner: a ${recovery.moonbagTrailingPercent}% retrace from its peak sells it, and while it's above entry nothing else will — any sell you propose now is ignored. Only a loss stop can end it early.`,
+        ]
+      : [
+          `When this position first reaches ${recovery.triggerMultiple}x, the system automatically sells just enough of it to get back everything it cost, fees included (about half at ${recovery.triggerMultiple}x); the rest then rides with a ${recovery.moonbagTrailingPercent}% trailing stop from its peak and can't be sold while it's in profit. Before that, taking partial profit is still your call.`,
+        ];
+  const trailingLine = `Trailing stop (loss protection only, not a target): once this position's peak-ever multiple crosses ${exitRules.trailingActivationMultiple}x, a ${exitRules.trailingPercent}% retrace from that peak force-sells everything regardless of your view${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"} — treat this as a backstop, not a cue to hold until it fires.`;
   return [
-    "No fixed profit-taking multiples exist — deciding if/when/how much profit to take is entirely your call, from the chart and data below.",
-    `Trailing stop (loss protection only, not a target): once this position's peak-ever multiple crosses ${exitRules.trailingActivationMultiple}x, a ${exitRules.trailingPercent}% retrace from that peak force-sells everything regardless of your view${currentMultiple >= exitRules.trailingActivationMultiple ? " (ACTIVE now)" : " (not yet active)"} — treat this as a backstop, not a cue to hold until it fires.`,
+    ...profitLines,
+    // The runner's own trail replaces this one once cost is back.
+    ...(recovery && costRecovered ? [] : [trailingLine]),
     `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.`,
     `Max-hold time-exit: ${holdCapText}, but ONLY while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.`,
   ].join("\n");
@@ -137,11 +149,14 @@ export async function runPositionStrategyReview(input: {
   unrealizedPnlPercent: number;
   partialSellsCount: number;
   tier: ProjectTier;
+  // The position's own resolved rules (tier profile applied, cost recovery
+  // stripped for manual holds) — what evaluateExits actually enforces.
+  exitRules: ExitRules;
+  costRecovered: boolean;
 }): Promise<PositionStrategyDecision | null> {
-  const { trade, token, pair } = input;
+  const { trade, token, pair, exitRules } = input;
 
   const strategy = await getActiveStrategyVersion();
-  const exitRules = strategy.exitRules as unknown as ExitRules;
   const technical: TechnicalFeatures = await computeTechnicalFeatures(trade.tokenId, pair, token.address, token.chain);
   const researchSummary = await fetchResearchSummary(trade);
   const holdMinutes = trade.openedAt ? (Date.now() - trade.openedAt.getTime()) / 60_000 : 0;
@@ -171,7 +186,7 @@ export async function runPositionStrategyReview(input: {
           remainingTokens: input.remainingTokens,
           totalBoughtTokens: input.totalBoughtTokens,
         }),
-        exitRulesState: formatExitRulesState(exitRules, input.currentMultiple),
+        exitRulesState: formatExitRulesState(exitRules, input.currentMultiple, input.costRecovered),
         reentryState: formatReentryState(trade, input.tier),
         technical: formatTechnicalFeaturesForPrompt(technical),
         chartAttached: chartImage !== undefined,

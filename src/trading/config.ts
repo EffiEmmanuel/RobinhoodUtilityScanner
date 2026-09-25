@@ -235,21 +235,13 @@ export const tradingConfig = {
   // ($195K -> 2x+) both delivered real, fast multiples tonight; RWA and
   // STONKBROKER, both already $20-30M at entry, did not — "tens of thousands
   // and a few hundred thousand is way better chance of making good profit."
-  // NOT an entry gate, though — a large-mcap token with real momentum is
-  // still tradeable, just with a modest fast-flip target instead of holding
-  // for the big multiple a low-mcap token has room for (unless the project
-  // itself is genuinely strong — see ExitRules.fastFlip.veryGoodQualityScoreThreshold,
-  // which exempts a "very good project" from this regardless of entry mcap).
-  // Consumed by positionManager.ts's resolveExitRules, not riskEngine.ts.
-  fastFlipAboveMarketCapUsd: num("FAST_FLIP_ABOVE_MARKET_CAP_USD", 2_000_000),
-  // The entry-sizing mirror of the exit-side logic above: a REWARD, not a
-  // penalty — a strong candidate found at or below sizeBoostSweetSpotMcapUsd
-  // gets sized up toward maxMcapSizeBoostMultiple, tapering back to 1x
-  // (no boost, never a penalty — that's what fastFlip above already handles
-  // on the exit side) by sizeBoostTaperOffMcapUsd. Deliberately the same
-  // $2M taper-off ceiling as fastFlipAboveMarketCapUsd so the two don't
-  // disagree about where "large" starts. Consumed by riskEngine.ts's
-  // calculatePositionSize.
+  // A strong candidate found at or below sizeBoostSweetSpotMcapUsd gets sized
+  // up toward maxMcapSizeBoostMultiple, tapering back to 1x (no boost, never
+  // a penalty) by sizeBoostTaperOffMcapUsd — the same $2M the strategy's
+  // exitRules.fastFlip.largeMcapUsd uses for "large" on the exit side (that
+  // threshold lives in the versioned strategy, not here; a
+  // FAST_FLIP_ABOVE_MARKET_CAP_USD setting here was never read and was
+  // removed 2026-09-25). Consumed by riskEngine.ts's calculatePositionSize.
   sizeBoostSweetSpotMcapUsd: num("SIZE_BOOST_SWEET_SPOT_MARKET_CAP_USD", 200_000),
   sizeBoostTaperOffMcapUsd: num("SIZE_BOOST_TAPER_OFF_MARKET_CAP_USD", 2_000_000),
   maxMcapSizeBoostMultiple: num("MAX_MCAP_SIZE_BOOST_MULTIPLE", 1.5),

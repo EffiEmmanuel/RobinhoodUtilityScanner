@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Trade } from "../generated/prisma";
-import { evaluateExits, stopBaseline } from "./positionManager";
+import { evaluateExits, stopBaseline, costRecoverySellPercent, applyFastFlipProfile } from "./positionManager";
 import type { ExitRules } from "./strategy";
 
 const exitRules: ExitRules = {
@@ -276,5 +276,118 @@ describe("evaluateExits loss stops", () => {
       type: "RISK_EXIT",
       isEmergency: true,
     });
+  });
+});
+
+describe("costRecoverySellPercent", () => {
+  it("sells enough to get back what the position cost, plus this sell's gas and the buffer", () => {
+    // $10.05 in (incl. buy gas), $20 of it left at 2x, $0.01 sell gas, 3% buffer.
+    expect(costRecoverySellPercent({ costBasisUsd: 10.05, realizedProceedsUsd: 0, remainingValueUsd: 20, estimatedSellGasUsd: 0.01, bufferPercent: 3 })).toBeCloseTo(51.809, 3);
+  });
+
+  it("counts what earlier sells already returned", () => {
+    expect(costRecoverySellPercent({ costBasisUsd: 10, realizedProceedsUsd: 4, remainingValueUsd: 20, estimatedSellGasUsd: 0, bufferPercent: 0 })).toBeCloseTo(30);
+  });
+
+  it("sells nothing once cost is back, and everything if the rest is worthless", () => {
+    expect(costRecoverySellPercent({ costBasisUsd: 10, realizedProceedsUsd: 10, remainingValueUsd: 20, estimatedSellGasUsd: 0, bufferPercent: 3 })).toBe(0);
+    expect(costRecoverySellPercent({ costBasisUsd: 10, realizedProceedsUsd: 0, remainingValueUsd: 0, estimatedSellGasUsd: 0, bufferPercent: 3 })).toBe(100);
+    expect(costRecoverySellPercent({ costBasisUsd: 10, realizedProceedsUsd: 0, remainingValueUsd: 5, estimatedSellGasUsd: 0, bufferPercent: 3 })).toBe(100);
+  });
+});
+
+describe("evaluateExits with costRecovery (v1.9)", () => {
+  const v19: ExitRules = {
+    ...exitRules,
+    maxLossPercent: 15,
+    catastrophicLossPercent: 25,
+    maxHoldMinutes: 1440,
+    costRecovery: { triggerMultiple: 2, sellCostBufferPercent: 3, moonbagTrailingPercent: 45 },
+  };
+  // positionSizeUsd 10 for 100 tokens at $0.10.
+  const base = {
+    plan: null,
+    exitRules: v19,
+    currentMcap: 200_000,
+    liquidityUsd: 25_000,
+    buySellRatio5m: 0.55,
+    totalTxns5m: 8,
+    sellQuoteAvailable: true,
+    remainingTokens: 100,
+    totalBoughtTokens: 100,
+    costBasisUsd: 10.05,
+    realizedProceedsUsd: 0,
+    estimatedSellGasUsd: 0.01,
+  };
+
+  it("sells just enough at 2x to get the position's cost back", () => {
+    const result = evaluateExits({ ...base, trade: trade({ mfePercent: 100 }), currentMultiple: 2, unrealizedPnlPercent: 100 });
+    expect(result).toMatchObject({ type: "PARTIAL_PROFIT", isEmergency: false });
+    expect(result!.sellPercentOfRemaining).toBeCloseTo(51.809, 3);
+  });
+
+  it("sells less when price gaps well past 2x", () => {
+    const result = evaluateExits({ ...base, trade: trade({ mfePercent: 200 }), currentMultiple: 3, unrealizedPnlPercent: 200 });
+    expect(result!.sellPercentOfRemaining).toBeCloseTo(34.539, 3);
+  });
+
+  it("does nothing before 2x while the base trail isn't hit", () => {
+    expect(evaluateExits({ ...base, trade: trade({ mfePercent: 90 }), currentMultiple: 1.9, unrealizedPnlPercent: 90 })).toBeNull();
+  });
+
+  it("keeps the base trail before cost is back", () => {
+    // Peaked at 1.9x, now 1.5x: a 21% retrace against the base 20% trail.
+    expect(evaluateExits({ ...base, trade: trade({ mfePercent: 90 }), currentMultiple: 1.5, unrealizedPnlPercent: 50 })).toMatchObject({ type: "TRAILING_EXIT" });
+  });
+
+  describe("once cost is back", () => {
+    const recovered = { ...base, remainingTokens: 48, realizedProceedsUsd: 10.2 };
+
+    it("never takes a second cost-recovery sell", () => {
+      expect(evaluateExits({ ...recovered, trade: trade({ mfePercent: 200 }), currentMultiple: 3, unrealizedPnlPercent: 200 })).toBeNull();
+    });
+
+    it("lets the runner ride a retrace the base 20% trail would have sold", () => {
+      // Peaked at 3x, now 2.3x: 23% off the peak.
+      expect(evaluateExits({ ...recovered, trade: trade({ mfePercent: 200 }), currentMultiple: 2.3, unrealizedPnlPercent: 130 })).toBeNull();
+    });
+
+    it("sells the runner on a 45% retrace from its peak", () => {
+      // SWARM ran to 5.8x after we sold it at 1.19x.
+      expect(evaluateExits({ ...recovered, trade: trade({ mfePercent: 480 }), currentMultiple: 3.2, unrealizedPnlPercent: 220 })).toBeNull();
+      const result = evaluateExits({ ...recovered, trade: trade({ mfePercent: 480 }), currentMultiple: 3.1, unrealizedPnlPercent: 210 });
+      expect(result).toMatchObject({ type: "TRAILING_EXIT", sellPercentOfRemaining: 100 });
+      expect(result!.reason).toContain("runner retraced");
+    });
+
+    it("still lets the loss stops end it", () => {
+      const result = evaluateExits({ ...recovered, trade: trade({ mfePercent: 200 }), currentMultiple: 0.6, unrealizedPnlPercent: -40 });
+      expect(result).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+    });
+
+    it("treats any earlier partial sell as the recovery when proceeds aren't passed", () => {
+      const { realizedProceedsUsd: _omit, ...noProceeds } = recovered;
+      expect(evaluateExits({ ...noProceeds, trade: trade({ mfePercent: 200 }), currentMultiple: 3, unrealizedPnlPercent: 200 })).toBeNull();
+    });
+  });
+
+  it("leaves a manual buy-and-hold alone at 2x", () => {
+    expect(evaluateExits({ ...base, trade: trade({ mfePercent: 100 }), currentMultiple: 2, unrealizedPnlPercent: 100, manualHold: true })).toBeNull();
+  });
+});
+
+describe("applyFastFlipProfile", () => {
+  const withFastFlip = (fastFlip: ExitRules["fastFlip"]): ExitRules => ({ ...exitRules, maxHoldMinutes: 1440, fastFlip });
+  const tier = { qualityScoreThreshold: 65, largeMcapUsd: 2_000_000, veryGoodQualityScoreThreshold: 80, maxHoldMinutes: 60 };
+
+  it("applies v1.8's early trail", () => {
+    const rules = applyFastFlipProfile(withFastFlip({ ...tier, profitSteps: [], trailingActivationMultiple: 1.2, trailingPercent: 12 }));
+    expect(rules).toMatchObject({ trailingActivationMultiple: 1.2, trailingPercent: 12, maxHoldMinutes: 60 });
+  });
+
+  it("keeps the base trail when the tier sets none (v1.9)", () => {
+    const rules = applyFastFlipProfile(withFastFlip(tier));
+    expect(rules).toMatchObject({ trailingActivationMultiple: 1.6, trailingPercent: 20, maxHoldMinutes: 60 });
+    expect(rules.profitSteps).toEqual(exitRules.profitSteps);
   });
 });

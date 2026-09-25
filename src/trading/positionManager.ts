@@ -4,7 +4,7 @@ import { TradeStatus, LedgerEntryType } from "../generated/prisma";
 import type { Trade } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis";
-import { validatePosition, validateExit } from "./riskEngine";
+import { validatePosition, validateExit, estimatedSwapGasUsd } from "./riskEngine";
 import { executeSellFill, getLiveWalletTokenBalance, getSellEstimate, isSellable, gasLedgerNote, closeTokenAccountAfterFullExit, type FillResult } from "./executionFacade";
 import { recordLedgerEntry, recordPortfolioSnapshot } from "./portfolio";
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
@@ -50,7 +50,9 @@ function blockedExitAgeMinutes(tradeId: string): number {
 interface ExitDecision {
   // PROFIT_TARGET (the old fixed-multiple step ladder) was removed 2026-09-22
   // — user directive: no more strict multiples, profit-taking is decided
-  // exclusively by the AI strategy review (PARTIAL_PROFIT/AI_STRATEGY_EXIT).
+  // by the AI strategy review (PARTIAL_PROFIT/AI_STRATEGY_EXIT). A strategy
+  // version with exitRules.costRecovery (v1.9+) also emits PARTIAL_PROFIT
+  // from evaluateExits, once, for its cost-recovery sell.
   type: "RISK_EXIT" | "INVALIDATION_EXIT" | "PARTIAL_PROFIT" | "TRAILING_EXIT" | "TIME_EXIT" | "AI_STRATEGY_EXIT";
   sellPercentOfRemaining: number; // 100 = full exit
   reason: string;
@@ -180,13 +182,18 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // ladder before it was removed 2026-09-22, so a trade straddling that
   // change still reports an accurate count to the AI.
   const partialSellsCount = await db.exitSignal.count({ where: { tradeId: trade.id, type: { in: ["PARTIAL_PROFIT", "PROFIT_TARGET"] } } });
+  // v1.9+ only: whether the cost-recovery sell has already given back
+  // everything this position cost (see ExitRules.costRecovery).
+  const costRecovered = exitRules.costRecovery !== undefined && tokenAmounts.realizedProceedsUsd >= tokenAmounts.costBasisUsd;
 
   // Short-interval (not every tick, but close to it — see config's
-  // positionStrategyReviewIntervalSeconds) AI strategy review. This is now
-  // the ONLY mechanism that ever takes profit on a live position — the
-  // deterministic exits below are safety-only (stop-loss/catastrophic/
-  // invalidation/trailing/time), so a HOLD or a review failure just means no
-  // profit gets banked this tick, not that some fallback ladder takes over.
+  // positionStrategyReviewIntervalSeconds) AI strategy review. Under a
+  // strategy without exitRules.costRecovery (up to v1.8) this is the ONLY
+  // mechanism that ever takes profit on a live position — the deterministic
+  // exits below are safety-only (stop-loss/catastrophic/invalidation/
+  // trailing/time), so a HOLD or a review failure just means no profit gets
+  // banked this tick, not that some fallback ladder takes over. With
+  // costRecovery (v1.9+), evaluateExits also makes the one cost-recovery sell.
   if (shouldRunStrategyReview(trade)) {
     let aiDecision: PositionStrategyDecision | null = null;
     try {
@@ -201,6 +208,8 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
         unrealizedPnlPercent,
         partialSellsCount,
         tier,
+        exitRules,
+        costRecovered,
       });
     } catch (err) {
       logger.error({ tradeId: trade.id, err: String(err) }, "strategy review threw unexpectedly — deterministic exits still run this tick");
@@ -209,6 +218,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
       const acted = await applyAiStrategyDecision(trade, token.address, token.chain, pair, remainingTokens, tokenAmounts.totalBoughtTokens, aiDecision, tier, {
         manualHold,
         currentMultiple,
+        runnerProtected: costRecovered && currentMultiple >= 1,
       });
       if (acted) return; // a sell already executed this tick — let the next tick re-evaluate fresh
     }
@@ -229,6 +239,9 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
     manualHold,
     stopPnlPercent,
+    costBasisUsd: tokenAmounts.costBasisUsd,
+    realizedProceedsUsd: tokenAmounts.realizedProceedsUsd,
+    estimatedSellGasUsd: estimatedSwapGasUsd(token.chain),
   });
 
   if (!decision) return;
@@ -295,13 +308,22 @@ async function applyAiStrategyDecision(
   totalBoughtTokens: number,
   decision: PositionStrategyDecision,
   tier: ProjectTier,
-  hold: { manualHold: boolean; currentMultiple: number }
+  hold: { manualHold: boolean; currentMultiple: number; runnerProtected: boolean }
 ): Promise<boolean> {
   if (decision.action === "SET_REENTRY_TARGET") {
     await applyReentryTarget(trade, decision, tier);
     return false;
   }
   if (decision.action === "HOLD") return false;
+  // v1.9+ (ExitRules.costRecovery): once cost is back, what's left is only
+  // ever sold by its trailing stop or a loss stop, never while it's in profit.
+  if (hold.runnerProtected) {
+    logger.info(
+      { tradeId: trade.id, action: decision.action, currentMultiple: hold.currentMultiple },
+      "AI strategy proposed selling the runner left after cost recovery while it's in profit — its trailing stop decides instead"
+    );
+    return false;
+  }
   // A manual buy-and-hold is held through drawdowns (resolveExitRules): the
   // AI review may bank profit on it, never sell it underwater.
   if (hold.manualHold && hold.currentMultiple < 1) {
@@ -420,7 +442,28 @@ async function resolveExitRules(trade: Trade, baseExitRules: ExitRules): Promise
   // ~$41K during a normal launch wick, then ran to $150K. Only the exits
   // that mean the token itself is broken still fire (evaluateExits).
   const manualHold = candidate?.qualificationPath === "MANUAL_BUY_AND_HOLD";
-  return { ...(await resolveTier(trade, baseExitRules, candidate)), manualHold };
+  const resolved = await resolveTier(trade, baseExitRules, candidate);
+  // Manual holds keep their own exit behavior; the v1.9 cost-recovery shape
+  // is for the bot's own entries.
+  if (manualHold && resolved.exitRules.costRecovery) {
+    const { costRecovery: _unused, ...withoutCostRecovery } = resolved.exitRules;
+    return { ...resolved, exitRules: withoutCostRecovery, manualHold };
+  }
+  return { ...resolved, manualHold };
+}
+
+/** The FAST_FLIP tier's exit profile: whichever of fastFlip's overrides the
+ * strategy sets (v1.9 sets only maxHoldMinutes), over the base profile. */
+export function applyFastFlipProfile(baseExitRules: ExitRules): ExitRules {
+  const { fastFlip } = baseExitRules;
+  if (!fastFlip) return baseExitRules;
+  return {
+    ...baseExitRules,
+    profitSteps: fastFlip.profitSteps ?? baseExitRules.profitSteps,
+    trailingActivationMultiple: fastFlip.trailingActivationMultiple ?? baseExitRules.trailingActivationMultiple,
+    trailingPercent: fastFlip.trailingPercent ?? baseExitRules.trailingPercent,
+    maxHoldMinutes: fastFlip.maxHoldMinutes,
+  };
 }
 
 async function resolveTier(
@@ -439,16 +482,7 @@ async function resolveTier(
       (qualityScore === undefined || qualityScore < fastFlip.veryGoodQualityScoreThreshold);
 
     if (isLowQuality || isLargeEntryNotYetProven) {
-      return {
-        tier: "FAST_FLIP",
-        exitRules: {
-          ...baseExitRules,
-          profitSteps: fastFlip.profitSteps,
-          trailingActivationMultiple: fastFlip.trailingActivationMultiple,
-          trailingPercent: fastFlip.trailingPercent,
-          maxHoldMinutes: fastFlip.maxHoldMinutes,
-        },
-      };
+      return { tier: "FAST_FLIP", exitRules: applyFastFlipProfile(baseExitRules) };
     }
   }
 
@@ -471,13 +505,44 @@ async function resolveTier(
  * scalar entryTokenAmount alone — that field only ever reflects the original
  * fill, so it silently under-counts a position once a re-entry buy adds to it.
  */
-async function getPositionTokenAmounts(trade: Trade): Promise<{ totalBoughtTokens: number; remainingTokens: number }> {
+async function getPositionTokenAmounts(
+  trade: Trade
+): Promise<{ totalBoughtTokens: number; remainingTokens: number; costBasisUsd: number; realizedProceedsUsd: number }> {
   const [buys, sells] = await Promise.all([
-    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "BUY" }, _sum: { tokenAmount: true } }),
-    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "SELL" }, _sum: { tokenAmount: true } }),
+    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "BUY" }, _sum: { tokenAmount: true, usdValue: true, gasCostUsd: true } }),
+    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "SELL" }, _sum: { tokenAmount: true, usdValue: true, gasCostUsd: true } }),
   ]);
   const totalBought = buys._sum.tokenAmount ?? trade.entryTokenAmount ?? 0;
-  return { totalBoughtTokens: totalBought, remainingTokens: totalBought - (sells._sum.tokenAmount ?? 0) };
+  return {
+    totalBoughtTokens: totalBought,
+    remainingTokens: totalBought - (sells._sum.tokenAmount ?? 0),
+    // Everything spent getting in, and everything sells have returned so
+    // far, both net of gas — what ExitRules.costRecovery measures.
+    costBasisUsd: (buys._sum.usdValue ?? trade.positionSizeUsd) + (buys._sum.gasCostUsd ?? 0),
+    realizedProceedsUsd: (sells._sum.usdValue ?? 0) - (sells._sum.gasCostUsd ?? 0),
+  };
+}
+
+/**
+ * The v1.9 cost-recovery sell (ExitRules.costRecovery): the percent of the
+ * remaining position that returns everything the position still owes —
+ * what it cost less what sells have already returned — plus this sell's own
+ * gas, with bufferPercent on top for the fill coming in under the mark.
+ * The mark is a sell quote for the whole remaining size, so a smaller sale
+ * usually fills a little better. At 2x with nothing sold yet this is ~53%.
+ */
+export function costRecoverySellPercent(input: {
+  costBasisUsd: number;
+  realizedProceedsUsd: number;
+  remainingValueUsd: number;
+  estimatedSellGasUsd: number;
+  bufferPercent: number;
+}): number {
+  const outstandingUsd = input.costBasisUsd - input.realizedProceedsUsd;
+  if (outstandingUsd <= 0) return 0;
+  if (!(input.remainingValueUsd > 0)) return 100;
+  const neededUsd = (outstandingUsd + input.estimatedSellGasUsd) * (1 + input.bufferPercent / 100);
+  return Math.min(100, (neededUsd / input.remainingValueUsd) * 100);
 }
 
 export function evaluateExits(ctx: {
@@ -501,6 +566,15 @@ export function evaluateExits(ctx: {
   // (stopBaselinePriceUsd), which leaves out our own round-trip cost.
   // Falls back to unrealizedPnlPercent.
   stopPnlPercent?: number;
+  // Read only under exitRules.costRecovery: what the position has cost
+  // (buys plus their gas) and what sells have returned (net of their gas),
+  // and the estimated gas of one more sell. Without them the cost is
+  // trade.positionSizeUsd, and cost counts as recovered once any of the
+  // position has been sold — right for a replay whose only partial sell is
+  // the cost-recovery one.
+  costBasisUsd?: number;
+  realizedProceedsUsd?: number;
+  estimatedSellGasUsd?: number;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
 
@@ -568,6 +642,39 @@ export function evaluateExits(ctx: {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
   }
 
+  // v1.9+ (exitRules.costRecovery): the one deterministic profit-take. At
+  // triggerMultiple, sell just enough to get back what the position cost;
+  // from then on the rest is a runner under its own wide trail below.
+  const costRecovery = ctx.manualHold ? undefined : exitRules.costRecovery;
+  const costBasisUsd = ctx.costBasisUsd ?? trade.positionSizeUsd;
+  const costRecovered =
+    costRecovery !== undefined &&
+    (ctx.realizedProceedsUsd !== undefined
+      ? ctx.realizedProceedsUsd >= costBasisUsd
+      : ctx.remainingTokens < ctx.totalBoughtTokens * (1 - 1e-9));
+  if (costRecovery && !costRecovered && ctx.currentMultiple >= costRecovery.triggerMultiple) {
+    const entryPriceUsd = trade.entryPriceUsd ?? (ctx.totalBoughtTokens > 0 ? trade.positionSizeUsd / ctx.totalBoughtTokens : 0);
+    const realizedProceedsUsd = ctx.realizedProceedsUsd ?? 0;
+    const sellPercent = costRecoverySellPercent({
+      costBasisUsd,
+      realizedProceedsUsd,
+      remainingValueUsd: ctx.remainingTokens * entryPriceUsd * ctx.currentMultiple,
+      estimatedSellGasUsd: ctx.estimatedSellGasUsd ?? 0,
+      bufferPercent: costRecovery.sellCostBufferPercent,
+    });
+    return applyVerifiedRunnerGuard({
+      trade,
+      remainingTokens: ctx.remainingTokens,
+      totalBoughtTokens: ctx.totalBoughtTokens,
+      decision: {
+        type: "PARTIAL_PROFIT",
+        sellPercentOfRemaining: sellPercent,
+        reason: `reached ${ctx.currentMultiple.toFixed(2)}x: selling ${sellPercent.toFixed(0)}% to get back the $${(costBasisUsd - realizedProceedsUsd).toFixed(2)} this position cost; the rest rides with a ${costRecovery.moonbagTrailingPercent}% trail from its peak`,
+        isEmergency: false,
+      },
+    });
+  }
+
   // Priority 3: trailing exit — loss/gain protection only, never a profit
   // target. User directive 2026-09-22 removed the old staged fixed-multiple
   // profit-taking ladder that used to sit here (PROFIT_TARGET) — deciding
@@ -585,10 +692,17 @@ export function evaluateExits(ctx: {
   // rode the same collapse down to a -36% catastrophic stop instead of
   // banking anything from its 2.93x peak. trade.mfePercent already records
   // the true best-ever multiple regardless of what currentMultiple reads now.
+  //
+  // Once a cost-recovery sell has given back the position's cost, what's
+  // left trails from the peak at costRecovery.moonbagTrailingPercent instead,
+  // armed from that moment on.
   const peakMultiple = 1 + (trade.mfePercent ?? 0) / 100;
-  if (peakMultiple >= exitRules.trailingActivationMultiple) {
+  const runnerTrail = costRecovered ? costRecovery : undefined;
+  const trailingActivationMultiple = runnerTrail ? 0 : exitRules.trailingActivationMultiple;
+  const trailingPercent = runnerTrail ? runnerTrail.moonbagTrailingPercent : exitRules.trailingPercent;
+  if (peakMultiple >= trailingActivationMultiple) {
     const retracePercent = ((peakMultiple - ctx.currentMultiple) / peakMultiple) * 100;
-    if (retracePercent >= exitRules.trailingPercent) {
+    if (retracePercent >= trailingPercent) {
       return applyVerifiedRunnerGuard({
         trade,
         remainingTokens: ctx.remainingTokens,
@@ -596,7 +710,7 @@ export function evaluateExits(ctx: {
         decision: {
           type: "TRAILING_EXIT",
           sellPercentOfRemaining: 100,
-          reason: `retraced ${retracePercent.toFixed(1)}% from peak ${peakMultiple.toFixed(2)}x (trail ${exitRules.trailingPercent}%)`,
+          reason: `${runnerTrail ? "runner " : ""}retraced ${retracePercent.toFixed(1)}% from peak ${peakMultiple.toFixed(2)}x (trail ${trailingPercent}%)`,
           isEmergency: false,
           peakMultiple,
           retracePercent,

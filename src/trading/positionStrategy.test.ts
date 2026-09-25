@@ -16,7 +16,8 @@ vi.mock("./portfolio", () => ({
 }));
 vi.mock("./chartVisionGate", () => ({ renderPositionChart: vi.fn() }));
 
-import { checkAndExecutePendingReentry } from "./positionStrategy";
+import { checkAndExecutePendingReentry, formatExitRulesState } from "./positionStrategy";
+import type { ExitRules } from "./strategy";
 import { tradingConfig } from "./config";
 import type { Trade, Token } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
@@ -63,5 +64,35 @@ describe("checkAndExecutePendingReentry gas floor", () => {
     await expect(checkAndExecutePendingReentry(trade(1), token, pair, "BASE")).rejects.toThrow("stop here");
     expect(getBuyEstimate).toHaveBeenCalledTimes(1);
     expect(tradeUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe("formatExitRulesState", () => {
+  const v18: ExitRules = {
+    profitSteps: [],
+    trailRemaining: true,
+    trailingActivationMultiple: 1.6,
+    trailingPercent: 20,
+    maxLossPercent: 15,
+    catastrophicLossPercent: 25,
+    maxHoldMinutes: 1440,
+  };
+  const v19: ExitRules = { ...v18, costRecovery: { triggerMultiple: 2, sellCostBufferPercent: 3, moonbagTrailingPercent: 45 } };
+
+  it("leaves profit-taking to the AI when the strategy has no cost recovery", () => {
+    expect(formatExitRulesState(v18, 1.5)).toContain("No fixed profit-taking multiples exist");
+  });
+
+  it("tells the AI about the automatic sell at 2x before it happens", () => {
+    const text = formatExitRulesState(v19, 1.5, false);
+    expect(text).toContain("When this position first reaches 2x");
+    expect(text).toContain("Trailing stop (loss protection only");
+  });
+
+  it("tells the AI its sells are ignored on the runner, and drops the base trail", () => {
+    const text = formatExitRulesState(v19, 2.5, true);
+    expect(text).toContain("45% retrace from its peak");
+    expect(text).toContain("any sell you propose now is ignored");
+    expect(text).not.toContain("Trailing stop (loss protection only");
   });
 });
