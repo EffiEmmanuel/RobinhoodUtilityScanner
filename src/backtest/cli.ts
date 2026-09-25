@@ -4,7 +4,7 @@ import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
-import { type PairSummary, pairRows, summarizeByPeak } from "./compare";
+import { decideGrid, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
 import { atActualEntry, atDecision, type EntryStrategy } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
@@ -498,11 +498,16 @@ async function compareCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): 
     const tB = await runStrategy(actual, getSeries, { ...real, name: b.name, exitRules: () => b.rules });
     for (const chain of [...new Set(universe.map((c) => c.chain))].sort()) {
       const pairs = pairRows(uA.filter((r) => r.chain === chain), uB.filter((r) => r.chain === chain));
-      out.push(`### ${chain} universe, entry at decision, ${mode} intrabar`, "", pairTable(summarizeByPeak(pairs), a.name, b.name), "");
+      out.push(`### ${chain} universe, entry at decision, ${mode} intrabar`, "", pairTable([...summarizeByPeak(pairs), ...summarizeByVenue(pairs)], a.name, b.name), "");
       saved[`${chain}-universe-${mode}`] = pairs;
     }
     const tPairs = pairRows(tA, tB);
-    out.push(`### Our ${actual.length} autonomous live trades (real entry, fill and size), ${mode} intrabar`, "", pairTable(summarizeByPeak(tPairs), a.name, b.name), "");
+    out.push(
+      `### Our ${actual.length} autonomous live trades (real entry, fill and size), ${mode} intrabar`,
+      "",
+      pairTable([...summarizeByPeak(tPairs), ...summarizeByVenue(tPairs)], a.name, b.name),
+      ""
+    );
     saved[`actual-${mode}`] = tPairs;
     const biggest = [...tPairs].sort((x, y) => Math.abs(y.bUsd - y.aUsd) - Math.abs(x.bUsd - x.aUsd)).slice(0, 8);
     out.push(
@@ -575,6 +580,105 @@ async function sizingCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): P
   console.log(out.join("\n"));
 }
 
+const GRID_RULE = [
+  "Pre-registered decision rule (fixed before the full-universe run):",
+  "- Primary: mean net return per trade, paired against V0, full Solana universe, worst-case wicks, median costs.",
+  "- Secondary: the same with close-only wicks.",
+  "- A variant qualifies if it is no worse than V0 in the primary (paired mean >= 0) and doesn't lose in the secondary (>= 0).",
+  "- Among qualifiers the simplest wins. Order, fixed in advance by changes from v1.8: V1 (1), V4 (2), V2 (3), V3 (3).",
+  "  Another qualifier replaces it only if it beats it head to head in BOTH modes with a 90% CI clear of 0.",
+  "- Nothing qualifies: keep v1.8.",
+  "None of these replays include the AI review, live's only profit-taker since 2026-09-22; they compare the deterministic exits only.",
+  "V1 and V4 add no fixed profit-taking multiple (compatible with the 09-22 'AI decides profit-taking' directive); V2 and V3 reverse it.",
+];
+
+function gridRow(name: string, parts: PairSummary[]): (string | number)[] {
+  const [all, ...buckets] = parts;
+  const cell = (x: PairSummary) => (x.n ? `${pct(x.diffMeanPct)} [${pct(x.diffCI90[0])}, ${pct(x.diffCI90[1])}] ${x.bBetter}/${x.bWorse} n=${x.n}` : "n=0");
+  return [name, `${pct(all.aMeanPct)} -> ${pct(all.bMeanPct)}`, cell(all), ...buckets.map(cell), `${usd(all.aTotalUsd)} -> ${usd(all.bTotalUsd)}`];
+}
+
+/** B2 grid: V0 plus pre-registered variants, paired, with the pre-registered verdict. */
+async function gridCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const base = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
+  const specs = (typeof flags.variants === "string" ? flags.variants : "").split(",").filter(Boolean);
+  if (!specs.length) throw new Error("grid needs --variants V1=file.json,V2=file.json,... (simplest first)");
+  const variants = await Promise.all(
+    specs.map(async (spec) => {
+      const [name, file] = spec.split("=");
+      return { name, rules: (await exitConfig(snapshot, file)).rules };
+    })
+  );
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const equity = Number(flags.equity ?? 25);
+  const refSize = Number(flags["ref-size"] ?? (equity * Number(flags["size-pct"] ?? 5)) / 100);
+  const holdWindowS = Number(flags["hold-hours"] ?? 48) * 3_600;
+  const getSeries = seriesLoader(geckoClient(true));
+  const universe = snapshot.candidates.filter(universeFilter(flags));
+  const actual = perTrade(snapshot, (c) => c.trades.length > 0 && c.qualificationPath !== "MANUAL_BUY_AND_HOLD").filter((c) => c.trades[0].mode === "LIVE");
+  const modes = ["worst", "close"] as const;
+  const runs = new Map<string, RunRow[]>(); // `${variant}|${subset}|${mode}`
+  for (const mode of modes) {
+    const common = { costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode };
+    const real = { ...common, entry: atActualEntry(), useActualEntryFill: true, sizeFor: (c: UniverseCandidate) => c.trades[0].positionSizeUsd };
+    for (const v of [{ name: "V0", rules: base.rules }, ...variants]) {
+      runs.set(`${v.name}|universe|${mode}`, await runStrategy(universe, getSeries, { ...common, name: v.name, entry: entryFrom(flags.entry), exitRules: () => v.rules }));
+      runs.set(`${v.name}|actual|${mode}`, await runStrategy(actual, getSeries, { ...real, name: v.name, exitRules: () => v.rules }));
+    }
+  }
+  const pairsOf = (a: string, b: string, subset: string, mode: string) => pairRows(runs.get(`${a}|${subset}|${mode}`)!, runs.get(`${b}|${subset}|${mode}`)!);
+  const byPeak = (name: string, subset: string, mode: string) => summarizeByPeak(pairsOf("V0", name, subset, mode));
+
+  const chains = [...new Set(universe.map((c) => c.chain))].join(", ");
+  const n0 = runs.get("V0|universe|worst")!;
+  const out: string[] = [`## B2 exit grid vs V0 (${base.name}), ${chains} universe`, "", ...GRID_RULE, ""];
+  out.push(
+    `Universe: ${universe.length} candidates, ${n0.filter((r) => r.valued).length} replayed (${n0.length - n0.filter((r) => r.valued).length} without candles), entry at decision, ${usd(refSize)} positions. Cells: paired mean difference vs V0 in % points per trade [90% CI] better/worse n.`,
+    ""
+  );
+  const headers = ["variant", "V0 -> variant mean", "all", "peak <2x", "peak 2-4x", "peak >=4x", "total"];
+  for (const [subset, label] of [
+    ["universe", "universe"],
+    ["actual", `our ${actual.length} autonomous live trades (real entry, fill, size; context only)`],
+  ] as const) {
+    for (const mode of modes) {
+      out.push(`### ${label}, ${mode === "worst" ? "worst-case wicks" : "close-only"}${subset === "universe" ? (mode === "worst" ? " (PRIMARY)" : " (SECONDARY)") : ""}`, "");
+      out.push(table(headers, variants.map((v) => gridRow(v.name, byPeak(v.name, subset, mode)))), "");
+    }
+  }
+  out.push("### Launch venue split (universe)", "");
+  out.push(
+    table(
+      ["variant", "wicks", "pump.fun launches", "other launches"],
+      variants.flatMap((v) =>
+        modes.map((mode) => {
+          const [pump, other] = summarizePumpVsOther(pairsOf("V0", v.name, "universe", mode));
+          const cell = (x: PairSummary) => (x.n ? `V0 ${pct(x.aMeanPct)}, delta ${pct(x.diffMeanPct)} [${pct(x.diffCI90[0])}, ${pct(x.diffCI90[1])}] n=${x.n}` : "n=0");
+          return [v.name, mode, cell(pump), cell(other)];
+        })
+      )
+    ),
+    ""
+  );
+
+  const summaryAll = (a: string, b: string, mode: string) => summarizePairs("all", pairsOf(a, b, "universe", mode));
+  const decision = decideGrid(
+    variants.map((v) => ({ name: v.name, primary: summaryAll("V0", v.name, "worst"), secondary: summaryAll("V0", v.name, "close") })),
+    (challenger, incumbent) => ({ primary: summaryAll(incumbent, challenger, "worst"), secondary: summaryAll(incumbent, challenger, "close") })
+  );
+  out.push("### Verdict under the pre-registered rule", "", ...decision.reasons.map((r) => `- ${r}`), "", `Winner: ${decision.winner}`, "");
+  const file = await writeOut(typeof flags.out === "string" ? flags.out : "b2-grid", {
+    base: base.name,
+    variants,
+    decision,
+    pairs: Object.fromEntries(
+      variants.flatMap((v) => (["universe", "actual"] as const).flatMap((subset) => modes.map((mode) => [`${v.name}|${subset}|${mode}`, pairsOf("V0", v.name, subset, mode)])))
+    ),
+  });
+  out.push(`Per-trade pairs: ${file}`);
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -599,6 +703,10 @@ export async function main(argv: string[]): Promise<void> {
       await compareCmd(await getSnapshot(false), flags);
       return;
     }
+    case "grid": {
+      await gridCmd(await getSnapshot(false), flags);
+      return;
+    }
     case "sizing": {
       await sizingCmd(await getSnapshot(false), flags);
       return;
@@ -620,6 +728,9 @@ export async function main(argv: string[]): Promise<void> {
   compare --vs <version | file.json> [--exit v1.8] [run's universe flags]
                                paired per-trade comparison of two exit configs, both intrabar modes, split
                                by path peak (<2x, 2-4x, >=4x), on the universe and on our live trades
+  grid --variants V1=a.json,V2=b.json,... [--exit v1.8] [run's universe flags]
+                               B2's pre-registered exit grid: paired deltas vs V0 by peak and launch venue,
+                               both intrabar modes, and the verdict under the pre-registered rule
   sizing [--exits v1.8,file.json] [--chain solana] [--start 21] [--paths 5000]
                                compounding sweep: user brackets, brackets from 20%, flat 10%, flat 5%`);
   }

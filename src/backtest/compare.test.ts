@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pairRows, peakBucket, summarizeByPeak, summarizePairs } from "./compare";
+import { decideGrid, launchVenue, type PairSummary, pairRows, peakBucket, summarizeByPeak, summarizeByVenue, summarizePairs } from "./compare";
 import type { RunRow } from "./run";
 import type { SimResult } from "./simulate";
 import { bracketRule, flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -8,7 +8,7 @@ import type { UniverseCandidate } from "./universe";
 const T0 = 1_790_000_000;
 
 function row(id: string, netPct: number, pathPeak?: number, skip?: string): RunRow {
-  const candidate = { candidateId: id, symbol: id, chain: "solana", trades: [] } as unknown as UniverseCandidate;
+  const candidate = { candidateId: id, symbol: id, chain: "solana", tokenAddress: id === "z" ? "Zpump" : id, pair: { pairAddress: "p", dexId: "raydium" }, trades: [] } as unknown as UniverseCandidate;
   if (skip) return { candidate, chain: "solana", skip };
   return {
     candidate,
@@ -45,6 +45,53 @@ describe("paired comparison", () => {
       ["peak 2-4x", 1],
       ["peak >=4x", 1],
     ]);
+  });
+});
+
+describe("launch venue", () => {
+  it("counts graduated pump.fun mints as pump.fun wherever they trade now", () => {
+    const c = (tokenAddress: string, dexId?: string, chain = "solana") => ({ chain, tokenAddress, pair: dexId ? { pairAddress: "p", dexId } : null });
+    expect(launchVenue(c("AbcPump"))).toBe("unknown");
+    expect(launchVenue(c("Abcpump", "raydium"))).toBe("pump.fun");
+    expect(launchVenue(c("Abc", "pumpswap"))).toBe("pump.fun");
+    expect(launchVenue(c("Abc", "raydium"))).toBe("raydium");
+    expect(launchVenue(c("Abc", "meteoradbc"))).toBe("meteora");
+    expect(launchVenue(c("0xpump", "uniswap", "robinhood"))).toBe("uniswap");
+  });
+  it("summarizes pairs per venue, biggest first", () => {
+    const pairs = pairRows([row("x", 1), row("y", 2), row("z", 3)], [row("x", 2), row("y", 2), row("z", 1)]);
+    expect(summarizeByVenue(pairs).map((s) => [s.group, s.n])).toEqual([
+      ["venue raydium", 2],
+      ["venue pump.fun", 1],
+    ]);
+  });
+});
+
+describe("pre-registered grid decision", () => {
+  const sum = (diffMeanPct: number, ci: [number, number] = [diffMeanPct - 1, diffMeanPct + 1]) => ({ diffMeanPct, diffCI90: ci }) as PairSummary;
+  const noClear = () => ({ primary: sum(1, [-1, 3]), secondary: sum(1, [-1, 3]) });
+
+  it("keeps V0 when nothing is no-worse in the primary and loss-free in the secondary", () => {
+    const d = decideGrid(
+      [
+        { name: "V1", primary: sum(-0.1), secondary: sum(5) },
+        { name: "V2", primary: sum(2), secondary: sum(-0.5) },
+      ],
+      noClear
+    );
+    expect(d.winner).toBe("V0");
+    expect(d.qualifiers).toEqual([]);
+  });
+  it("picks the simplest qualifier unless another beats it in both modes with CIs clear of 0", () => {
+    const entries = [
+      { name: "V1", primary: sum(0.5), secondary: sum(1) },
+      { name: "V4", primary: sum(3), secondary: sum(4) },
+    ];
+    expect(decideGrid(entries, noClear).winner).toBe("V1");
+    const clears = () => ({ primary: sum(2, [0.5, 3.5]), secondary: sum(3, [0.2, 6]) });
+    expect(decideGrid(entries, clears).winner).toBe("V4");
+    const oneMode = () => ({ primary: sum(2, [0.5, 3.5]), secondary: sum(3, [-0.2, 6]) });
+    expect(decideGrid(entries, oneMode).winner).toBe("V1");
   });
 });
 
