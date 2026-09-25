@@ -3,7 +3,9 @@ import path from "node:path";
 import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
-import { type CostModel, DEFAULT_COSTS } from "./costs";
+import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
+import { type PairSummary, pairRows, summarizeByPeak } from "./compare";
+import { flatRule, sizingSweep, userBrackets } from "./sizing";
 import { atActualEntry, atDecision, type EntryStrategy } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
@@ -442,6 +444,137 @@ async function runCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Prom
   console.log(out.join("\n"));
 }
 
+async function exitConfig(snapshot: UniverseSnapshot, spec: string): Promise<{ name: string; rules: ExitRules }> {
+  if (spec.endsWith(".json")) return { name: path.basename(spec, ".json"), rules: JSON.parse(await readFile(spec, "utf8")) as ExitRules };
+  return { name: spec, rules: findExitRules(snapshot, spec) };
+}
+
+function pairTable(summaries: PairSummary[], aName: string, bName: string): string {
+  return table(
+    ["group", "n", `${aName} mean`, `${bName} mean`, `${bName} - ${aName}`, "90% CI", `${bName} better/worse`, "gained", "gave back", `${aName} total`, `${bName} total`],
+    summaries.map((x) => [
+      x.group,
+      x.n,
+      pct(x.aMeanPct),
+      pct(x.bMeanPct),
+      pct(x.diffMeanPct),
+      x.n ? `${pct(x.diffCI90[0])} .. ${pct(x.diffCI90[1])}` : "n/a",
+      `${x.bBetter}/${x.bWorse}`,
+      `${num(x.gainedPct, 0)} pts`,
+      `${num(x.gaveBackPct, 0)} pts`,
+      usd(x.aTotalUsd),
+      usd(x.bTotalUsd),
+    ])
+  );
+}
+
+/**
+ * B2: two exit configs over identical entries, paired per trade, in both
+ * intrabar modes. Universe entries at decision time; the actual-trade subset
+ * at our real entry time, fill and size.
+ */
+async function compareCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const a = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
+  const bSpec = typeof flags.vs === "string" ? flags.vs : undefined;
+  if (!bSpec) throw new Error("compare needs --vs <version | file.json>");
+  const b = await exitConfig(snapshot, bSpec);
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const equity = Number(flags.equity ?? 25);
+  const sizePct = Number(flags["size-pct"] ?? 5);
+  const refSize = Number(flags["ref-size"] ?? (equity * sizePct) / 100);
+  const holdWindowS = Number(flags["hold-hours"] ?? 48) * 3_600;
+  const getSeries = seriesLoader(geckoClient(true));
+  const universe = snapshot.candidates.filter(universeFilter(flags));
+  const actual = perTrade(snapshot, (c) => c.trades.length > 0 && c.qualificationPath !== "MANUAL_BUY_AND_HOLD").filter((c) => c.trades[0].mode === "LIVE");
+  const out: string[] = [`## ${a.name} vs ${b.name}`, ""];
+  out.push(`Per-trade returns are net of slippage, impact and gas, as % of the position. Universe positions are ${usd(refSize)}; actual trades use their real size. "gained"/"gave back" sum the per-trade differences in % points.`, "");
+  const saved: Record<string, unknown> = {};
+  for (const mode of ["worst", "close"] as const) {
+    const base = { costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode };
+    const uA = await runStrategy(universe, getSeries, { ...base, name: a.name, entry: entryFrom(flags.entry), exitRules: () => a.rules });
+    const uB = await runStrategy(universe, getSeries, { ...base, name: b.name, entry: entryFrom(flags.entry), exitRules: () => b.rules });
+    const real = { ...base, entry: atActualEntry(), useActualEntryFill: true, sizeFor: (c: UniverseCandidate) => c.trades[0].positionSizeUsd };
+    const tA = await runStrategy(actual, getSeries, { ...real, name: a.name, exitRules: () => a.rules });
+    const tB = await runStrategy(actual, getSeries, { ...real, name: b.name, exitRules: () => b.rules });
+    for (const chain of [...new Set(universe.map((c) => c.chain))].sort()) {
+      const pairs = pairRows(uA.filter((r) => r.chain === chain), uB.filter((r) => r.chain === chain));
+      out.push(`### ${chain} universe, entry at decision, ${mode} intrabar`, "", pairTable(summarizeByPeak(pairs), a.name, b.name), "");
+      saved[`${chain}-universe-${mode}`] = pairs;
+    }
+    const tPairs = pairRows(tA, tB);
+    out.push(`### Our ${actual.length} autonomous live trades (real entry, fill and size), ${mode} intrabar`, "", pairTable(summarizeByPeak(tPairs), a.name, b.name), "");
+    saved[`actual-${mode}`] = tPairs;
+    const biggest = [...tPairs].sort((x, y) => Math.abs(y.bUsd - y.aUsd) - Math.abs(x.bUsd - x.aUsd)).slice(0, 8);
+    out.push(
+      table(
+        ["symbol", "path peak", `${a.name}`, `${a.name} exit`, `${b.name}`, `${b.name} exit`],
+        biggest.map((p) => [p.symbol ?? "?", p.pathPeak ? `${num(p.pathPeak)}x` : "?", usd(p.aUsd), p.aExit.slice(0, 40), usd(p.bUsd), p.bExit.slice(0, 40)])
+      ),
+      ""
+    );
+  }
+  const file = await writeOut(typeof flags.out === "string" ? flags.out : `compare-${a.name}-vs-${b.name}`, { a, b, costs: model, refSize, pairs: saved });
+  out.push(`Per-trade pairs: ${file}`);
+  console.log(out.join("\n"));
+}
+
+/**
+ * Compounding sizing sweep over the replayed per-trade outcomes of a chain's
+ * universe, for each exit config and intrabar mode.
+ */
+async function sizingCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const specs = (typeof flags.exits === "string" ? flags.exits : "v1.8").split(",");
+  const exits = await Promise.all(specs.map((spec) => exitConfig(snapshot, spec)));
+  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const costs = chainCosts(model, chain);
+  const startUsd = Number(flags.start ?? 21);
+  const paths = Number(flags.paths ?? 5000);
+  const rules = [userBrackets(40), userBrackets(20), flatRule(10), flatRule(5)];
+  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain }));
+  const getSeries = seriesLoader(geckoClient(true));
+  const out: string[] = [
+    `## Compounding sizing sweep, ${chain}, from ${usd(startUsd)}`,
+    "",
+    `${paths} random 100-trade sequences drawn with replacement from the replayed ${chain} universe (entry at decision). Each draw is re-priced at its real size (gas per swap, impact). Trades are taken one at a time, so overlapping positions and losing streaks can make real drawdowns deeper.`,
+    "",
+  ];
+  const rows: (string | number)[][] = [];
+  for (const exit of exits) {
+    for (const mode of ["worst", "close"] as const) {
+      const run = await runStrategy(universe, getSeries, {
+        name: exit.name,
+        entry: entryFrom(flags.entry),
+        exitRules: () => exit.rules,
+        costs: model,
+        refSizeUsd: startUsd * 0.1,
+        holdWindowS: Number(flags["hold-hours"] ?? 48) * 3_600,
+        intrabar: mode,
+      });
+      const trades = run.filter((r) => r.sim).map((r) => ({ sim: r.sim!, costs }));
+      for (const rule of rules) {
+        const res = sizingSweep(trades, rule, { startUsd, trades: 100, checkpoint: 50, paths, reachUsd: 100 });
+        rows.push([
+          exit.name,
+          mode,
+          trades.length,
+          res.rule,
+          usd(res.medianAtCheckpoint),
+          usd(res.medianAtEnd),
+          `${usd(res.p10AtEnd)} .. ${usd(res.p90AtEnd)}`,
+          pct(res.pBelowHalf * 100, 0),
+          pct(res.pRuin * 100, 0),
+          pct(res.pReach * 100, 0),
+        ]);
+      }
+    }
+  }
+  out.push(
+    table(["exits", "intrabar", "trades in pool", "sizing", "median @50", "median @100", "p10 .. p90 @100", "P(<50% start)", "P(<10%, ruin)", "P(reach $100)"], rows)
+  );
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -462,6 +595,14 @@ export async function main(argv: string[]): Promise<void> {
       await runCmd(await getSnapshot(false), flags);
       return;
     }
+    case "compare": {
+      await compareCmd(await getSnapshot(false), flags);
+      return;
+    }
+    case "sizing": {
+      await sizingCmd(await getSnapshot(false), flags);
+      return;
+    }
     default:
       console.log(`usage: tsx scripts/backtest-replay.ts <command> [flags]
 
@@ -475,6 +616,11 @@ export async function main(argv: string[]): Promise<void> {
   run [--entry at-decision[+Nm]|actual] [--exit v1.8 | --exit-json file] [--chain c] [--status S1,S2]
       [--from iso] [--to iso] [--include-manual] [--equity 25] [--size-pct 5] [--ref-size usd]
       [--hold-hours 48] [--max-concurrent n] [--costs median|p75] [--intrabar worst|close] [--legacy-steps] [--out name]
-                               replay the universe from cache only (never fetches, never writes the DB)`);
+                               replay the universe from cache only (never fetches, never writes the DB)
+  compare --vs <version | file.json> [--exit v1.8] [run's universe flags]
+                               paired per-trade comparison of two exit configs, both intrabar modes, split
+                               by path peak (<2x, 2-4x, >=4x), on the universe and on our live trades
+  sizing [--exits v1.8,file.json] [--chain solana] [--start 21] [--paths 5000]
+                               compounding sweep: user brackets, brackets from 20%, flat 10%, flat 5%`);
   }
 }

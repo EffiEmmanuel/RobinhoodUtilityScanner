@@ -1,8 +1,9 @@
 import type { ExitRules } from "../trading/strategy";
+import type { Candle } from "./candles";
 import { type CostModel, chainCosts } from "./costs";
 import { type EntryStrategy, historyView } from "./entries";
 import type { PriceSeries } from "./marketData";
-import { type IntrabarMode, type SimCandidateMeta, type SimResult, type ValuedTrade, simulatePosition, valueAtSize } from "./simulate";
+import { DEFAULT_HOLD_WINDOW_S, type IntrabarMode, type SimCandidateMeta, type SimResult, type ValuedTrade, simulatePosition, valueAtSize } from "./simulate";
 import type { UniverseCandidate } from "./universe";
 
 export interface RunConfig {
@@ -23,6 +24,7 @@ export interface RunRow {
   candidate: UniverseCandidate;
   chain: string;
   sim?: SimResult;
+  pathPeak?: number; // best candle close in the hold window / entry price, whatever the exits did
   valued?: ValuedTrade;
   skip?: string;
   seriesNote?: string;
@@ -47,6 +49,13 @@ export function candidateMeta(c: UniverseCandidate): SimCandidateMeta {
     liquidityUsdAtDecision: useTrade ? (trade.entryLiquidityUsd ?? undefined) : p?.liquidityUsd,
     midAtDecision: useTrade ? trade.entryPriceUsd! : price,
   };
+}
+
+export function pathPeak(candles: Candle[], fromTs: number, toTs: number, entryMid: number): number | undefined {
+  if (!(entryMid > 0)) return undefined;
+  let best = entryMid;
+  for (const c of candles) if (c.t >= fromTs && c.t + c.d <= toTs) best = Math.max(best, c.c);
+  return best / entryMid;
 }
 
 export async function runStrategy(
@@ -87,7 +96,15 @@ export async function runStrategy(
       rows.push({ candidate, chain: candidate.chain, skip: sim.skip, seriesNote: series.note });
       continue;
     }
-    rows.push({ candidate, chain: candidate.chain, sim, valued: valueAtSize(sim, sizeUsd, costs, actualFill), seriesNote: series.note });
+    const windowEnd = Math.min(sim.entryTs + (cfg.holdWindowS ?? DEFAULT_HOLD_WINDOW_S), series.coverageEnd);
+    rows.push({
+      candidate,
+      chain: candidate.chain,
+      sim,
+      pathPeak: pathPeak(series.candles, sim.entryTs, windowEnd, sim.entryMid),
+      valued: valueAtSize(sim, sizeUsd, costs, actualFill),
+      seriesNote: series.note,
+    });
   }
   return rows;
 }

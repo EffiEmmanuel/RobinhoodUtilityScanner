@@ -153,7 +153,7 @@ function ticksOf(c: Candle, mode: IntrabarMode): Tick[] {
   ];
 }
 
-const DEFAULT_HOLD_WINDOW_S = 48 * 3_600;
+export const DEFAULT_HOLD_WINDOW_S = 48 * 3_600;
 const MANUAL_BUY_AND_HOLD = "MANUAL_BUY_AND_HOLD";
 
 export function simulatePosition(input: SimulateInput): SimResult | { skip: string } {
