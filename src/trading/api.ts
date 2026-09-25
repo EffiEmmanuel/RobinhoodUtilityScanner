@@ -16,6 +16,8 @@ import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, co
 import { getActiveStrategyVersion } from "./strategy";
 import { resolveEntryMode } from "./conservativeMode";
 import { getTradeKpis, currentTradeMode, LANE_PAUSE_RESUME_NOTE } from "./kpis";
+import { getPaperStrategyKpis, paperConfig } from "./paper";
+import { logger } from "../logger";
 import { singlePositionLimit, autonomousEntryAllowedOnChain } from "./riskEngine";
 import type { PortfolioState, CircuitBreakerResult, ChainKey } from "./portfolio";
 import { LedgerEntryType, PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
@@ -160,12 +162,23 @@ export function registerTradingRoutes(app: FastifyInstance): void {
   app.get("/trading/kpis", async (req) => {
     const { mode } = req.query as { mode?: string };
     const tradeMode = mode === "all" ? undefined : mode === "LIVE" || mode === "SHADOW" || mode === "PAPER" ? mode : currentTradeMode();
-    const [groups, active, circuitBreakers] = await Promise.all([getTradeKpis({ mode: tradeMode }), getActiveStrategyVersion(), checkCircuitBreakers()]);
+    const [groups, active, circuitBreakers, paper] = await Promise.all([
+      getTradeKpis({ mode: tradeMode }),
+      getActiveStrategyVersion(),
+      checkCircuitBreakers(),
+      // Simulated strategies (src/trading/paper) — never real money. A failure
+      // here must not take the real KPIs down with it.
+      getPaperStrategyKpis().catch((err) => {
+        logger.warn({ err: String(err) }, "paper strategy KPIs unavailable");
+        return null;
+      }),
+    ]);
     return {
       mode: tradeMode ?? "all",
       activeStrategyVersion: { id: active.id, version: active.version },
       expectancyPause: { enabled: tradingConfig.expectancyPauseEnabled, windowTrades: tradingConfig.expectancyPauseWindowTrades, resumeNote: LANE_PAUSE_RESUME_NOTE },
       lanePauses: circuitBreakers.lanePauses,
+      paper: paper ? { enabled: paperConfig.enabled, ...paper } : null,
       groups: groups.sort(
         (a, b) =>
           Number(b.strategyVersionId === active.id) - Number(a.strategyVersionId === active.id) ||

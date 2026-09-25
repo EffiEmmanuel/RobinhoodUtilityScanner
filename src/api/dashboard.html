@@ -1468,6 +1468,30 @@
                   <tbody id="kpi-body"></tbody>
                 </table>
               </div>
+              <div class="card-head" style="margin-top: 14px">
+                <h2>PAPER strategies <span class="badge PAPER">PAPER</span></h2>
+                <span class="count-chip" id="paper-kpi-status">&mdash;</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Strategy</th>
+                      <th>Chain</th>
+                      <th>Closed</th>
+                      <th>Open</th>
+                      <th>Win %</th>
+                      <th>Exp. % (90% CI)</th>
+                      <th>Profit factor</th>
+                      <th>Realized $</th>
+                      <th>Gas $</th>
+                      <th>Equity</th>
+                      <th>Max DD</th>
+                    </tr>
+                  </thead>
+                  <tbody id="paper-kpi-body"></tbody>
+                </table>
+              </div>
             </div>
             <div class="card">
               <div class="card-head">
@@ -1765,6 +1789,8 @@
           closedBody: document.getElementById("closed-body"),
           kpiBody: document.getElementById("kpi-body"),
           kpiVersion: document.getElementById("kpi-version"),
+          paperKpiBody: document.getElementById("paper-kpi-body"),
+          paperKpiStatus: document.getElementById("paper-kpi-status"),
           closedCount: document.getElementById("closed-count"),
           noTradeFeed: document.getElementById("no-trade-feed"),
           noTradeWindow: document.getElementById("no-trade-window"),
@@ -2456,6 +2482,7 @@
         // the last N trades that the expectancy auto-pause watches, shown as
         // a count until there are N.
         function renderKpis(d) {
+          renderPaperKpis(d && d.paper);
           if (!d || !d.groups) {
             els.kpiVersion.textContent = "unavailable";
             els.kpiBody.innerHTML = '<tr class="empty-row"><td colspan="13">KPIs unavailable.</td></tr>';
@@ -2495,6 +2522,45 @@
                 "<td>" + fmtPercentSpan(k.expectancyPercent) + "</td>" +
                 "<td>" + ratio(k.profitFactor) + "</td>" +
                 "<td>" + rolling + "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        }
+
+        // Simulated strategies only (src/trading/paper): paper fills on real
+        // quotes, never real money — labelled PAPER everywhere.
+        function renderPaperKpis(p) {
+          if (!p || !p.strategies) {
+            els.paperKpiStatus.textContent = "unavailable";
+            els.paperKpiBody.innerHTML = '<tr class="empty-row"><td colspan="11">Paper strategy KPIs unavailable.</td></tr>';
+            return;
+          }
+          els.paperKpiStatus.textContent =
+            (p.enabled ? "running" : "off (PAPER_STRATEGIES_ENABLED)") + " · " + p.quotesUsedToday + " quotes today";
+          if (!p.strategies.length) {
+            els.paperKpiBody.innerHTML = '<tr class="empty-row"><td colspan="11">No paper strategies yet.</td></tr>';
+            return;
+          }
+          var num = function (n, digits) {
+            return n === null || n === undefined ? "&mdash;" : n.toFixed(digits);
+          };
+          els.paperKpiBody.innerHTML = p.strategies
+            .map(function (s) {
+              var ci = s.expectancyCI90 ? " (" + s.expectancyCI90[0].toFixed(1) + " to " + s.expectancyCI90[1].toFixed(1) + ")" : "";
+              return (
+                "<tr>" +
+                "<td>" + esc(s.name) + (s.active ? "" : " (inactive)") + "</td>" +
+                "<td>" + esc(s.chain) + "</td>" +
+                "<td>" + s.closed + "</td>" +
+                "<td>" + s.openPositions + "</td>" +
+                "<td>" + (s.winRate === null ? "&mdash;" : (s.winRate * 100).toFixed(0) + "%") + "</td>" +
+                "<td>" + fmtPercentSpan(s.expectancyPct) + ci + "</td>" +
+                "<td>" + num(s.profitFactor, 2) + "</td>" +
+                "<td>" + fmtUsdSpan(s.realizedPnlUsd) + "</td>" +
+                "<td>" + fmtUsd(s.gasUsd) + "</td>" +
+                "<td>" + fmtUsd(s.startEquityUsd) + " &rarr; " + (s.equityUsd === null ? "&mdash;" : fmtUsd(s.equityUsd)) + "</td>" +
+                "<td>" + (s.maxDrawdownPct === null ? "&mdash;" : s.maxDrawdownPct.toFixed(1) + "%") + "</td>" +
                 "</tr>"
               );
             })
