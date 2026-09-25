@@ -15,6 +15,7 @@ import { checkForCircuitBreakerTransition } from "./circuitBreakerAlerts";
 import { getActiveStrategyVersion } from "./strategy";
 import { checkPortfolioMilestones } from "./milestones";
 import { rebuildCohortStats } from "./cohortStats";
+import { paperConfig, paperStrategiesLoop } from "./paper";
 
 const CANDIDATE_GENERATION_INTERVAL_SECONDS = 30;
 const OUTCOME_POLL_INTERVAL_SECONDS = 300; // 5 min — this is 15m/1h/6h/24h/48h bucketed data, no need to hammer it
@@ -278,6 +279,9 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     circuitBreakerAlertLoop(signal),
     milestoneLoop(signal),
     cohortStatsLoop(signal),
+    // Paper strategies (off unless PAPER_STRATEGIES_ENABLED=true): their own
+    // tables, quote-only, lowest rate-limit priority. See src/trading/paper/.
+    ...(paperConfig.enabled ? [paperStrategiesLoop(signal)] : []),
   ];
   Promise.allSettled(loops);
 

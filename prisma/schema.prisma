@@ -1045,3 +1045,87 @@ model MLModelVersion {
 
   trainedAt DateTime @default(now())
 }
+
+// ---------------------------------------------------------------------------
+// Parallel paper strategies (src/trading/paper/). Deliberately NOT Trade or
+// LedgerEntry rows with mode PAPER: live code reads those tables without a
+// mode filter (the position monitor would sell them for real, portfolio and
+// the circuit breakers would count them). These tables are read and written
+// only by src/trading/paper/, and hold plain id columns instead of relations
+// so no existing model changes.
+// ---------------------------------------------------------------------------
+
+model PaperStrategy {
+  id                String    @id @default(cuid())
+  name              String    @unique
+  chain             String    @default("solana")
+  strategyVersionId String // its exitRules run unmodified through evaluateExits
+  entry             Json // { type: "at-decision" }
+  filter            Json? // { venue?: "pump.fun" | "other" }
+  sizing            Json // { type: "brackets", brackets: [{ belowUsd, pct }], topPct } | { type: "flat", pct }
+  startEquityUsd    Float     @default(21)
+  active            Boolean   @default(false)
+  candidateCursor   DateTime? // createdAt of the newest candidate already considered
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+model PaperPosition {
+  id                  String    @id @default(cuid())
+  strategyId          String
+  candidateId         String
+  chain               String
+  tokenAddress        String
+  status              String    @default("OPEN") // OPEN | CLOSED
+  openedAt            DateTime  @default(now())
+  closedAt            DateTime?
+  sizeUsd             Float
+  tokensRaw           String // integer base units, as the quote returned them
+  tokensRemainingRaw  String
+  decimals            Int?
+  entryPriceUsd       Float? // per whole token, from the real buy quote
+  costBasisUsd        Float // size plus modeled buy gas
+  realizedProceedsUsd Float     @default(0) // sells minus modeled gas
+  firstMarkPriceUsd   Float?
+  lastMarkPriceUsd    Float?
+  lastMarkAt          DateTime?
+  quoteFailuresSince  DateTime? // first failed sell quote in the current streak
+  mfePercent          Float?
+  maePercent          Float?
+  meta                Json? // tier inputs and decision-time market data
+  exitReason          String?
+  realizedPnlUsd      Float?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([strategyId, candidateId])
+  @@index([strategyId, status])
+}
+
+model PaperFill {
+  id         String   @id @default(cuid())
+  positionId String
+  strategyId String
+  side       String // BUY | SELL
+  ts         DateTime @default(now())
+  tokensRaw  String
+  usd        Float
+  gasUsd     Float    @default(0)
+  priceUsd   Float?
+  reason     String?
+
+  @@index([positionId])
+  @@index([strategyId, ts])
+}
+
+model PaperEquitySnapshot {
+  id            String   @id @default(cuid())
+  strategyId    String
+  capturedAt    DateTime @default(now())
+  equityUsd     Float
+  cashUsd       Float
+  openValueUsd  Float    @default(0)
+  openPositions Int      @default(0)
+
+  @@index([strategyId, capturedAt])
+}

@@ -1,6 +1,6 @@
 import { config } from "../../../config";
 import { logger } from "../../../logger";
-import { fetchJsonWithRetry } from "../../../util/http";
+import { fetchJsonWithRetry, type RequestPriority } from "../../../util/http";
 
 // api.jup.ag (the paid tier) requires this on every call; lite-api.jup.ag
 // (the free tier) ignores it, so it's always safe to send when configured
@@ -50,13 +50,15 @@ export async function getJupiterQuote(
   slippageBps: number,
   // Caps how many accounts the route may use (Jupiter's own default is 64);
   // a lower cap means a simpler route that fits in one transaction.
-  maxAccounts?: number
+  maxAccounts?: number,
+  // "low" yields every rate-limiter slot to live requests (paper strategies).
+  priority?: RequestPriority
 ): Promise<JupiterQuote | undefined> {
   const url =
     `${config.solanaJupiterBaseUrl}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount.toString()}&slippageBps=${slippageBps}` +
     (maxAccounts ? `&maxAccounts=${maxAccounts}` : "");
   try {
-    const raw = await fetchJsonWithRetry<RawJupiterQuoteResponse>(url, { headers: jupiterHeaders() });
+    const raw = await fetchJsonWithRetry<RawJupiterQuoteResponse>(url, { headers: jupiterHeaders() }, priority ? { priority } : undefined);
     return {
       inputMint: raw.inputMint,
       outputMint: raw.outputMint,

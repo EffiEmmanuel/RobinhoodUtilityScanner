@@ -39,23 +39,42 @@ function rememberOriginCooldown(url: string, ms: number): void {
   originNextAllowedAt.set(origin, Math.max(originNextAllowedAt.get(origin) ?? 0, Date.now() + ms));
 }
 
-async function waitForOriginSlot(url: string): Promise<void> {
+// "low" is for background work that must never cost the live bot a slot
+// (paper strategies' quotes): when a low-priority request reaches the front
+// of its origin's queue while any normal request is waiting, it gives up its
+// turn and rejoins at the back.
+export type RequestPriority = "normal" | "low";
+const normalWaiting = new Map<string, number>();
+const LOW_PRIORITY_REQUEUE_MS = 250;
+
+async function waitForOriginSlot(url: string, priority: RequestPriority = "normal"): Promise<void> {
   const origin = new URL(url).origin;
-  const previous = originQueues.get(origin) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(async () => {
-    const delay = Math.max(0, (originNextAllowedAt.get(origin) ?? 0) - Date.now());
-    if (delay > 0) await sleep(delay);
-    const minInterval = minIntervalMs(url);
-    if (minInterval > 0) originNextAllowedAt.set(origin, Date.now() + minInterval);
-  });
-  originQueues.set(origin, next);
-  await next;
+  if (priority === "normal") normalWaiting.set(origin, (normalWaiting.get(origin) ?? 0) + 1);
+  for (;;) {
+    let granted = true;
+    const previous = originQueues.get(origin) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      if (priority === "low" && (normalWaiting.get(origin) ?? 0) > 0) {
+        granted = false;
+        return;
+      }
+      const delay = Math.max(0, (originNextAllowedAt.get(origin) ?? 0) - Date.now());
+      if (delay > 0) await sleep(delay);
+      const minInterval = minIntervalMs(url);
+      if (minInterval > 0) originNextAllowedAt.set(origin, Date.now() + minInterval);
+      if (priority === "normal") normalWaiting.set(origin, (normalWaiting.get(origin) ?? 1) - 1);
+    });
+    originQueues.set(origin, next);
+    await next;
+    if (granted) return;
+    await sleep(LOW_PRIORITY_REQUEUE_MS);
+  }
 }
 
 export async function fetchJsonWithRetry<T>(
   url: string,
   init?: RequestInit,
-  opts?: { retries?: number; timeoutMs?: number }
+  opts?: { retries?: number; timeoutMs?: number; priority?: RequestPriority }
 ): Promise<T> {
   const retries = opts?.retries ?? BACKOFF_MS.length;
   const timeoutMs = opts?.timeoutMs ?? 10_000;
@@ -63,7 +82,7 @@ export async function fetchJsonWithRetry<T>(
   let lastErr: unknown;
   for (let attempt = 0; attempt < retries; attempt++) {
     if (BACKOFF_MS[attempt]) await sleep(BACKOFF_MS[attempt]);
-    await waitForOriginSlot(url);
+    await waitForOriginSlot(url, opts?.priority);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
