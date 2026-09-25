@@ -11,7 +11,7 @@ import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
 import type { IntrabarMode } from "./simulate";
-import { mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
+import { bootstrapDiffCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
 export const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -858,7 +858,14 @@ async function filtersCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): 
           pct(st.winRate * 100, 0),
           pct(st.expectancyPct),
           st.n ? `${pct(st.expectancyCI90[0])} .. ${pct(st.expectancyCI90[1])}` : "n/a",
-          f === "none" ? "-" : `${cut.length} cut, their mean ${pct(cutStats.expectancyPct)}`,
+          f === "none"
+            ? "-"
+            : `${cut.length} cut (mean ${pct(cutStats.expectancyPct)}); kept - cut ${pct(st.expectancyPct - cutStats.expectancyPct)} [${bootstrapDiffCI(
+                kept.map((r) => r.valued!.netPct),
+                cut.map((r) => r.valued!.netPct)
+              )
+                .map((x) => pct(x))
+                .join(", ")}]`,
           `${usd(wallet.finalEquityUsd)} (${pct(wallet.returnPct, 0)}), max DD ${pct(-wallet.maxDrawdownPct, 0)}, ${wallet.taken} taken`,
         ]);
         if (f !== "none" && mode === "worst") {

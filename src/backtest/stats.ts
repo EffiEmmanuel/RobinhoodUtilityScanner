@@ -179,3 +179,20 @@ export function simulatePortfolio(trades: { chain: string; sim: SimResult }[], o
     curve,
   };
 }
+
+/** Percentile bootstrap CI of mean(a) - mean(b) for two independent samples. */
+export function bootstrapDiffCI(a: number[], b: number[], opts: { iterations?: number; confidence?: number; seed?: number } = {}): [number, number] {
+  if (!a.length || !b.length) return [NaN, NaN];
+  const iterations = opts.iterations ?? 10_000;
+  const alpha = (1 - (opts.confidence ?? 0.9)) / 2;
+  const rand = mulberry32(opts.seed ?? 13);
+  const draws = new Float64Array(iterations);
+  const resampleMean = (xs: number[]) => {
+    let sum = 0;
+    for (let j = 0; j < xs.length; j++) sum += xs[Math.floor(rand() * xs.length)];
+    return sum / xs.length;
+  };
+  for (let i = 0; i < iterations; i++) draws[i] = resampleMean(a) - resampleMean(b);
+  const sorted = Array.from(draws).sort((x, y) => x - y);
+  return [quantile(sorted, alpha), quantile(sorted, 1 - alpha)];
+}

@@ -8,7 +8,7 @@ import { parseArgs, universeFilter } from "./cli";
 import { buyImpactPct, liquidityAt, sellImpactPct } from "./costs";
 import { atDecision, historyView, survivor, SURVIVOR_DEFAULTS } from "./entries";
 import type { SimResult } from "./simulate";
-import { bootstrapMeanCI, simulatePortfolio, tradeStats } from "./stats";
+import { bootstrapDiffCI, bootstrapMeanCI, simulatePortfolio, tradeStats } from "./stats";
 import { gasNetOfRent, loadUniverse, parsePrimaryPair, type UniverseCandidate } from "./universe";
 
 const T0 = 1_790_000_000;
@@ -112,6 +112,12 @@ describe("stats", () => {
     const m = xs.reduce((a, b) => a + b, 0) / xs.length;
     expect(lo).toBeLessThan(m);
     expect(hi).toBeGreaterThan(m);
+  });
+  it("bootstraps the CI of a difference in means between two groups", () => {
+    const [lo, hi] = bootstrapDiffCI([10, 12, 14, 11, 13], [0, 1, 2, -1, 3], { iterations: 4000 });
+    expect(lo).toBeGreaterThan(0);
+    expect(lo).toBeLessThan(11);
+    expect(hi).toBeGreaterThan(11);
   });
   it("summarizes wins, losses and profit factor", () => {
     const s = tradeStats([
