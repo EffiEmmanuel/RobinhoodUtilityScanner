@@ -153,6 +153,10 @@ describe("stats", () => {
     expect(p.taken).toBe(2);
     expect(p.curve.find((c) => c.ts === T0 + 20)?.equityUsd).toBeCloseTo(110);
   });
+  it("can size by a rule on equity, like the user's brackets", () => {
+    const p = simulatePortfolio([{ chain: "robinhood", sim: simAt(T0, T0 + 10, 2) }], { startEquityUsd: 20, sizePct: 0, sizing: (eq) => (eq < 50 ? 0.4 : 0.3), costs });
+    expect(p.finalEquityUsd).toBeCloseTo(28); // 40% of $20 doubled
+  });
   it("skips entries it can't fund or that exceed the concurrency cap, and tracks drawdown", () => {
     const trades = [0, 1, 2].map((i) => ({ chain: "robinhood", sim: simAt(T0 + i, T0 + 100, 0.5) }));
     const p = simulatePortfolio(trades, { startEquityUsd: 100, sizePct: 50, costs, maxConcurrent: 2 });

@@ -169,3 +169,22 @@ export function decideGrid(
   }
   return { qualifiers: qualifiers.map((q) => q.name), winner, reasons };
 }
+
+/**
+ * C's forensics filters (2026-09-25), pre-registered for B2:
+ * E1 drops pump.fun launches detected at a market cap of $50K or more;
+ * E2 keeps only non-pump.fun launches.
+ */
+export type EntryFilter = "none" | "E1" | "E2";
+
+export function detectionMcap(c: Pick<UniverseCandidate, "outcome" | "pair">): number | undefined {
+  return c.outcome.marketCapAtDetection ?? c.pair?.marketCapUsd ?? c.pair?.fdvUsd ?? undefined;
+}
+
+export function passesEntryFilter(c: Pick<UniverseCandidate, "chain" | "tokenAddress" | "pair" | "outcome">, filter: EntryFilter): boolean {
+  if (filter === "none") return true;
+  const pump = launchVenue(c) === "pump.fun";
+  if (filter === "E2") return !pump;
+  const mcap = detectionMcap(c);
+  return !(pump && mcap !== undefined && mcap >= 50_000);
+}

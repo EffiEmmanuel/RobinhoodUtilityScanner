@@ -4,14 +4,14 @@ import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
-import { decideGrid, launchVenue, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
+import { decideGrid, detectionMcap, type EntryFilter, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
 import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAULTS, type SurvivorParams } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
 import type { IntrabarMode } from "./simulate";
-import { mean, mulberry32, tradeStats } from "./stats";
+import { mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
 export const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -809,6 +809,72 @@ async function survivorCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]):
   console.log(out.join("\n"));
 }
 
+/** B2 add-on: C's entry filters E1/E2 vs no filter, for each exit config, both wick modes. */
+async function filtersCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const specs = (typeof flags.exits === "string" ? flags.exits : "v1.8").split(",");
+  const exits = await Promise.all(
+    specs.map(async (spec) => {
+      const [label, file] = spec.includes("=") ? spec.split("=") : [spec, spec];
+      return { label, rules: (await exitConfig(snapshot, file)).rules };
+    })
+  );
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const startUsd = Number(flags.start ?? 21);
+  const refSize = Number(flags["ref-size"] ?? 1.25);
+  const holdWindowS = Number(flags["hold-hours"] ?? 48) * 3_600;
+  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain }));
+  const getSeries = seriesLoader(geckoClient(true));
+  const brackets = userBrackets(40);
+  const filters: EntryFilter[] = ["none", "E1", "E2"];
+  const out: string[] = [
+    `## B2 entry filters, ${chain} universe (entry at decision)`,
+    "",
+    "E1: skip pump.fun launches detected at >= $50K market cap. E2: non-pump.fun launches only. Pre-registered with the grid's rule: judged on mean net return per trade, worst-case wicks primary, close-only must not lose.",
+    `Per-trade figures at ${usd(refSize)}. Wallet: one ${usd(startUsd)} ${chain} wallet in time order, sized by the user's brackets (40% under $50 ...), cash-limited.`,
+    "",
+  ];
+  const rows: (string | number)[][] = [];
+  const cuts: string[] = [];
+  for (const exit of exits) {
+    for (const mode of ["worst", "close"] as const) {
+      const run = await runStrategy(universe, getSeries, { name: exit.label, entry: atDecision(), exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode });
+      const done = run.filter((r) => r.valued);
+      const base = done.filter((r) => passesEntryFilter(r.candidate, "none"));
+      for (const f of filters) {
+        const kept = done.filter((r) => passesEntryFilter(r.candidate, f));
+        const st = tradeStats(kept.map((r) => r.valued!));
+        const wallet = simulatePortfolio(
+          kept.map((r) => ({ chain, sim: r.sim! })),
+          { startEquityUsd: startUsd, sizePct: 0, sizing: brackets.fraction, costs: model }
+        );
+        const cut = base.filter((r) => !passesEntryFilter(r.candidate, f));
+        const cutStats = tradeStats(cut.map((r) => r.valued!));
+        rows.push([
+          exit.label,
+          mode,
+          f,
+          st.n,
+          pct(st.winRate * 100, 0),
+          pct(st.expectancyPct),
+          st.n ? `${pct(st.expectancyCI90[0])} .. ${pct(st.expectancyCI90[1])}` : "n/a",
+          f === "none" ? "-" : `${cut.length} cut, their mean ${pct(cutStats.expectancyPct)}`,
+          `${usd(wallet.finalEquityUsd)} (${pct(wallet.returnPct, 0)}), max DD ${pct(-wallet.maxDrawdownPct, 0)}, ${wallet.taken} taken`,
+        ]);
+        if (f !== "none" && mode === "worst") {
+          const top = cut.sort((a, b) => b.valued!.netPct - a.valued!.netPct).slice(0, 8);
+          cuts.push(
+            `${exit.label} / ${f} cuts these winners (worst-case wicks): ${top.filter((r) => r.valued!.netPct > 0).map((r) => `${r.candidate.symbol ?? "?"} ${pct(r.valued!.netPct, 0)} (peak ${r.pathPeak ? num(r.pathPeak) : "?"}x, mcap $${Math.round((detectionMcap(r.candidate) ?? 0) / 1000)}K)`).join(", ") || "none"}`
+          );
+        }
+      }
+    }
+  }
+  out.push(table(["exits", "wicks", "filter", "trades", "win rate", "mean net/trade", "90% CI", "trades removed", "bracket wallet from start"], rows), "");
+  out.push(...cuts.map((c) => `- ${c}`));
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -835,6 +901,10 @@ export async function main(argv: string[]): Promise<void> {
     }
     case "grid": {
       await gridCmd(await getSnapshot(false), flags);
+      return;
+    }
+    case "filters": {
+      await filtersCmd(await getSnapshot(false), flags);
       return;
     }
     case "survivor": {
@@ -865,6 +935,9 @@ export async function main(argv: string[]): Promise<void> {
   grid --variants V1=a.json,V2=b.json,... [--exit v1.8] [run's universe flags]
                                B2's pre-registered exit grid: paired deltas vs V0 by peak and launch venue,
                                both intrabar modes, and the verdict under the pre-registered rule
+  filters [--exits V0=v1.8,V1=file.json] [--chain solana] [--start 21]
+                               C's entry filters E1 (no pump.fun launch at >= $50K) and E2 (non-pump only)
+                               vs no filter: per-trade stats and a bracket-sized wallet, both wick modes
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

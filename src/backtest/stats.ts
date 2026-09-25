@@ -78,6 +78,7 @@ export function tradeStats(rows: { netPct: number; grossPct: number; netUsd: num
 export interface PortfolioOptions {
   startEquityUsd: number;
   sizePct: number; // of current equity, per entry
+  sizing?: (equityUsd: number) => number; // fraction of equity; overrides sizePct (e.g. the user's brackets)
   maxConcurrent?: number;
   costs: CostModel;
 }
@@ -148,7 +149,8 @@ export function simulatePortfolio(trades: { chain: string; sim: SimResult }[], o
       continue;
     }
     const costs = chainCosts(opts.costs, chain);
-    const size = ((cash + atCost) * opts.sizePct) / 100;
+    const equity = cash + atCost;
+    const size = opts.sizing ? equity * opts.sizing(equity) : (equity * opts.sizePct) / 100;
     if (!(size > 0) || cash < size + costs.gasBuyUsd) {
       skippedNoCash++;
       continue;

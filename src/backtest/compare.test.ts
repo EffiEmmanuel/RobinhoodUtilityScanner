@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideGrid, launchVenue, type PairSummary, pairRows, peakBucket, summarizeByPeak, summarizeByVenue, summarizePairs } from "./compare";
+import { decideGrid, launchVenue, passesEntryFilter, type PairSummary, pairRows, peakBucket, summarizeByPeak, summarizeByVenue, summarizePairs } from "./compare";
 import type { RunRow } from "./run";
 import type { SimResult } from "./simulate";
 import { bracketRule, flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -92,6 +92,21 @@ describe("pre-registered grid decision", () => {
     expect(decideGrid(entries, clears).winner).toBe("V4");
     const oneMode = () => ({ primary: sum(2, [0.5, 3.5]), secondary: sum(3, [-0.2, 6]) });
     expect(decideGrid(entries, oneMode).winner).toBe("V1");
+  });
+});
+
+describe("entry filters E1/E2", () => {
+  const c = (tokenAddress: string, dexId: string, mcap: number | null) =>
+    ({ chain: "solana", tokenAddress, pair: { pairAddress: "p", dexId, marketCapUsd: 1 }, outcome: { marketCapAtDetection: mcap } }) as unknown as UniverseCandidate;
+  it("E1 drops only pump.fun launches detected at $50K or more", () => {
+    expect(passesEntryFilter(c("Xpump", "pumpswap", 60_000), "E1")).toBe(false);
+    expect(passesEntryFilter(c("Xpump", "pumpswap", 49_000), "E1")).toBe(true);
+    expect(passesEntryFilter(c("X", "raydium", 5_000_000), "E1")).toBe(true);
+  });
+  it("E2 keeps only non-pump.fun launches", () => {
+    expect(passesEntryFilter(c("Xpump", "raydium", 10_000), "E2")).toBe(false);
+    expect(passesEntryFilter(c("X", "raydium", 10_000), "E2")).toBe(true);
+    expect(passesEntryFilter(c("Xpump", "pumpswap", 10_000), "none")).toBe(true);
   });
 });
 
