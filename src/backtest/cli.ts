@@ -4,14 +4,14 @@ import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
-import { decideGrid, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
+import { decideGrid, launchVenue, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
-import { atActualEntry, atDecision, type EntryStrategy } from "./entries";
+import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAULTS, type SurvivorParams } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
 import type { IntrabarMode } from "./simulate";
-import { mean, mulberry32 } from "./stats";
+import { mean, mulberry32, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
 export const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -680,6 +680,131 @@ async function gridCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pro
   console.log(out.join("\n"));
 }
 
+function statsRow(label: string, rows: RunRow[]): (string | number)[] {
+  const done = rows.filter((r) => r.valued).map((r) => r.valued!);
+  const st = tradeStats(done);
+  return [
+    label,
+    rows.length,
+    st.n,
+    pct(st.winRate * 100, 0),
+    pct(st.expectancyPct),
+    st.n ? `${pct(st.expectancyCI90[0])} .. ${pct(st.expectancyCI90[1])}` : "n/a",
+    pct(st.medianPct),
+    num(st.profitFactor),
+    usd(st.totalNetUsd),
+  ];
+}
+const STATS_HEADERS = ["entry", "candidates", "trades", "win rate", "mean net/trade", "90% CI", "median", "profit factor", "total"];
+
+/**
+ * B3: survivor entries (T+6/12/24h) vs the early-entry baseline. Parameters
+ * are chosen once, on the earlier half of dates, in the primary
+ * (worst-case wick) mode, then scored on the later half in both modes.
+ */
+async function survivorCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const exit = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
+  const minTrain = Number(flags["min-train-trades"] ?? 15);
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const refSize = Number(flags["ref-size"] ?? 1.25);
+  const holdWindowS = Number(flags["hold-hours"] ?? 48) * 3_600;
+  const getSeries = seriesLoader(geckoClient(true));
+  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain })).sort((a, b) => a.createdAt - b.createdAt);
+  const split = universe[Math.floor(universe.length / 2)].createdAt;
+  const train = universe.filter((c) => c.createdAt < split);
+  const test = universe.filter((c) => c.createdAt >= split);
+  const iso = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const grid: SurvivorParams[] = [];
+  for (const checkHours of [6, 12, 24]) for (const minFractionOfPeak of [0.3, 0.5, 0.7]) for (const minVolumeUsd of [1_000, 5_000, 20_000]) grid.push({ ...SURVIVOR_DEFAULTS, checkHours, minFractionOfPeak, minVolumeUsd });
+  const run = (cands: UniverseCandidate[], entry: EntryStrategy, mode: IntrabarMode) =>
+    runStrategy(cands, getSeries, { name: entry.name, entry, exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode });
+
+  const out: string[] = [`## B3 survivor entries vs early entry, ${chain}, ${exit.name} exits`, ""];
+  out.push(
+    "Pre-registered: 27 parameter sets (check at T+6/12/24h x peak share X 0.3/0.5/0.7 x 2h volume $1k/$5k/$20k; fixed: pool traded in the last 60 min, price >= 20% of the decision price, breakout = a close above the best close of the 3h before the check, within 6h).",
+    `The set with the best mean net return per trade on the TRAIN half (worst-case wicks, at least ${minTrain} trades) is the one scored on the TEST half. Nothing is re-tuned on TEST.`,
+    `Train: ${train.length} candidates, ${iso(train[0].createdAt)} to ${iso(split)}. Test: ${test.length} candidates, ${iso(split)} to ${iso(test[test.length - 1].createdAt)}. ${usd(refSize)} positions, median costs.`,
+    ""
+  );
+  const trainResults: { p: SurvivorParams; name: string; rows: RunRow[]; mean: number; n: number }[] = [];
+  for (const p of grid) {
+    const entry = survivor(p);
+    const rows = await run(train, entry, "worst");
+    const st = tradeStats(rows.filter((r) => r.valued).map((r) => r.valued!));
+    trainResults.push({ p, name: entry.name, rows, mean: st.expectancyPct, n: st.n });
+  }
+  const eligible = trainResults.filter((r) => r.n >= minTrain).sort((a, b) => b.mean - a.mean);
+  out.push("### TRAIN, worst-case wicks: top parameter sets", "");
+  out.push(table(STATS_HEADERS, eligible.slice(0, 8).map((r) => statsRow(r.name, r.rows))), "");
+  out.push(`${trainResults.length - eligible.length} of ${trainResults.length} sets had fewer than ${minTrain} train trades and were ineligible.`, "");
+  if (!eligible.length) {
+    console.log([...out, "No parameter set had enough train trades; nothing to test."].join("\n"));
+    return;
+  }
+  const chosen = eligible[0];
+  out.push(`Chosen on TRAIN: ${chosen.name}`, "");
+
+  const saved: Record<string, unknown> = { chosen: chosen.p, split };
+  for (const mode of ["worst", "close"] as const) {
+    const base = atDecision();
+    const [bTrain, bTest, sTrain, sTest] = [
+      await run(train, base, mode),
+      await run(test, base, mode),
+      mode === "worst" ? chosen.rows : await run(train, survivor(chosen.p), mode),
+      await run(test, survivor(chosen.p), mode),
+    ];
+    out.push(`### ${mode === "worst" ? "Worst-case wicks (primary)" : "Close-only"}`, "");
+    out.push(
+      table(STATS_HEADERS, [
+        statsRow("early entry (at decision), TRAIN", bTrain),
+        statsRow("survivor, TRAIN (in-sample)", sTrain),
+        statsRow("early entry (at decision), TEST", bTest),
+        statsRow("survivor, TEST (out-of-sample)", sTest),
+      ]),
+      ""
+    );
+    const venueRows = (["pump.fun", "other"] as const).flatMap((v) => {
+      const pick = (rows: RunRow[]) => rows.filter((r) => (launchVenue(r.candidate) === "pump.fun") === (v === "pump.fun"));
+      return [statsRow(`early entry, TEST, ${v} launches`, pick(bTest)), statsRow(`survivor, TEST, ${v} launches`, pick(sTest))];
+    });
+    out.push(table(STATS_HEADERS, venueRows), "");
+    const skips: Record<string, number> = {};
+    for (const r of sTest) if (r.skip) skips[r.skip] = (skips[r.skip] ?? 0) + 1;
+    out.push(`Survivor TEST candidates not entered: ${Object.entries(skips).map(([k, v]) => `${k} ${v}`).join(", ")}`, "");
+
+    // The early winners this would give up, whole universe.
+    const bAll = [...bTrain, ...bTest];
+    const sAll = new Map([...sTrain, ...sTest].map((r) => [r.candidate.candidateId, r]));
+    const winners = bAll.filter((r) => r.valued && r.valued.netPct >= 50).sort((a, b) => b.valued!.netPct - a.valued!.netPct);
+    out.push(`Early-entry winners (net >= +50%) and what the survivor rule did with them, ${mode}:`, "");
+    out.push(
+      table(
+        ["symbol", "detected", "venue", "early entry net", "path peak", "survivor"],
+        winners.map((r) => {
+          const s = sAll.get(r.candidate.candidateId);
+          return [
+            r.candidate.symbol ?? "?",
+            iso(r.candidate.createdAt),
+            launchVenue(r.candidate),
+            pct(r.valued!.netPct),
+            r.pathPeak ? `${num(r.pathPeak)}x` : "?",
+            s?.valued ? `entered, ${pct(s.valued.netPct)}` : `missed: ${s?.skip ?? "?"}`,
+          ];
+        })
+      ),
+      ""
+    );
+    saved[mode] = {
+      baselineTest: bTest.map((r) => ({ id: r.candidate.candidateId, netPct: r.valued?.netPct, skip: r.skip })),
+      survivorTest: sTest.map((r) => ({ id: r.candidate.candidateId, netPct: r.valued?.netPct, skip: r.skip, entryTs: r.sim?.entryTs })),
+    };
+  }
+  const file = await writeOut(typeof flags.out === "string" ? flags.out : `b3-survivor-${chain}`, saved);
+  out.push(`Detail: ${file}`);
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -708,6 +833,10 @@ export async function main(argv: string[]): Promise<void> {
       await gridCmd(await getSnapshot(false), flags);
       return;
     }
+    case "survivor": {
+      await survivorCmd(await getSnapshot(false), flags);
+      return;
+    }
     case "sizing": {
       await sizingCmd(await getSnapshot(false), flags);
       return;
@@ -732,6 +861,9 @@ export async function main(argv: string[]): Promise<void> {
   grid --variants V1=a.json,V2=b.json,... [--exit v1.8] [run's universe flags]
                                B2's pre-registered exit grid: paired deltas vs V0 by peak and launch venue,
                                both intrabar modes, and the verdict under the pre-registered rule
+  survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
+                               B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
+                               tested on the second, against early entry on the same candidates
   sizing [--exits v1.8,file.json] [--chain solana] [--start 21] [--paths 5000]
                                compounding sweep: user brackets, brackets from 20%, flat 10%, flat 5%`);
   }

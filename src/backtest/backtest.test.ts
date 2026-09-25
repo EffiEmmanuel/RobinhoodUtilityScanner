@@ -6,7 +6,7 @@ import { exitCategory, fillPrice, fillSamples, calibrateChain, costModelFrom } f
 import { type Candle, GeckoTerminalClient, candleAt, mergePages, parseOhlcvList, stitchSeries } from "./candles";
 import { parseArgs, universeFilter } from "./cli";
 import { buyImpactPct, liquidityAt, sellImpactPct } from "./costs";
-import { atDecision, historyView } from "./entries";
+import { atDecision, historyView, survivor, SURVIVOR_DEFAULTS } from "./entries";
 import type { SimResult } from "./simulate";
 import { bootstrapMeanCI, simulatePortfolio, tradeStats } from "./stats";
 import { gasNetOfRent, loadUniverse, parsePrimaryPair, type UniverseCandidate } from "./universe";
@@ -227,6 +227,41 @@ describe("entries", () => {
   it("enters at the decision time plus a delay", () => {
     const c = { createdAt: T0 } as UniverseCandidate;
     expect(atDecision(5).decide({ candidate: c, closedBy: () => [] })).toEqual({ ts: T0 + 300 });
+  });
+});
+
+describe("survivor entry", () => {
+  const H = 3_600;
+  const c5 = (t: number, c: number, v = 1_000): Candle => ({ t, o: c, h: c, l: c, c, v, d: 300 });
+  // Launch at T0 to 2x, fade to 1.5x, then drift, then break out after the 6h check.
+  const path = (breakAt: number | undefined) => {
+    const out: Candle[] = [c5(T0, 1), c5(T0 + 600, 2)];
+    for (let t = T0 + H; t < T0 + 6 * H; t += 300) out.push(c5(t, 1.5));
+    for (let t = T0 + 6 * H; t < T0 + 12 * H; t += 300) out.push(c5(t, breakAt !== undefined && t >= breakAt ? 1.8 : 1.5));
+    return out;
+  };
+  const cand = { createdAt: T0 + 60 } as UniverseCandidate;
+  const params = { ...SURVIVOR_DEFAULTS, checkHours: 6, minFractionOfPeak: 0.7, minVolumeUsd: 5_000 };
+
+  it("enters at the close of the first candle that breaks the pre-check range", () => {
+    const candles = path(T0 + 7 * H);
+    expect(survivor(params).decide({ candidate: cand, closedBy: historyView(candles) })).toEqual({ ts: T0 + 7 * H + 300, note: "broke 1.500" });
+  });
+  it("skips tokens that faded too far from their peak, went quiet, lost volume, or never broke out", () => {
+    const candles = path(T0 + 7 * H);
+    const decide = (over: Partial<typeof params>, cs = candles) => survivor({ ...params, ...over }).decide({ candidate: cand, closedBy: historyView(cs) });
+    expect(decide({ minFractionOfPeak: 0.8 })).toEqual({ skip: "too far below its peak" });
+    expect(decide({ minVolumeUsd: 1e9 })).toEqual({ skip: "volume faded" });
+    expect(decide({}, path(undefined))).toEqual({ skip: "no breakout" });
+    expect(decide({}, candles.filter((c) => c.t < T0 + 4 * H))).toEqual({ skip: "pool quiet at the check" });
+    const collapsed = candles.map((c) => (c.t >= T0 + H ? { ...c, c: 0.15 } : c));
+    expect(decide({ minFractionOfPeak: 0 }, collapsed)).toEqual({ skip: "collapsed since detection" });
+  });
+  it("can't see the breakout candle before it has closed", () => {
+    const candles = path(T0 + 7 * H);
+    const upToCheck = candles.filter((c) => c.t + c.d <= T0 + 6 * H);
+    // Same history up to the check, different future: the pre-check decision inputs are identical.
+    expect(survivor(params).decide({ candidate: cand, closedBy: historyView(upToCheck) })).toEqual({ skip: "no breakout" });
   });
 });
 
