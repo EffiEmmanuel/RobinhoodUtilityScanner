@@ -11,7 +11,7 @@ import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type Techni
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
 import { validateEntry, gasViableFloorUsd } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
-import { executeBuyFill, getBuyEstimate, isSellable, type FillResult } from "./executionFacade";
+import { executeBuyFill, getBuyEstimate, isSellable, gasLedgerNote, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
 import { renderPositionChart } from "./chartVisionGate";
 import { attachPendingApprovalGas } from "./approvalGas";
@@ -374,12 +374,13 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
       priceImpactPercent: fill.estimatedPriceImpactPercent,
       gasCostUsd: fill.gasCostUsd,
       provider: fill.provider,
+      rawReceipt: fill.receipt ? { ...fill.receipt } : undefined,
       submittedAt: new Date(),
       confirmedAt: new Date(),
     },
   });
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -trade.pendingReentryUsd, notes: `${fill.provider} re-entry — ${trade.pendingReentryReason ?? "AI-proposed dip buy"}` });
-  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: gasLedgerNote(fill) });
   attachPendingApprovalGas(fill, trade.id, buyExecution.id);
 
   logger.info({ tradeId: trade.id, usdSpent: trade.pendingReentryUsd, tokenAmount: fill.tokenAmount, provider: fill.provider }, "re-entry buy executed — price reached the AI-proposed target");

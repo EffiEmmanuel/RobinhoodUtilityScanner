@@ -18,7 +18,7 @@ import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./m
 import { validateEntry, calculatePositionSize, gasViableFloorUsd, autonomousEntryAllowedOnChain, type RiskBucket } from "./riskEngine";
 import { normalizeTradeLane, type TradeLane } from "./tradeLane";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
-import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, type FillResult } from "./executionFacade";
+import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, gasLedgerNote, type FillResult } from "./executionFacade";
 import { getActiveStrategyVersion, type SizingRules } from "./strategy";
 import { tradingConfig } from "./config";
 import { sendTradeEntryEmail, sendTradeClosedEmail } from "./notifications";
@@ -1009,13 +1009,14 @@ async function openTrade(input: {
       priceImpactPercent: fill.estimatedPriceImpactPercent,
       gasCostUsd: fill.gasCostUsd,
       provider: fill.provider,
+      rawReceipt: fill.receipt ? { ...fill.receipt } : undefined,
       submittedAt: new Date(),
       confirmedAt: new Date(),
     },
   });
 
   await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -input.positionSizeUsd, notes: `${fill.provider} buy${fill.txHash ? ` (${fill.txHash})` : ""}` });
-  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: gasLedgerNote(fill) });
   attachPendingApprovalGas(fill, trade.id, buyExecution.id);
 
   // Confirmed live 2026-09-13 (SL/"Stonks Launch"): isSellable() above only

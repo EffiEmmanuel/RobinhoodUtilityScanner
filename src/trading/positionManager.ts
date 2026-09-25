@@ -5,7 +5,7 @@ import type { Trade } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, computeTechnicalFeatures } from "./marketAnalysis";
 import { validatePosition, validateExit } from "./riskEngine";
-import { executeSellFill, getLiveWalletTokenBalance, getSellEstimate, isSellable, type FillResult } from "./executionFacade";
+import { executeSellFill, getLiveWalletTokenBalance, getSellEstimate, isSellable, gasLedgerNote, closeTokenAccountAfterFullExit, type FillResult } from "./executionFacade";
 import { recordLedgerEntry, recordPortfolioSnapshot } from "./portfolio";
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
 import { sendPartialProfitEmail, sendTradeClosedEmail } from "./notifications";
@@ -712,6 +712,7 @@ async function executeSell(
   chain: string
 ): Promise<void> {
   const sellTokens = remainingTokens * (decision.sellPercentOfRemaining / 100);
+  const isFullExit = decision.sellPercentOfRemaining >= 100 || sellTokens >= remainingTokens - 1e-9;
 
   // A pre-trade estimate only, to gate on slippage before ever executing —
   // mirrors the same estimate-then-execute split used for buys (§17).
@@ -748,7 +749,7 @@ async function executeSell(
 
   let fill: FillResult;
   try {
-    fill = await executeSellFill(tokenAddress, sellTokens, pair, chain);
+    fill = await executeSellFill(tokenAddress, sellTokens, pair, chain, { fullExit: isFullExit });
   } catch (err) {
     logger.error({ tradeId: trade.id, err: String(err) }, "sell execution failed — will retry next tick");
     void recordExecutionQuality({
@@ -804,7 +805,7 @@ async function executeSell(
     sellGasUsd: fill.gasCostUsd,
   });
 
-  await db.tradeExecution.create({
+  const sellExecution = await db.tradeExecution.create({
     data: {
       tradeId: trade.id,
       type: "SELL",
@@ -817,6 +818,7 @@ async function executeSell(
       priceImpactPercent: fill.estimatedPriceImpactPercent,
       gasCostUsd: fill.gasCostUsd,
       provider: fill.provider,
+      rawReceipt: fill.receipt ? { ...fill.receipt } : undefined,
       submittedAt: new Date(),
       confirmedAt: new Date(),
     },
@@ -825,7 +827,7 @@ async function executeSell(
     data: { tradeId: trade.id, type: decision.type, severity: decision.isEmergency ? "CRITICAL" : "INFO", triggered: true, evidence: { reason: decision.reason, sellPercent: decision.sellPercentOfRemaining } },
   });
   await recordLedgerEntry({ type: LedgerEntryType.SELL, tradeId: trade.id, amountUsd: proceedsUsd, notes: `${fill.provider} sell — ${decision.reason}${fill.txHash ? ` (${fill.txHash})` : ""}` });
-  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: fill.provider === "live" ? "real gas" : "simulated gas" });
+  await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: gasLedgerNote(fill) });
 
   // Confirmed live 2026-09-11: this was previously only recorded on a full
   // exit — a trade closed via several partial sells never had ANY of its
@@ -851,8 +853,21 @@ async function executeSell(
     });
   }
 
-  const isFullExit = decision.sellPercentOfRemaining >= 100 || sellTokens >= remainingTokens - 1e-9;
   if (isFullExit) {
+    // Solana: reclaim the emptied token account's rent. Only after the sell
+    // is on record, so a crash or a stuck close can't lose the sell itself;
+    // booked onto that sell the way approvalGas.ts books approval gas onto a
+    // buy, so closeTrade's P&L below includes it.
+    const accountClose = fill.provider === "live" ? await closeTokenAccountAfterFullExit(tokenAddress, pair, chain) : undefined;
+    if (accountClose) {
+      await db.tradeExecution.update({
+        where: { id: sellExecution.id },
+        data: { gasCostUsd: { increment: accountClose.gasCostUsd }, rawReceipt: { ...fill.receipt, ...accountClose.receipt } },
+      });
+      if (accountClose.gasCostUsd !== 0) {
+        await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -accountClose.gasCostUsd, notes: gasLedgerNote({ provider: "live", receipt: accountClose.receipt }) });
+      }
+    }
     await closeTrade(trade, decision.reason);
   } else {
     await db.trade.update({ where: { id: trade.id }, data: { status: TradeStatus.PARTIALLY_EXITED } });

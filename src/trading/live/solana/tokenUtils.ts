@@ -44,3 +44,16 @@ export async function getSolanaMintDecimals(connection: Connection, mint: Public
 export function deriveAta(mint: PublicKey, owner: PublicKey, tokenProgramId: PublicKey): PublicKey {
   return getAssociatedTokenAddressSync(mint, owner, false, tokenProgramId);
 }
+
+/**
+ * How much of a mint to sell. Never more than the wallet holds. On a full
+ * exit, a gap of up to 0.01% between what the trade thinks it holds and the
+ * wallet's real balance (float rounding in the trade's token maths) is sold
+ * too, so the exit leaves an empty account that can be closed for its rent
+ * rather than unsellable dust.
+ */
+export function sellAmountRaw(requestedRaw: bigint, balanceRaw: bigint, fullExit: boolean): bigint {
+  if (requestedRaw >= balanceRaw) return balanceRaw;
+  if (fullExit && balanceRaw - requestedRaw <= balanceRaw / 10_000n) return balanceRaw;
+  return requestedRaw;
+}

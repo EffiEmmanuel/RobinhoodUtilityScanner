@@ -13,9 +13,17 @@ import { getPublicClient, getWalletAddress } from "./live/wallet";
 import { getTokenDecimals, getTokenBalance } from "./live/tokenUtils";
 import { ensureSellApprovals, ensureSwapRouter02Approval } from "./live/permit2Approvals";
 import { recordExecutionQuality } from "./executionQuality";
-import { isSolanaLiveModeReady, getSolanaLiveQuote, executeSolanaLiveBuy, executeSolanaLiveSell, canSolanaWalletTransferToken } from "./live/solana/executionProvider";
+import {
+  isSolanaLiveModeReady,
+  getSolanaLiveQuote,
+  executeSolanaLiveBuy,
+  executeSolanaLiveSell,
+  canSolanaWalletTransferToken,
+  closeEmptySolanaTokenAccount,
+  type TokenAccountCloseResult,
+} from "./live/solana/executionProvider";
 import { getSolanaConnection, getSolanaWalletPublicKey } from "./live/solana/wallet";
-import { getSolanaMintDecimals, getSolanaTokenBalance } from "./live/solana/tokenUtils";
+import { getSolanaMintDecimals, getSolanaTokenBalance, sellAmountRaw } from "./live/solana/tokenUtils";
 import { SOL_MINT } from "./live/solana/jupiterClient";
 import { getSolPriceUsd, getCachedEthPriceUsd } from "./portfolio";
 
@@ -52,6 +60,36 @@ export interface FillResult extends PaperQuote {
   // resolving once it confirms (0 if none was needed or it failed). Kept off
   // the buy's critical path — see attachPendingApprovalGas.
   pendingApprovalGasUsd?: Promise<number>;
+  // Live Solana fills only: how gasCostUsd breaks down (fees, token-account
+  // rent paid or refunded), stored on the TradeExecution as rawReceipt.
+  receipt?: SolanaFillReceipt;
+}
+
+/**
+ * Network costs of a live Solana fill, in lamports. gasCostUsd carries them
+ * net: a buy that opens a new token account pays its rent (a real cost of
+ * the trade until refunded); closing the account after a full exit gets the
+ * rent back (closeTokenAccountAfterFullExit), which the caller books against
+ * that last sell, so its gasCostUsd can go negative. Summed over the trade,
+ * the rent cancels when the close succeeds and stays a cost when it doesn't
+ * — the same as the wallet sees it.
+ */
+export interface SolanaFillReceipt {
+  feeLamports?: number;
+  rentLamports?: number;
+  closeSignature?: string;
+  closeFeeLamports?: number;
+  rentRefundLamports?: number;
+  closeSkippedReason?: string;
+}
+
+/** Ledger note for a fill's GAS entry, naming any token-account rent in it. */
+export function gasLedgerNote(fill: Pick<FillResult, "provider" | "receipt">): string {
+  if (fill.provider !== "live") return "simulated gas";
+  const r = fill.receipt;
+  if (r?.rentLamports) return `real gas, incl. ${r.rentLamports} lamports token-account rent (refunded if the account is closed after the exit)`;
+  if (r?.rentRefundLamports) return `token account closed after the exit: ${r.rentRefundLamports} lamports rent refunded, ${r.closeFeeLamports ?? 0} lamports fee (${r.closeSignature})`;
+  return "real gas";
 }
 
 async function sumGasCostWei(client: ReturnType<typeof getPublicClient>, hashes: string[]): Promise<bigint> {
@@ -382,10 +420,10 @@ async function executeSolanaBuyFill(
   const decimals = await getSolanaMintDecimals(conn, mint);
   const boughtRaw = balanceAfter - balanceBefore;
   const tokenAmount = Number(boughtRaw) / 10 ** decimals;
-  const gasCostSol = (result.feeLamports ?? 0) / LAMPORTS_PER_SOL;
+  const gasCostSol = ((result.feeLamports ?? 0) + (result.rentLamports ?? 0)) / LAMPORTS_PER_SOL;
   const gasCostUsd = gasCostSol * solPriceUsd;
 
-  logger.info({ tokenAddress, signature: result.signature, tokenAmount, gasCostUsd }, "live solana buy confirmed");
+  logger.info({ tokenAddress, signature: result.signature, tokenAmount, gasCostUsd, rentLamports: result.rentLamports }, "live solana buy confirmed");
   void recordExecutionQuality({ tokenAddress, chain, pair, direction: "BUY", success: true, slippageBps: 0, priceImpactPercent: 0 });
 
   return {
@@ -396,6 +434,7 @@ async function executeSolanaBuyFill(
     gasCostUsd,
     provider: "live",
     txHash: result.signature,
+    receipt: { feeLamports: result.feeLamports, rentLamports: result.rentLamports },
   };
 }
 
@@ -489,7 +528,10 @@ export async function getSellEstimate(
   return { estimatedSlippageBps: Math.round(priceImpactPercent * 100), estimatedPriceImpactPercent: priceImpactPercent, priceUsd: effectivePriceUsd };
 }
 
-export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string): Promise<FillResult> {
+/** `fullExit`: this sell is meant to leave the position empty. On Solana it
+ * then also sells a rounding-sized remainder, so the token account ends up
+ * empty and closeTokenAccountAfterFullExit can reclaim its rent. */
+export async function executeSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string, options: { fullExit?: boolean } = {}): Promise<FillResult> {
   const liveReady = chain === "solana" ? isSolanaLiveModeReady() : isLiveModeReady();
   if (!liveReady) {
     const fill = { ...getPaperSellQuote(tokenAmount, pair), provider: "paper" as const };
@@ -506,7 +548,7 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
     return fill;
   }
 
-  if (chain === "solana") return executeSolanaSellFill(tokenAddress, tokenAmount, pair, chain);
+  if (chain === "solana") return executeSolanaSellFill(tokenAddress, tokenAmount, pair, chain, options.fullExit ?? false);
 
   const ethPriceUsd = ethPriceUsdFor(pair);
   if (!ethPriceUsd) throw new Error("cannot determine ETH/USD price for live sell sizing (missing priceNative)");
@@ -596,7 +638,7 @@ export async function executeSellFill(tokenAddress: string, tokenAmount: number,
  * the EVM path (the caller's requested amount is a JS Number that can drift
  * from the wallet's true raw balance; never let that cause a revert-forever
  * loop, clamp and sell what's actually there). */
-async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string): Promise<FillResult> {
+async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, pair: MarketPair, chain: string, fullExit: boolean): Promise<FillResult> {
   // Same fallback as executeSolanaBuyFill/getBuyEstimate — critically, this
   // is the EXIT path: refusing to sell a real position just because its pair
   // isn't SOL-quoted (rather than merely refusing a new buy) would trap open
@@ -610,7 +652,7 @@ async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, 
   const [decimals, tokenBalanceRaw] = await Promise.all([getSolanaMintDecimals(conn, mint), getSolanaTokenBalance(conn, mint, wallet)]);
 
   const requestedRaw = BigInt(Math.floor(tokenAmount * 10 ** decimals));
-  const tokenAmountRaw = requestedRaw > tokenBalanceRaw ? tokenBalanceRaw : requestedRaw;
+  const tokenAmountRaw = sellAmountRaw(requestedRaw, tokenBalanceRaw, fullExit);
   if (tokenAmountRaw <= 0n) {
     throw new Error(`refusing to sell ${tokenAddress}: wallet holds no tokens (requested ${requestedRaw} raw units)`);
   }
@@ -620,12 +662,17 @@ async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, 
       "sell amount exceeded the wallet's real token balance — clamped to the actual balance"
     );
   }
+  if (tokenAmountRaw > requestedRaw) {
+    logger.info(
+      { tokenAddress, requestedRaw: requestedRaw.toString(), tokenBalanceRaw: tokenBalanceRaw.toString() },
+      "full exit — also selling the rounding-sized remainder so the token account can be closed"
+    );
+  }
   const soldTokens = Number(tokenAmountRaw) / 10 ** decimals;
 
   const result = await executeSolanaLiveSell(tokenAddress, tokenAmountRaw, tradingConfig.defaultMaxSellSlippageBps);
   const proceedsUsd = (Number(result.amountOut) / LAMPORTS_PER_SOL) * solPriceUsd;
-  const gasCostSol = (result.feeLamports ?? 0) / LAMPORTS_PER_SOL;
-  const gasCostUsd = gasCostSol * solPriceUsd;
+  const gasCostUsd = ((result.feeLamports ?? 0) / LAMPORTS_PER_SOL) * solPriceUsd;
 
   logger.info({ tokenAddress, signature: result.signature, soldTokens, proceedsUsd, gasCostUsd }, "live solana sell confirmed");
   void recordExecutionQuality({ tokenAddress, chain, pair, direction: "SELL", success: true, slippageBps: 0, priceImpactPercent: 0 });
@@ -638,7 +685,37 @@ async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, 
     gasCostUsd,
     provider: "live",
     txHash: result.signature,
+    receipt: { feeLamports: result.feeLamports },
   };
+}
+
+/**
+ * After a live Solana full exit that's already recorded: closes the emptied
+ * token account and returns what that changed — the close fee minus the
+ * refunded rent, in USD, for the caller to book against the sell. Undefined
+ * off live Solana. Never throws: a close that can't happen leaves the rent
+ * as a cost of the trade, with the reason in the receipt.
+ */
+export async function closeTokenAccountAfterFullExit(
+  tokenAddress: string,
+  pair: MarketPair,
+  chain: string
+): Promise<{ gasCostUsd: number; receipt: SolanaFillReceipt } | undefined> {
+  if (chain !== "solana" || !isSolanaLiveModeReady()) return undefined;
+  const close = await closeEmptySolanaTokenAccount(tokenAddress).catch((err): TokenAccountCloseResult => ({ status: "skipped", reason: `close failed: ${String(err)}` }));
+  if (close.status !== "closed") {
+    const reason = close.status === "skipped" ? close.reason : "not closed";
+    logger.warn({ tokenAddress, reason }, "solana token account left open after a full exit — its rent stays a cost of the trade");
+    return { gasCostUsd: 0, receipt: { closeSkippedReason: reason } };
+  }
+  const receipt: SolanaFillReceipt = { closeSignature: close.signature, closeFeeLamports: close.feeLamports, rentRefundLamports: close.refundLamports };
+  logger.info({ tokenAddress, signature: close.signature, refundLamports: close.refundLamports }, "closed the emptied solana token account — rent refunded");
+  const solPriceUsd = deriveSolPriceUsd(pair) ?? (await getSolPriceUsd());
+  if (!solPriceUsd) {
+    logger.warn({ tokenAddress, signature: close.signature }, "no SOL/USD rate to value the refunded rent — left unbooked; the wallet has it");
+    return { gasCostUsd: 0, receipt };
+  }
+  return { gasCostUsd: ((close.feeLamports - close.refundLamports) / LAMPORTS_PER_SOL) * solPriceUsd, receipt };
 }
 
 /**

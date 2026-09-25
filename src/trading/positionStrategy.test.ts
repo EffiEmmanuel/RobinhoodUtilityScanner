@@ -7,6 +7,7 @@ vi.mock("./executionFacade", () => ({
   getBuyEstimate: (...args: unknown[]) => getBuyEstimate(...args),
   isSellable: vi.fn().mockResolvedValue(true),
   executeBuyFill: vi.fn(),
+  gasLedgerNote: vi.fn(() => "real gas"),
 }));
 vi.mock("./portfolio", () => ({
   checkCircuitBreakers: vi.fn().mockResolvedValue({ chains: {} }),
