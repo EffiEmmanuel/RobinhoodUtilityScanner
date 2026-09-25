@@ -188,3 +188,44 @@ export function passesEntryFilter(c: Pick<UniverseCandidate, "chain" | "tokenAdd
   const mcap = detectionMcap(c);
   return !(pump && mcap !== undefined && mcap >= 50_000);
 }
+
+/**
+ * C's launch-forensics gates (pre-registered 2026-09-25; thresholds fixed by
+ * C, not tuned here). A gate REMOVES a candidate only when its feature is
+ * known and crosses the threshold; a blank feature is unknown and passes
+ * (never penalize missing data).
+ */
+export type ForensicsRow = Record<string, unknown>;
+
+export interface ForensicsGate {
+  name: string;
+  chain: string;
+  describe: string;
+  removes: (row: ForensicsRow) => boolean;
+}
+
+export function featureNum(row: ForensicsRow, key: string): number | undefined {
+  const v = row[key];
+  if (v === null || v === undefined || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+const atLeast = (row: ForensicsRow, key: string, min: number) => {
+  const v = featureNum(row, key);
+  return v !== undefined && v >= min;
+};
+
+export const FORENSICS_GATES: ForensicsGate[] = [
+  {
+    name: "F1",
+    chain: "solana",
+    describe: "bundle: max(creatorLinkedSharePct, clusteredBuyerSharePct) >= 15",
+    removes: (r) => atLeast(r, "funding.creatorLinkedSharePct", 15) || atLeast(r, "funding.clusteredBuyerSharePct", 15),
+  },
+  { name: "F2", chain: "solana", describe: "serial launcher: priorLaunches >= 3", removes: (r) => atLeast(r, "creatorLaunches.priorLaunches", 3) },
+  { name: "F2b", chain: "solana", describe: "serial launcher (evaluator's key): priorDead >= 3", removes: (r) => atLeast(r, "creatorLaunches.priorDead", 3) },
+  { name: "F3", chain: "solana", describe: "launch-block share: launchSlotBuySharePct >= 40", removes: (r) => atLeast(r, "early.launchSlotBuySharePct", 40) },
+  { name: "F4", chain: "solana", describe: "first-20 share: first20BuyerSharePct >= 65", removes: (r) => atLeast(r, "early.first20BuyerSharePct", 65) },
+  { name: "R1", chain: "robinhood", describe: "direct deploy (launchpad == direct), report-only", removes: (r) => r.launchpad === "direct" },
+];

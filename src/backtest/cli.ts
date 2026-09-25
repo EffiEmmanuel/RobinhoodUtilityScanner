@@ -4,7 +4,7 @@ import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
-import { decideGrid, detectionMcap, type EntryFilter, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
+import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
 import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAULTS, type SurvivorParams } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
@@ -882,6 +882,69 @@ async function filtersCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): 
   console.log(out.join("\n"));
 }
 
+/**
+ * C's forensics gates judged by replay P&L, like E1/E2: kept minus removed
+ * with a 90% CI, both wick modes, and the biggest winners each gate cuts.
+ * Only candidates C has a forensics row for take part.
+ */
+async function forensicsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const file = typeof flags.table === "string" ? flags.table : undefined;
+  if (!file) throw new Error("forensics needs --table <C's launch_forensics_by_candidate.json>");
+  const raw = JSON.parse(await readFile(file, "utf8")) as ForensicsRow[] | { rows: ForensicsRow[] };
+  const rows = Array.isArray(raw) ? raw : raw.rows;
+  const byId = new Map(rows.filter((r) => r.ok !== false).map((r) => [String(r.candidateId), r]));
+  const exit = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const refSize = Number(flags["ref-size"] ?? 1.25);
+  const holdWindowS = Number(flags["hold-hours"] ?? 48) * 3_600;
+  const getSeries = seriesLoader(geckoClient(true));
+  const out: string[] = [
+    `## Launch-forensics gates judged by replay P&L (${exit.name} exits, entry at decision, ${usd(refSize)} positions)`,
+    "",
+    `C's table: ${rows.length} rows, ${byId.size} usable. A gate removes a candidate only when its feature is known and crosses the threshold; unknown passes.`,
+    "Passes = kept minus removed >= 0 in BOTH wick modes; clears = the worst-case-wick CI is above 0.",
+    "",
+  ];
+  const tableRows: (string | number)[][] = [];
+  const cuts: string[] = [];
+  for (const chain of [...new Set(FORENSICS_GATES.map((g) => g.chain))]) {
+    const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain })).filter((c) => byId.has(c.candidateId));
+    const runs: Record<string, RunRow[]> = {};
+    for (const mode of ["worst", "close"] as const) {
+      runs[mode] = (await runStrategy(universe, getSeries, { name: exit.name, entry: atDecision(), exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode })).filter((r) => r.valued);
+    }
+    for (const gate of FORENSICS_GATES.filter((g) => g.chain === chain)) {
+      const verdict: string[] = [];
+      for (const mode of ["worst", "close"] as const) {
+        const done = runs[mode];
+        const removed = done.filter((r) => gate.removes(byId.get(r.candidate.candidateId)!));
+        const kept = done.filter((r) => !gate.removes(byId.get(r.candidate.candidateId)!));
+        const k = tradeStats(kept.map((r) => r.valued!));
+        const rm = tradeStats(removed.map((r) => r.valued!));
+        const diff = k.expectancyPct - rm.expectancyPct;
+        const ci = bootstrapDiffCI(kept.map((r) => r.valued!.netPct), removed.map((r) => r.valued!.netPct));
+        verdict.push(`${mode} ${Number.isFinite(diff) && diff >= 0 ? "ok" : "fails"}${mode === "worst" && ci[0] > 0 ? " (clears)" : ""}`);
+        tableRows.push([
+          `${gate.name}: ${gate.describe}`,
+          mode,
+          `${done.length}`,
+          `${kept.length} kept, mean ${pct(k.expectancyPct)}`,
+          `${removed.length} removed, mean ${pct(rm.expectancyPct)}`,
+          removed.length && kept.length ? `${pct(diff)} [${pct(ci[0])}, ${pct(ci[1])}]` : "n/a",
+        ]);
+        if (mode === "worst") {
+          const top = removed.filter((r) => r.valued!.netPct > 0).sort((a, b) => b.valued!.netPct - a.valued!.netPct).slice(0, 8);
+          cuts.push(`${gate.name} cuts: ${top.map((r) => `${r.candidate.symbol ?? "?"} ${pct(r.valued!.netPct, 0)} (peak ${r.pathPeak ? num(r.pathPeak) : "?"}x)`).join(", ") || "no winners"}`);
+        }
+      }
+      const passes = verdict.every((v) => v.includes("ok"));
+      cuts.push(`${gate.name} verdict: ${verdict.join(", ")} -> ${passes ? "PASSES" : "does not pass"}`);
+    }
+  }
+  out.push(table(["gate", "wicks", "replayed", "kept", "removed", "kept - removed [90% CI]"], tableRows), "", ...cuts.map((c) => `- ${c}`));
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -912,6 +975,10 @@ export async function main(argv: string[]): Promise<void> {
     }
     case "filters": {
       await filtersCmd(await getSnapshot(false), flags);
+      return;
+    }
+    case "forensics": {
+      await forensicsCmd(await getSnapshot(false), flags);
       return;
     }
     case "survivor": {
@@ -945,6 +1012,9 @@ export async function main(argv: string[]): Promise<void> {
   filters [--exits V0=v1.8,V1=file.json] [--chain solana] [--start 21]
                                C's entry filters E1 (no pump.fun launch at >= $50K) and E2 (non-pump only)
                                vs no filter: per-trade stats and a bracket-sized wallet, both wick modes
+  forensics --table <C's json> [--exit v1.8]
+                               C's pre-registered launch-forensics gates (F1-F4 Solana, R1 RH) judged by
+                               replay P&L: kept minus removed with a CI, both wick modes, winners cut
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

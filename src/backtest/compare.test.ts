@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideGrid, launchVenue, passesEntryFilter, type PairSummary, pairRows, peakBucket, summarizeByPeak, summarizeByVenue, summarizePairs } from "./compare";
+import { decideGrid, FORENSICS_GATES, launchVenue, passesEntryFilter, type PairSummary, pairRows, peakBucket, summarizeByPeak, summarizeByVenue, summarizePairs } from "./compare";
 import type { RunRow } from "./run";
 import type { SimResult } from "./simulate";
 import { bracketRule, flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -107,6 +107,21 @@ describe("entry filters E1/E2", () => {
     expect(passesEntryFilter(c("Xpump", "raydium", 10_000), "E2")).toBe(false);
     expect(passesEntryFilter(c("X", "raydium", 10_000), "E2")).toBe(true);
     expect(passesEntryFilter(c("Xpump", "pumpswap", 10_000), "none")).toBe(true);
+  });
+});
+
+describe("forensics gates", () => {
+  const gate = (name: string) => FORENSICS_GATES.find((g) => g.name === name)!;
+  it("removes only on a known feature past the threshold; blank is unknown and passes", () => {
+    expect(gate("F1").removes({ "funding.creatorLinkedSharePct": 16 })).toBe(true);
+    expect(gate("F1").removes({ "funding.creatorLinkedSharePct": "", "funding.clusteredBuyerSharePct": 15 })).toBe(true);
+    expect(gate("F1").removes({ "funding.creatorLinkedSharePct": 14.9, "funding.clusteredBuyerSharePct": null })).toBe(false);
+    expect(gate("F1").removes({})).toBe(false);
+    expect(gate("F2").removes({ "creatorLaunches.priorLaunches": 3 })).toBe(true);
+    expect(gate("F3").removes({ "early.launchSlotBuySharePct": 39.9 })).toBe(false);
+    expect(gate("F4").removes({ "early.first20BuyerSharePct": 65 })).toBe(true);
+    expect(gate("R1").removes({ launchpad: "direct" })).toBe(true);
+    expect(gate("R1").removes({ launchpad: "factory:0xabc" })).toBe(false);
   });
 });
 
