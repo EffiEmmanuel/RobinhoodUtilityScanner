@@ -9,7 +9,7 @@ import { PositionStrategySchema, POSITION_STRATEGY_JSON_SCHEMA, type PositionStr
 import { POSITION_STRATEGY_SYSTEM, buildPositionStrategyPrompt } from "../ai/prompts";
 import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type TechnicalFeatures } from "./marketAnalysis";
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
-import { validateEntry } from "./riskEngine";
+import { validateEntry, gasViableFloorUsd } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
 import { executeBuyFill, getBuyEstimate, isSellable, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
@@ -266,6 +266,21 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
       data: { pendingReentryTargetMcap: null, pendingReentryUsd: null, pendingReentryExpiresAt: null, pendingReentryReason: null },
     });
     logger.info({ tradeId: trade.id }, "pending re-entry target expired without price reaching it");
+    return;
+  }
+
+  // A re-entry is a slice of the original position, so it can fall below
+  // the size a fresh entry must reach to be worth its gas (25% of a 5%
+  // autonomous entry on a ~$21 account is ~$0.26). Held to the same floor.
+  if (trade.pendingReentryUsd < gasViableFloorUsd(token.chain)) {
+    await db.trade.update({
+      where: { id: trade.id },
+      data: { pendingReentryTargetMcap: null, pendingReentryUsd: null, pendingReentryExpiresAt: null, pendingReentryReason: null },
+    });
+    logger.info(
+      { tradeId: trade.id, reentryUsd: trade.pendingReentryUsd, floorUsd: gasViableFloorUsd(token.chain) },
+      "pending re-entry is below the gas-viable floor — dropped"
+    );
     return;
   }
 
