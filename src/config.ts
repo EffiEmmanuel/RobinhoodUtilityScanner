@@ -102,16 +102,13 @@ export const config = {
   xMinEngagementToPromote: num("X_MIN_ENGAGEMENT_TO_PROMOTE", 10),
 
   rhRpcUrl: str("RH_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
-  // Confirmed live: the primary RPC started returning a Cloudflare
-  // bot-challenge page (HTTP 403, HTML body) for every request from
-  // production specifically — not reproducible from other IPs, so almost
-  // certainly a rate/reputation block on Railway's egress IP rather than a
-  // real outage. This free public endpoint (verified: correctly answers
-  // eth_chainId for 4663) is aggressively rate-limited (1 req/10s without an
-  // API key from nodeflare.app) so it's a last-resort fallback, never the
-  // primary — see wallet.ts's fallback transport, which only reaches this
-  // after the primary itself fails.
-  rhRpcFallbackUrl: str("RH_RPC_FALLBACK_URL", "https://rpc.nodeflare.app/robinhood/public"),
+  // Last transport in wallet.ts's fallback list, reached only after the
+  // primary and RH_RPC_EXTRA_URLS fail. Defaults to the official endpoint:
+  // production sets it that way on Railway (with a third-party RPC as
+  // RH_RPC_URL), and the old default, rpc.nodeflare.app's public endpoint,
+  // is rate-limited to 1 req/10s and was reported serving HTML to
+  // production (2026-09-25).
+  rhRpcFallbackUrl: str("RH_RPC_FALLBACK_URL", "https://rpc.mainnet.chain.robinhood.com"),
   rhRpcExtraUrls: csv("RH_RPC_EXTRA_URLS"),
   rhExplorerApiUrl: optStr("RH_EXPLORER_API_URL"),
 
