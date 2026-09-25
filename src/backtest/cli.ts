@@ -907,16 +907,30 @@ async function forensicsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"])
   ];
   const tableRows: (string | number)[][] = [];
   const cuts: string[] = [];
+  const halves: string[] = [];
   for (const chain of [...new Set(FORENSICS_GATES.map((g) => g.chain))]) {
     const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain })).filter((c) => byId.has(c.candidateId));
     const runs: Record<string, RunRow[]> = {};
     for (const mode of ["worst", "close"] as const) {
       runs[mode] = (await runStrategy(universe, getSeries, { name: exit.name, entry: atDecision(), exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, holdWindowS, intrabar: mode })).filter((r) => r.valued);
     }
+    // The same median-date split B3 uses: a gate should hold in both halves.
+    const sortedTimes = universe.map((c) => c.createdAt).sort((a, b) => a - b);
+    const split = sortedTimes[Math.floor(sortedTimes.length / 2)] ?? 0;
     for (const gate of FORENSICS_GATES.filter((g) => g.chain === chain)) {
       const verdict: string[] = [];
       for (const mode of ["worst", "close"] as const) {
         const done = runs[mode];
+        for (const [label, half] of [
+          ["early half", done.filter((r) => r.candidate.createdAt < split)],
+          ["late half", done.filter((r) => r.candidate.createdAt >= split)],
+        ] as const) {
+          const hk = half.filter((r) => !gate.removes(byId.get(r.candidate.candidateId)!)).map((r) => r.valued!.netPct);
+          const hr = half.filter((r) => gate.removes(byId.get(r.candidate.candidateId)!)).map((r) => r.valued!.netPct);
+          const hd = mean(hk) - mean(hr);
+          const hci = bootstrapDiffCI(hk, hr);
+          halves.push(`${gate.name} ${mode} ${label}: ${hk.length} kept / ${hr.length} removed, kept - removed ${hr.length && hk.length ? `${pct(hd)} [${pct(hci[0])}, ${pct(hci[1])}]` : "n/a"}`);
+        }
         const removed = done.filter((r) => gate.removes(byId.get(r.candidate.candidateId)!));
         const kept = done.filter((r) => !gate.removes(byId.get(r.candidate.candidateId)!));
         const k = tradeStats(kept.map((r) => r.valued!));
@@ -942,6 +956,7 @@ async function forensicsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"])
     }
   }
   out.push(table(["gate", "wicks", "replayed", "kept", "removed", "kept - removed [90% CI]"], tableRows), "", ...cuts.map((c) => `- ${c}`));
+  out.push("", "By date half (median decision time per chain):", "", ...halves.map((h) => `- ${h}`));
   console.log(out.join("\n"));
 }
 

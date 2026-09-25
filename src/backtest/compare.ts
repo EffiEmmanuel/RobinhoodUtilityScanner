@@ -227,5 +227,11 @@ export const FORENSICS_GATES: ForensicsGate[] = [
   { name: "F2b", chain: "solana", describe: "serial launcher (evaluator's key): priorDead >= 3", removes: (r) => atLeast(r, "creatorLaunches.priorDead", 3) },
   { name: "F3", chain: "solana", describe: "launch-block share: launchSlotBuySharePct >= 40", removes: (r) => atLeast(r, "early.launchSlotBuySharePct", 40) },
   { name: "F4", chain: "solana", describe: "first-20 share: first20BuyerSharePct >= 65", removes: (r) => atLeast(r, "early.first20BuyerSharePct", 65) },
+  {
+    name: "F3|F4",
+    chain: "solana",
+    describe: "union: launchSlotBuySharePct >= 40 or first20BuyerSharePct >= 65",
+    removes: (r) => atLeast(r, "early.launchSlotBuySharePct", 40) || atLeast(r, "early.first20BuyerSharePct", 65),
+  },
   { name: "R1", chain: "robinhood", describe: "direct deploy (launchpad == direct), report-only", removes: (r) => r.launchpad === "direct" },
 ];
