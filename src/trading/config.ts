@@ -263,6 +263,18 @@ export const tradingConfig = {
   largeAccountEquityUsd: num("LARGE_ACCOUNT_EQUITY_USD", 300),
   smallAccountMaxSinglePositionPercent: num("SMALL_ACCOUNT_MAX_SINGLE_POSITION_PERCENT", 40),
   maxSinglePositionPercent: num("MAX_SINGLE_POSITION_PERCENT", 25),
+  // Ceiling for every entry the bot picks itself (anything but a manual
+  // buy-and-hold, which keeps the two limits above). 2026-09-25 review of
+  // the 66 closed autonomous LIVE trades: win rate ~24%, a mean price return
+  // of -6.7% per trade, and rugs that gap -85% to -100% before any stop can
+  // fire. At the sizes actually taken (median 15% of equity on Robinhood,
+  // 40% on Solana) the worst single trade cost 63% of equity (Socials);
+  // re-sized to 5% of equity at open, the worst would have cost 5.3%, and
+  // the 66 trades' total -$41.79 would have been -$14.52. The cost is the
+  // winners: CLIP +$7.15 would have been +$1.74, .agent +$6.48 +$0.81. A
+  // percent of equity, never dollars, so size grows with the account. Also
+  // bounded by the two limits above; 0 turns this ceiling off.
+  autonomousMaxSinglePositionPercent: num("AUTONOMOUS_MAX_SINGLE_POSITION_PERCENT", 5),
   // User directive 2026-09-11: this cap was blocking new entries outright
   // ("max open positions reached (2/2)") while capital was still available
   // under maxTotalDeployedPercent/maxSinglePositionPercent above — those two
@@ -696,6 +708,19 @@ export const tradingConfig = {
   // trade size for an account this small.
   maxGasCostPercentOfPosition: num("MAX_GAS_COST_PERCENT_OF_POSITION", 1.5),
   paperAssumedGasCostUsd: num("PAPER_ASSUMED_GAS_COST_USD", 0.05),
+  // Estimated cost of one swap per chain, for the gas check above (see
+  // riskEngine.ts's estimatedSwapGasUsd). Measured 2026-09-25 from confirmed
+  // LIVE TradeExecution rows: Robinhood buys median $0.042 / mean $0.050
+  // (n=79), sells median $0.033 (n=87), round trip median $0.073; Solana
+  // buys median $0.0016 / max $0.012 with priority fee (n=7), sells median
+  // $0.0008 (n=6). One flat $0.05 for both chains made every Solana position
+  // under $3.33 fail the check at 20-50x its real fee. Robinhood falls back
+  // to PAPER_ASSUMED_GAS_COST_USD so its check is unchanged.
+  // The Solana figure is the transaction fee only. Each new mint's first
+  // buy also creates a token account holding ~0.0015 SOL of rent, which is
+  // refunded only if the account is closed after the exit.
+  robinhoodSwapGasCostUsd: num("ROBINHOOD_SWAP_GAS_COST_USD", num("PAPER_ASSUMED_GAS_COST_USD", 0.05)),
+  solanaSwapFeeUsd: num("SOLANA_SWAP_FEE_USD", 0.01),
 
   defaultMaxHoldMinutes: num("DEFAULT_MAX_HOLD_MINUTES", 1440),
   // User directive 2026-09-22, raised 2026-09-23 ("hold good utility tokens

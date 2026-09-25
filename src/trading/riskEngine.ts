@@ -192,6 +192,27 @@ export interface PositionSizingInput {
   // 1 means no data/effect. Defaults to 1 so every existing caller/test that
   // doesn't pass it keeps today's behavior unchanged.
   cohortSizeMultiplier?: number;
+  // Picks the per-chain swap cost for the gas check (estimatedSwapGasUsd).
+  // Undefined is treated as Robinhood.
+  chain?: string;
+  // A manual buy-and-hold keeps the small-account/steady-state single-
+  // position limits; everything else is also held to
+  // autonomousMaxSinglePositionPercent.
+  manualBuyAndHold?: boolean;
+}
+
+/**
+ * Estimated network cost of one swap on this chain — see the
+ * robinhoodSwapGasCostUsd/solanaSwapFeeUsd config comment for the measured
+ * numbers behind each.
+ */
+export function estimatedSwapGasUsd(chain: string | undefined): number {
+  return chain === "solana" ? tradingConfig.solanaSwapFeeUsd : tradingConfig.robinhoodSwapGasCostUsd;
+}
+
+/** Smallest position whose swap cost stays within maxGasCostPercentOfPosition. */
+export function gasViableFloorUsd(chain: string | undefined): number {
+  return (estimatedSwapGasUsd(chain) * 100) / tradingConfig.maxGasCostPercentOfPosition;
 }
 
 export interface PositionSizingResult {
@@ -276,16 +297,23 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   // maxSinglePositionPercent by largeAccountEquityUsd — same lerp idiom as
   // the mcap sweet-spot boost above, just keyed on account size instead of
   // entry mcap.
-  const singlePositionPercent = lerp(
+  const accountSizedPercent = lerp(
     tradingConfig.smallAccountMaxSinglePositionPercent,
     tradingConfig.maxSinglePositionPercent,
     (portfolio.totalEquityUsd - tradingConfig.smallAccountEquityUsd) /
       (tradingConfig.largeAccountEquityUsd - tradingConfig.smallAccountEquityUsd)
   );
+  // The bot's own picks are held to a much smaller slice — see
+  // autonomousMaxSinglePositionPercent's config comment for why.
+  const autonomousCapApplies =
+    !input.manualBuyAndHold &&
+    tradingConfig.autonomousMaxSinglePositionPercent > 0 &&
+    tradingConfig.autonomousMaxSinglePositionPercent < accountSizedPercent;
+  const singlePositionPercent = autonomousCapApplies ? tradingConfig.autonomousMaxSinglePositionPercent : accountSizedPercent;
   const maxBySinglePositionCap = portfolio.totalEquityUsd * (singlePositionPercent / 100);
   if (positionSizeUsd > maxBySinglePositionCap) {
     positionSizeUsd = maxBySinglePositionCap;
-    reasons.push(`capped at single-position limit (${singlePositionPercent.toFixed(1)}% of equity)`);
+    reasons.push(`capped at ${autonomousCapApplies ? "autonomous " : ""}single-position limit (${singlePositionPercent.toFixed(1)}% of equity)`);
   }
   if (positionSizeUsd > portfolio.availableToDeployUsd) {
     positionSizeUsd = portfolio.availableToDeployUsd;
@@ -318,8 +346,11 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
 
   // Small-account gas check (§23). Below this size, gas alone exceeds
   // maxGasCostPercentOfPosition no matter what the formula above computed.
-  const gasCost = tradingConfig.paperAssumedGasCostUsd;
-  const gasViableFloorUsd = (gasCost * 100) / tradingConfig.maxGasCostPercentOfPosition;
+  // At 5% of a ~$21 account ($1.05) this rejects every Robinhood entry
+  // (~$0.04-0.05 a swap, ~4.8%) and passes Solana (~$0.01 at most, ~1%):
+  // Robinhood's round-trip gas alone would be ~7% of the position.
+  const gasCost = estimatedSwapGasUsd(input.chain);
+  const gasFloorUsd = gasViableFloorUsd(input.chain);
 
   // Confirmed live 2026-09-11: a HIGH-risk-bucket candidate that had already
   // cleared every eligibility gate (RWA, momentum-override entry) got sized
@@ -332,9 +363,9 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   // as the account can actually afford one within the hard caps already
   // applied above (never exceeds maxSinglePositionPercent or deployable
   // capital — this raises the floor, it doesn't bypass either ceiling).
-  if (positionSizeUsd > 0 && positionSizeUsd < gasViableFloorUsd) {
-    const raisedTo = Math.min(gasViableFloorUsd, maxBySinglePositionCap, portfolio.availableToDeployUsd);
-    if (raisedTo >= gasViableFloorUsd - 1e-9) {
+  if (positionSizeUsd > 0 && positionSizeUsd < gasFloorUsd) {
+    const raisedTo = Math.min(gasFloorUsd, maxBySinglePositionCap, portfolio.availableToDeployUsd);
+    if (raisedTo >= gasFloorUsd - 1e-9) {
       reasons.push(`raised from $${positionSizeUsd.toFixed(2)} to gas-viable floor $${raisedTo.toFixed(2)} (gates already cleared; capital available)`);
       positionSizeUsd = raisedTo;
     }

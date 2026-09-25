@@ -5,7 +5,7 @@ import { callStructured } from "../ai/provider";
 import { TradeAnalysisSchema, TRADE_ANALYSIS_JSON_SCHEMA } from "./schemas";
 import { TRADE_ANALYSIS_SYSTEM, buildTradeAnalysisPrompt } from "./prompts";
 import { pollCandidateMarket, computeTechnicalFeatures, formatTechnicalFeaturesForPrompt } from "./marketAnalysis";
-import { evaluateCandidate, entryMarketFilter, isBondingCurvePair, failedOnlyOnMarketAccess, type CandidateRiskResult } from "./riskEngine";
+import { evaluateCandidate, entryMarketFilter, isBondingCurvePair, failedOnlyOnMarketAccess, gasViableFloorUsd, type CandidateRiskResult } from "./riskEngine";
 import { getActiveStrategyVersion } from "./strategy";
 import { getBuyEstimate, isSellable } from "./executionFacade";
 import { isLiveModeReady, warmRoutes } from "./live/liveExecutionProvider";
@@ -422,7 +422,7 @@ function isExtremeMomentum(pair: MarketPair | undefined): boolean {
  * the candidate keeps waiting via liquidityWaitDecision, never rejects on it.
  */
 async function canExecuteMinimumPosition(tokenAddress: string, pair: MarketPair, chain: string): Promise<boolean | undefined> {
-  const minimumPositionUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
+  const minimumPositionUsd = gasViableFloorUsd(chain);
   try {
     const quote = await getBuyEstimate(tokenAddress, minimumPositionUsd, pair, chain);
     if (quote.estimatedPriceImpactPercent > tradingConfig.maxBuyPriceImpactPercent) return false;

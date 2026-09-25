@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { tradingConfig } from "./config";
 import {
   evaluateCandidate,
@@ -9,6 +9,8 @@ import {
   validatePosition,
   entryMarketFilter,
   validateExit,
+  estimatedSwapGasUsd,
+  gasViableFloorUsd,
 } from "./riskEngine";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
@@ -221,6 +223,40 @@ describe("isBondingCurvePair", () => {
   });
 });
 
+// Pins the gas settings these tests reason about, so a local .env (which
+// tradingConfig reads at import) can't change the answers.
+function pinGasConfig() {
+  const original = {
+    maxGasCostPercentOfPosition: tradingConfig.maxGasCostPercentOfPosition,
+    robinhoodSwapGasCostUsd: tradingConfig.robinhoodSwapGasCostUsd,
+    solanaSwapFeeUsd: tradingConfig.solanaSwapFeeUsd,
+  };
+  beforeEach(() => {
+    tradingConfig.maxGasCostPercentOfPosition = 1.5;
+    tradingConfig.robinhoodSwapGasCostUsd = 0.05;
+    tradingConfig.solanaSwapFeeUsd = 0.01;
+  });
+  afterEach(() => {
+    Object.assign(tradingConfig, original);
+  });
+}
+
+describe("estimatedSwapGasUsd / gasViableFloorUsd", () => {
+  pinGasConfig();
+
+  it("prices a Solana swap far below a Robinhood one", () => {
+    expect(estimatedSwapGasUsd("solana")).toBe(tradingConfig.solanaSwapFeeUsd);
+    expect(estimatedSwapGasUsd("robinhood")).toBe(tradingConfig.robinhoodSwapGasCostUsd);
+    expect(estimatedSwapGasUsd(undefined)).toBe(tradingConfig.robinhoodSwapGasCostUsd);
+    expect(estimatedSwapGasUsd("solana")).toBeLessThan(estimatedSwapGasUsd("robinhood"));
+  });
+
+  it("keeps Robinhood's floor where it was and gives Solana its own", () => {
+    expect(gasViableFloorUsd("robinhood")).toBeCloseTo(3.333333, 5);
+    expect(gasViableFloorUsd("solana")).toBeCloseTo(0.666667, 5);
+  });
+});
+
 describe("calculatePositionSize", () => {
   it("rejects a REJECT risk bucket outright", () => {
     const result = calculatePositionSize({
@@ -274,7 +310,8 @@ describe("calculatePositionSize", () => {
     // liquidity/risk in both calls below — only currentMcapUsd differs.
     const base = {
       portfolio: portfolio({ availableToDeployUsd: 100_000 }),
-      sizingRules: { ...sizingRules, baseAllocationPercent: 5 },
+      // Small enough that neither size reaches the autonomous 5% ceiling.
+      sizingRules: { ...sizingRules, baseAllocationPercent: 1 },
       qualityScore: 90,
       confidence: 90,
       riskBucket: "MEDIUM" as const,
@@ -299,6 +336,86 @@ describe("calculatePositionSize", () => {
       liquidityUsd: 100_000,
     });
     expect(result.approved).toBe(false);
+  });
+
+  describe("autonomous single-position ceiling", () => {
+    pinGasConfig();
+    const originalAutonomousPercent = tradingConfig.autonomousMaxSinglePositionPercent;
+    afterEach(() => {
+      tradingConfig.autonomousMaxSinglePositionPercent = originalAutonomousPercent;
+    });
+
+    // Production-like: v1.8's 30% base allocation, a verified-lane pick,
+    // and a ~$20 account with a third of it deployable.
+    const smallAccount = {
+      portfolio: portfolio({ totalEquityUsd: 20, availableToDeployUsd: 7 }),
+      sizingRules: { ...sizingRules, baseAllocationPercent: 30 },
+      qualityScore: 90,
+      confidence: 90,
+      riskBucket: "LOW" as const,
+      liquidityUsd: 1_000_000,
+      tradeLane: "VERIFIED_PROJECT" as const,
+      chain: "solana",
+    };
+
+    it("defaults to 5% of equity", () => {
+      expect(tradingConfig.autonomousMaxSinglePositionPercent).toBe(5);
+    });
+
+    it("holds an autonomous entry to 5% of equity but leaves a manual buy-and-hold on the account-sized limit", () => {
+      const autonomous = calculatePositionSize(smallAccount);
+      const manual = calculatePositionSize({ ...smallAccount, manualBuyAndHold: true });
+      expect(autonomous.approved).toBe(true);
+      expect(autonomous.positionSizeUsd).toBe(1);
+      expect(autonomous.reasons.join(" ")).toContain("autonomous single-position limit (5.0% of equity)");
+      // Manual is bounded only by the small-account limit and deployable capital, as before.
+      expect(manual.positionSizeUsd).toBe(7);
+    });
+
+    it("scales with equity rather than stopping at a dollar amount", () => {
+      const result = calculatePositionSize({
+        ...smallAccount,
+        portfolio: portfolio({ totalEquityUsd: 1000, availableToDeployUsd: 500 }),
+      });
+      expect(result.positionSizeUsd).toBe(50);
+    });
+
+    it("never raises an autonomous entry above the account-sized limit", () => {
+      tradingConfig.autonomousMaxSinglePositionPercent = 90;
+      const result = calculatePositionSize({
+        ...smallAccount,
+        portfolio: portfolio({ totalEquityUsd: 1000, availableToDeployUsd: 1000 }),
+        sizingRules: { ...sizingRules, baseAllocationPercent: 90 },
+      });
+      expect(result.positionSizeUsd).toBeLessThanOrEqual(1000 * (Math.max(tradingConfig.maxSinglePositionPercent, tradingConfig.smallAccountMaxSinglePositionPercent) / 100));
+      expect(result.reasons.join(" ")).not.toContain("autonomous");
+    });
+
+    it("is switched off by 0", () => {
+      tradingConfig.autonomousMaxSinglePositionPercent = 0;
+      const result = calculatePositionSize(smallAccount);
+      expect(result.positionSizeUsd).toBe(7);
+    });
+
+    // A 5% Robinhood entry on a ~$20 account is ~$1: $0.05 of gas each way
+    // is 5% of it, over the 1.5% limit. Solana's ~$0.01 fee is 1%.
+    it("rejects a 5% Robinhood entry on gas but passes the same entry on Solana", () => {
+      const robinhood = calculatePositionSize({ ...smallAccount, chain: "robinhood" });
+      const solana = calculatePositionSize(smallAccount);
+      expect(robinhood.approved).toBe(false);
+      expect(robinhood.reasons[0]).toContain("estimated gas cost");
+      expect(solana.approved).toBe(true);
+    });
+
+    it("does not raise an autonomous entry past its ceiling to reach the gas floor", () => {
+      // Robinhood's floor is ~$3.33; the 5% ceiling on $40 is $2.
+      const result = calculatePositionSize({
+        ...smallAccount,
+        chain: "robinhood",
+        portfolio: portfolio({ totalEquityUsd: 40, availableToDeployUsd: 20 }),
+      });
+      expect(result.approved).toBe(false);
+    });
   });
 
   describe("LIVE tactical probe ceiling (opt-in, off by default since 2026-09-18)", () => {

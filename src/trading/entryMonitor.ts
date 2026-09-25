@@ -15,7 +15,7 @@ import {
 import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./marketAnalysis";
-import { validateEntry, calculatePositionSize, type RiskBucket } from "./riskEngine";
+import { validateEntry, calculatePositionSize, gasViableFloorUsd, type RiskBucket } from "./riskEngine";
 import { normalizeTradeLane, type TradeLane } from "./tradeLane";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
 import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, type FillResult } from "./executionFacade";
@@ -613,6 +613,8 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
       tradeLane,
       highConviction: conviction?.passed ?? false,
       cohortSizeMultiplier,
+      chain: candidate.token.chain,
+      manualBuyAndHold: manualEntryOverride,
     });
 
     if (!sizing.approved) {
@@ -629,7 +631,7 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     // reason to walk away from a confirmed real move; it's a reason to buy
     // less of it. Floor matches calculatePositionSize's own gas-viability
     // floor — never sized below what's worth paying gas for.
-    const sizeFloorUsd = (tradingConfig.paperAssumedGasCostUsd * 100) / tradingConfig.maxGasCostPercentOfPosition;
+    const sizeFloorUsd = gasViableFloorUsd(candidate.token.chain);
     let positionSizeUsd = sizing.positionSizeUsd;
     // sizing.appliedProbeCapUsd already reflects whichever tier fired (base
     // probe or high-conviction) — deriving the cap again here from config
