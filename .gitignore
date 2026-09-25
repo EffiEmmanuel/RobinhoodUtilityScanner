@@ -7,3 +7,6 @@ src/generated/
 *.db-journal
 .DS_Store
 reset-circuit-breaker.sh
+# Backtester candle cache and reports (scripts/backtest-replay.ts)
+data/backtest-cache/
+data/backtest-out/
