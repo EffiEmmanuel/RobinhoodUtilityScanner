@@ -381,7 +381,11 @@ export function universeFilter(flags: CliArgs["flags"]): (c: UniverseCandidate) 
   const from = typeof flags.from === "string" ? Date.parse(flags.from) / 1000 : -Infinity;
   const to = typeof flags.to === "string" ? Date.parse(flags.to) / 1000 : Infinity;
   const includeManual = Boolean(flags["include-manual"]);
+  // --venue pump.fun | other | <dexId>: launch venue as compare.ts's launchVenue reads it.
+  const venue = typeof flags.venue === "string" ? flags.venue : undefined;
+  const venueOk = (c: UniverseCandidate) => !venue || (venue === "other" ? launchVenue(c) !== "pump.fun" : launchVenue(c) === venue);
   return (c) =>
+    venueOk(c) &&
     (!chain || c.chain === chain) &&
     (!statuses || statuses.has(c.status)) &&
     c.createdAt >= from &&
@@ -852,7 +856,7 @@ export async function main(argv: string[]): Promise<void> {
                                measure real fill costs vs candles, save the cost model, and replay our
                                autonomous live trades (as-was rules, v1.8) against what actually happened
   run [--entry at-decision[+Nm]|actual] [--exit v1.8 | --exit-json file] [--chain c] [--status S1,S2]
-      [--from iso] [--to iso] [--include-manual] [--equity 25] [--size-pct 5] [--ref-size usd]
+      [--from iso] [--to iso] [--venue pump.fun|other|dexId] [--include-manual] [--equity 25] [--size-pct 5] [--ref-size usd]
       [--hold-hours 48] [--max-concurrent n] [--costs median|p75] [--intrabar worst|close] [--legacy-steps] [--out name]
                                replay the universe from cache only (never fetches, never writes the DB)
   compare --vs <version | file.json> [--exit v1.8] [run's universe flags]

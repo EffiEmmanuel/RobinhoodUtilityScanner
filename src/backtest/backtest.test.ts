@@ -281,6 +281,10 @@ describe("cli", () => {
     expect(f(c({ createdAt: T0 - 1 }))).toBe(false);
     expect(f(c({ qualificationPath: "MANUAL_BUY_AND_HOLD" }))).toBe(false);
     expect(universeFilter({ "include-manual": true })(c({ qualificationPath: "MANUAL_BUY_AND_HOLD" }))).toBe(true);
+    const sol = (tokenAddress: string, dexId: string) => c({ chain: "solana", tokenAddress, pair: { pairAddress: "p", dexId } });
+    expect(universeFilter({ venue: "other" })(sol("Xpump", "raydium"))).toBe(false);
+    expect(universeFilter({ venue: "other" })(sol("X", "raydium"))).toBe(true);
+    expect(universeFilter({ venue: "pump.fun" })(sol("Xpump", "pumpswap"))).toBe(true);
   });
 });
 
