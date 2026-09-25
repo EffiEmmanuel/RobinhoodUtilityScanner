@@ -29,17 +29,25 @@ const sizingRules: SizingRules = {
   liquidityMultiplierMax: 1.2,
 };
 
+// Both chains read the whole pool unless a test gives them their own
+// equity — the paper-mode behavior.
 function portfolio(overrides: Partial<PortfolioState> = {}): PortfolioState {
+  const totalEquityUsd = overrides.totalEquityUsd ?? 1000;
+  const cashUsd = overrides.cashUsd ?? totalEquityUsd;
   return {
-    cashUsd: 1000,
+    cashUsd,
     openPositionValueUsd: 0,
-    totalEquityUsd: 1000,
+    totalEquityUsd,
     lockedProfitUsd: 0,
     reserveTargetUsd: 500,
     deployableCapUsd: 500,
     deployedUsd: 0,
     availableToDeployUsd: 500,
     openPositionCount: 0,
+    chains: {
+      robinhood: { equityUsd: totalEquityUsd, cashUsd },
+      solana: { equityUsd: totalEquityUsd, cashUsd },
+    },
     ...overrides,
   };
 }
@@ -359,17 +367,10 @@ describe("calculatePositionSize", () => {
     expect(result.approved).toBe(false);
   });
 
-  describe("autonomous single-position ceiling", () => {
-    pinGasConfig();
-    const originalAutonomousPercent = tradingConfig.autonomousMaxSinglePositionPercent;
-    afterEach(() => {
-      tradingConfig.autonomousMaxSinglePositionPercent = originalAutonomousPercent;
-    });
-
-    // Production-like: v1.8's 30% base allocation, a verified-lane pick,
-    // and a ~$20 account with a third of it deployable.
-    const smallAccount = {
-      portfolio: portfolio({ totalEquityUsd: 20, availableToDeployUsd: 7 }),
+  describe("capital brackets for autonomous entries", () => {
+    // Production-like: v1.8's 30% base allocation and a verified-lane pick,
+    // so the formula always runs past the bracket and the bracket decides.
+    const rich = {
       sizingRules: { ...sizingRules, baseAllocationPercent: 30 },
       qualityScore: 90,
       confidence: 90,
@@ -378,64 +379,108 @@ describe("calculatePositionSize", () => {
       tradeLane: "VERIFIED_PROJECT" as const,
       chain: "solana",
     };
-
-    it("defaults to 5% of equity", () => {
-      expect(tradingConfig.autonomousMaxSinglePositionPercent).toBe(5);
-    });
-
-    it("holds an autonomous entry to 5% of equity but leaves a manual buy-and-hold on the account-sized limit", () => {
-      const autonomous = calculatePositionSize(smallAccount);
-      const manual = calculatePositionSize({ ...smallAccount, manualBuyAndHold: true });
-      expect(autonomous.approved).toBe(true);
-      expect(autonomous.positionSizeUsd).toBe(1);
-      expect(autonomous.reasons.join(" ")).toContain("autonomous single-position limit (5.0% of equity)");
-      // Manual is bounded only by the small-account limit and deployable capital, as before.
-      expect(manual.positionSizeUsd).toBe(7);
-    });
-
-    it("scales with equity rather than stopping at a dollar amount", () => {
-      const result = calculatePositionSize({
-        ...smallAccount,
-        portfolio: portfolio({ totalEquityUsd: 1000, availableToDeployUsd: 500 }),
+    // Solana's own wallet vs. the whole account (2026-09-25: ~$6.85 of $21.30).
+    function split(solanaEquity: number, robinhoodEquity: number, extra: Partial<PortfolioState> = {}): PortfolioState {
+      return portfolio({
+        totalEquityUsd: solanaEquity + robinhoodEquity,
+        availableToDeployUsd: 100_000,
+        chains: {
+          solana: { equityUsd: solanaEquity, cashUsd: solanaEquity },
+          robinhood: { equityUsd: robinhoodEquity, cashUsd: robinhoodEquity },
+        },
+        ...extra,
       });
-      expect(result.positionSizeUsd).toBe(50);
+    }
+
+    it("sizes the bot's own entry at its chain's bracket of that chain's equity", () => {
+      const result = calculatePositionSize({ ...rich, portfolio: split(20, 5) });
+      expect(result.positionSizeUsd).toBe(8); // 40% of the $20 Solana wallet, not of $25 total
+      expect(result.reasons.join(" ")).toContain("solana bracket $0–50 → 40% of $20.00 chain equity");
     });
 
-    it("never raises an autonomous entry above the account-sized limit", () => {
-      tradingConfig.autonomousMaxSinglePositionPercent = 90;
+    it("steps down at the bracket boundary, not before", () => {
+      expect(calculatePositionSize({ ...rich, portfolio: split(49.99, 0) }).positionSizeUsd).toBeCloseTo(20, 2); // 40%
+      expect(calculatePositionSize({ ...rich, portfolio: split(50, 0) }).positionSizeUsd).toBe(15); // 30%
+    });
+
+    it("keeps each chain's size independent of the other chain's capital", () => {
+      const solana = calculatePositionSize({ ...rich, portfolio: split(20, 400) });
+      const robinhood = calculatePositionSize({ ...rich, chain: "robinhood", portfolio: split(20, 400) });
+      expect(solana.positionSizeUsd).toBe(8); // $20 → 40%
+      expect(robinhood.positionSizeUsd).toBe(60); // $400 → 15%
+    });
+
+    it("uses the 7.5% bracket for $1,000-2,500", () => {
+      expect(calculatePositionSize({ ...rich, portfolio: split(2000, 0) }).positionSizeUsd).toBe(150);
+    });
+
+    it("never goes above the small-account limit, even if a bracket is set higher", () => {
+      const original = tradingConfig.autonomousSizeBrackets.solana;
+      tradingConfig.autonomousSizeBrackets.solana = [{ fromUsd: 0, percent: 90 }];
+      try {
+        const result = calculatePositionSize({ ...rich, portfolio: split(20, 0) });
+        expect(result.positionSizeUsd).toBe(20 * (tradingConfig.smallAccountMaxSinglePositionPercent / 100));
+        expect(result.reasons.join(" ")).toContain("account limit");
+      } finally {
+        tradingConfig.autonomousSizeBrackets.solana = original;
+      }
+    });
+
+    it("can't spend more than the chain's wallet holds in cash", () => {
       const result = calculatePositionSize({
-        ...smallAccount,
-        portfolio: portfolio({ totalEquityUsd: 1000, availableToDeployUsd: 1000 }),
-        sizingRules: { ...sizingRules, baseAllocationPercent: 90 },
+        ...rich,
+        portfolio: split(20, 5, { chains: { solana: { equityUsd: 20, cashUsd: 3 }, robinhood: { equityUsd: 5, cashUsd: 5 } } }),
       });
-      expect(result.positionSizeUsd).toBeLessThanOrEqual(1000 * (Math.max(tradingConfig.maxSinglePositionPercent, tradingConfig.smallAccountMaxSinglePositionPercent) / 100));
-      expect(result.reasons.join(" ")).not.toContain("autonomous");
+      expect(result.positionSizeUsd).toBe(3);
+      expect(result.reasons.join(" ")).toContain("capped at the solana wallet's cash");
     });
 
-    it("is switched off by 0", () => {
-      tradingConfig.autonomousMaxSinglePositionPercent = 0;
-      const result = calculatePositionSize(smallAccount);
-      expect(result.positionSizeUsd).toBe(7);
-    });
-
-    // A 5% Robinhood entry on a ~$20 account is ~$1: $0.05 of gas each way
-    // is 5% of it, over the 1.5% limit. Solana's ~$0.01 fee is 1%.
-    it("rejects a 5% Robinhood entry on gas but passes the same entry on Solana", () => {
-      const robinhood = calculatePositionSize({ ...smallAccount, chain: "robinhood" });
-      const solana = calculatePositionSize(smallAccount);
-      expect(robinhood.approved).toBe(false);
-      expect(robinhood.reasons[0]).toContain("estimated gas cost");
-      expect(solana.approved).toBe(true);
-    });
-
-    it("does not raise an autonomous entry past its ceiling to reach the gas floor", () => {
-      // Robinhood's floor is ~$3.33; the 5% ceiling on $40 is $2.
+    it("leaves the chain's gas reserve in the wallet for the exit", () => {
+      // 0.02 SOL at $115 is $2.30 of the $3 in the wallet.
       const result = calculatePositionSize({
-        ...smallAccount,
-        chain: "robinhood",
-        portfolio: portfolio({ totalEquityUsd: 40, availableToDeployUsd: 20 }),
+        ...rich,
+        portfolio: split(20, 5, { solPriceUsd: 115, chains: { solana: { equityUsd: 20, cashUsd: 3 }, robinhood: { equityUsd: 5, cashUsd: 5 } } }),
       });
-      expect(result.approved).toBe(false);
+      expect(result.positionSizeUsd).toBeCloseTo(3 - tradingConfig.minGasBalanceSol * 115, 2);
+    });
+
+    it("sizes nothing on a chain whose wallet couldn't be read", () => {
+      expect(calculatePositionSize({ ...rich, portfolio: split(0, 25) }).approved).toBe(false);
+    });
+
+    it("leaves a manual buy-and-hold on the account-sized limit of total equity", () => {
+      const result = calculatePositionSize({ ...rich, manualBuyAndHold: true, portfolio: split(20, 5) });
+      expect(result.positionSizeUsd).toBe(10); // 40% of $25 total, as before
+    });
+
+    it("follows a per-chain table from the environment", () => {
+      const original = tradingConfig.autonomousSizeBrackets.solana;
+      tradingConfig.autonomousSizeBrackets.solana = [{ fromUsd: 0, percent: 10 }];
+      try {
+        expect(calculatePositionSize({ ...rich, portfolio: split(20, 5) }).positionSizeUsd).toBe(2);
+        expect(calculatePositionSize({ ...rich, chain: "robinhood", portfolio: split(5, 20) }).positionSizeUsd).toBe(8);
+      } finally {
+        tradingConfig.autonomousSizeBrackets.solana = original;
+      }
+    });
+
+    describe("gas", () => {
+      pinGasConfig();
+
+      // A ~$1 Robinhood entry pays ~$0.05 of gas each way, over the 1.5%
+      // limit; Solana's ~$0.01 fee is 1%.
+      it("rejects a tiny Robinhood entry on gas but passes the same entry on Solana", () => {
+        const tinyBrackets = [{ fromUsd: 0, percent: 5 }];
+        const original = { ...tradingConfig.autonomousSizeBrackets };
+        tradingConfig.autonomousSizeBrackets.solana = tinyBrackets;
+        tradingConfig.autonomousSizeBrackets.robinhood = tinyBrackets;
+        try {
+          expect(calculatePositionSize({ ...rich, chain: "robinhood", portfolio: split(20, 20) }).approved).toBe(false);
+          expect(calculatePositionSize({ ...rich, portfolio: split(20, 20) }).approved).toBe(true);
+        } finally {
+          Object.assign(tradingConfig.autonomousSizeBrackets, original);
+        }
+      });
     });
   });
 

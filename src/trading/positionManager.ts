@@ -121,7 +121,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   // Deterministic, cheap, runs every tick regardless of the AI review cadence
   // below: executes a previously AI-proposed re-entry buy only if (and once)
   // price has actually fallen to that target — the AI never buys directly.
-  await checkAndExecutePendingReentry(trade, token, pair, tier).catch((err) =>
+  await checkAndExecutePendingReentry(trade, token, pair, tier, manualHold).catch((err) =>
     logger.error({ tradeId: trade.id, err: String(err) }, "pending re-entry check failed — will retry next tick")
   );
 

@@ -1,7 +1,8 @@
 import { tradingConfig } from "./config";
 import type { SizingRules } from "./strategy";
-import type { PortfolioState } from "./portfolio";
+import type { PortfolioState, ChainKey } from "./portfolio";
 import type { TradeLane } from "./tradeLane";
+import { sizeBracketFor } from "./sizeBrackets";
 
 export type RiskBucket = "LOW" | "MEDIUM" | "HIGH" | "REJECT";
 
@@ -201,13 +202,67 @@ export interface PositionSizingInput {
   // 1 means no data/effect. Defaults to 1 so every existing caller/test that
   // doesn't pass it keeps today's behavior unchanged.
   cohortSizeMultiplier?: number;
-  // Picks the per-chain swap cost for the gas check (estimatedSwapGasUsd).
-  // Undefined is treated as Robinhood.
+  // Picks the chain whose equity an autonomous entry is sized against, and
+  // the per-chain swap cost for the gas check. Undefined is treated as
+  // Robinhood.
   chain?: string;
-  // A manual buy-and-hold keeps the small-account/steady-state single-
-  // position limits; everything else is also held to
-  // autonomousMaxSinglePositionPercent.
+  // A manual buy-and-hold keeps the small-account/steady-state limit on
+  // total equity; everything else is sized by its chain's capital bracket
+  // (see singlePositionLimit).
   manualBuyAndHold?: boolean;
+}
+
+export interface SinglePositionLimit {
+  percent: number;
+  limitUsd: number;
+  // For sizing reasons and logs, e.g. "solana bracket $0–50 → 40% of $21.30
+  // chain equity".
+  description: string;
+}
+
+// Small-account boost (user directive 2026-09-17): the flat
+// maxSinglePositionPercent is tuned for an account with enough equity that
+// fixed costs (gas) are noise; below smallAccountEquityUsd it isn't, so the
+// cap widens toward smallAccountMaxSinglePositionPercent, tapering back to
+// the steady-state percent by largeAccountEquityUsd — same lerp idiom as the
+// mcap sweet-spot boost, just keyed on account size.
+function accountSizedPercent(equityUsd: number): number {
+  return lerp(
+    tradingConfig.smallAccountMaxSinglePositionPercent,
+    tradingConfig.maxSinglePositionPercent,
+    (equityUsd - tradingConfig.smallAccountEquityUsd) / (tradingConfig.largeAccountEquityUsd - tradingConfig.smallAccountEquityUsd)
+  );
+}
+
+/**
+ * The most one position may cost in total — its first buy and every
+ * re-entry together. A manual buy-and-hold: the small-account/steady-state
+ * percent of total equity, as always. Anything the bot picks itself: its
+ * chain's capital bracket (autonomousSizeBrackets) of that chain's own
+ * equity, never above the small-account/steady-state percent for that same
+ * equity — keyed on the chain alone, so a big balance on one chain never
+ * changes what the other chain may buy.
+ */
+export function singlePositionLimit(portfolio: PortfolioState, chain: string | undefined, manualBuyAndHold: boolean): SinglePositionLimit {
+  if (manualBuyAndHold) {
+    const percent = accountSizedPercent(portfolio.totalEquityUsd);
+    return {
+      percent,
+      limitUsd: portfolio.totalEquityUsd * (percent / 100),
+      description: `single-position limit (${percent.toFixed(1)}% of $${portfolio.totalEquityUsd.toFixed(2)} equity)`,
+    };
+  }
+  const key: ChainKey = chain === "solana" ? "solana" : "robinhood";
+  const chainEquityUsd = Math.max(0, portfolio.chains[key].equityUsd);
+  const bracket = sizeBracketFor(tradingConfig.autonomousSizeBrackets[key], chainEquityUsd);
+  const percent = Math.min(bracket.percent, accountSizedPercent(chainEquityUsd));
+  return {
+    percent,
+    limitUsd: chainEquityUsd * (percent / 100),
+    description:
+      `${key} bracket ${bracket.label} → ${bracket.percent}% of $${chainEquityUsd.toFixed(2)} chain equity` +
+      (percent < bracket.percent ? `, held to the ${percent.toFixed(1)}% account limit` : ""),
+  };
 }
 
 /**
@@ -247,7 +302,13 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
     return { approved: false, positionSizeUsd: 0, reasons: ["risk bucket is REJECT"] };
   }
 
-  const base = portfolio.totalEquityUsd * (sizingRules.baseAllocationPercent / 100);
+  const manual = input.manualBuyAndHold ?? false;
+  const chain: ChainKey = input.chain === "solana" ? "solana" : "robinhood";
+  // The bot's own entries size off their own chain's capital (its wallet is
+  // the only money they can spend); a manual buy-and-hold sizes off total
+  // equity, unchanged.
+  const sizingEquityUsd = manual ? portfolio.totalEquityUsd : Math.max(0, portfolio.chains[chain].equityUsd);
+  const base = sizingEquityUsd * (sizingRules.baseAllocationPercent / 100);
   const qualityMult = lerp(sizingRules.qualityMultiplierMin, sizingRules.qualityMultiplierMax, input.qualityScore / 100);
   const confidenceMult = lerp(sizingRules.confidenceMultiplierMin, sizingRules.confidenceMultiplierMax, input.confidence / 100);
   const riskMult =
@@ -299,34 +360,24 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   let positionSizeUsd = base * qualityMult * confidenceMult * riskMult * liquidityMult * entryRiskMult * marketCapMult * laneMult * cohortMult;
 
   // Hard caps (§22) — these override the formula, never the other way around.
-  // Small-account boost (user directive 2026-09-17): the flat percent below
-  // is tuned for an account with enough equity that fixed costs (gas) are
-  // noise; below smallAccountEquityUsd it isn't, so the cap widens toward
-  // smallAccountMaxSinglePositionPercent, tapering back to the steady-state
-  // maxSinglePositionPercent by largeAccountEquityUsd — same lerp idiom as
-  // the mcap sweet-spot boost above, just keyed on account size instead of
-  // entry mcap.
-  const accountSizedPercent = lerp(
-    tradingConfig.smallAccountMaxSinglePositionPercent,
-    tradingConfig.maxSinglePositionPercent,
-    (portfolio.totalEquityUsd - tradingConfig.smallAccountEquityUsd) /
-      (tradingConfig.largeAccountEquityUsd - tradingConfig.smallAccountEquityUsd)
-  );
-  // The bot's own picks are held to a much smaller slice — see
-  // autonomousMaxSinglePositionPercent's config comment for why.
-  const autonomousCapApplies =
-    !input.manualBuyAndHold &&
-    tradingConfig.autonomousMaxSinglePositionPercent > 0 &&
-    tradingConfig.autonomousMaxSinglePositionPercent < accountSizedPercent;
-  const singlePositionPercent = autonomousCapApplies ? tradingConfig.autonomousMaxSinglePositionPercent : accountSizedPercent;
-  const maxBySinglePositionCap = portfolio.totalEquityUsd * (singlePositionPercent / 100);
+  const limit = singlePositionLimit(portfolio, input.chain, manual);
+  const maxBySinglePositionCap = limit.limitUsd;
   if (positionSizeUsd > maxBySinglePositionCap) {
     positionSizeUsd = maxBySinglePositionCap;
-    reasons.push(`capped at ${autonomousCapApplies ? "autonomous " : ""}single-position limit (${singlePositionPercent.toFixed(1)}% of equity)`);
+    reasons.push(`capped at ${limit.description}`);
   }
   if (positionSizeUsd > portfolio.availableToDeployUsd) {
     positionSizeUsd = portfolio.availableToDeployUsd;
     reasons.push("capped at remaining deployable capital");
+  }
+  // A buy spends its own chain's wallet; it can't use the other chain's
+  // cash, nor the gas reserve (MIN_GAS_BALANCE_*) the exit will need.
+  const gasReserveUsd =
+    chain === "solana" ? tradingConfig.minGasBalanceSol * (portfolio.solPriceUsd ?? 0) : tradingConfig.minGasBalanceEth * (portfolio.ethPriceUsd ?? 0);
+  const chainCashUsd = manual ? Infinity : Math.max(0, portfolio.chains[chain].cashUsd - gasReserveUsd);
+  if (positionSizeUsd > chainCashUsd) {
+    positionSizeUsd = chainCashUsd;
+    reasons.push(`capped at the ${chain} wallet's cash above its gas reserve ($${positionSizeUsd.toFixed(2)})`);
   }
 
   let appliedProbeCapUsd: number | undefined;
@@ -355,9 +406,8 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
 
   // Small-account gas check (§23). Below this size, gas alone exceeds
   // maxGasCostPercentOfPosition no matter what the formula above computed.
-  // At 5% of a ~$21 account ($1.05) this rejects every Robinhood entry
-  // (~$0.04-0.05 a swap, ~4.8%) and passes Solana (~$0.01 at most, ~1%):
-  // Robinhood's round-trip gas alone would be ~7% of the position.
+  // At the 1.5% limit a Robinhood entry needs ~$3.33 (~$0.05 a swap) and a
+  // Solana one ~$0.67 (~$0.01 at most).
   const gasCost = estimatedSwapGasUsd(input.chain);
   const gasFloorUsd = gasViableFloorUsd(input.chain);
 
@@ -373,7 +423,7 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   // applied above (never exceeds maxSinglePositionPercent or deployable
   // capital — this raises the floor, it doesn't bypass either ceiling).
   if (positionSizeUsd > 0 && positionSizeUsd < gasFloorUsd) {
-    const raisedTo = Math.min(gasFloorUsd, maxBySinglePositionCap, portfolio.availableToDeployUsd);
+    const raisedTo = Math.min(gasFloorUsd, maxBySinglePositionCap, portfolio.availableToDeployUsd, chainCashUsd);
     if (raisedTo >= gasFloorUsd - 1e-9) {
       reasons.push(`raised from $${positionSizeUsd.toFixed(2)} to gas-viable floor $${raisedTo.toFixed(2)} (gates already cleared; capital available)`);
       positionSizeUsd = raisedTo;
@@ -395,7 +445,7 @@ export function calculatePositionSize(input: PositionSizingInput): PositionSizin
   }
 
   reasons.push(
-    `base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x mcap=${marketCapMult.toFixed(2)} x lane=${laneMult.toFixed(2)} x cohort=${cohortMult.toFixed(2)}`
+    `${manual ? "" : `${limit.description}; `}base=$${base.toFixed(2)} x quality=${qualityMult.toFixed(2)} x confidence=${confidenceMult.toFixed(2)} x risk=${riskMult.toFixed(2)} x liquidity=${liquidityMult.toFixed(2)} x entryRisk=${entryRiskMult.toFixed(2)} x mcap=${marketCapMult.toFixed(2)} x lane=${laneMult.toFixed(2)} x cohort=${cohortMult.toFixed(2)}`
   );
   return { approved: true, positionSizeUsd: Math.round(positionSizeUsd * 100) / 100, reasons, appliedProbeCapUsd };
 }

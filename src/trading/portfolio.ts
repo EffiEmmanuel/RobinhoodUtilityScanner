@@ -244,10 +244,12 @@ function isSolanaLiveReady(): boolean {
 async function getCashUsd(
   ethPriceUsd: number | undefined,
   solPriceUsd: number | undefined
-): Promise<{ cashUsd: number; cashEth: number | undefined; cashSol: number | undefined }> {
+): Promise<{ cashUsd: number; cashEth: number | undefined; cashSol: number | undefined; cashUsdByChain?: Record<ChainKey, number> }> {
   const evmLive = isLiveModeReady();
   const solanaLive = isSolanaLiveReady();
 
+  // No per-chain split here: a paper ledger (or a ledger-sum fallback) is one
+  // pool with no wallet behind either chain.
   if (!evmLive && !solanaLive) {
     const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
     return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth: undefined, cashSol: undefined };
@@ -295,27 +297,36 @@ async function getCashUsd(
     }
   }
 
-  return { cashUsd: evmUsd + solUsd, cashEth, cashSol };
+  return { cashUsd: evmUsd + solUsd, cashEth, cashSol, cashUsdByChain: { robinhood: evmUsd, solana: solUsd } };
 }
 
-async function getOpenPositionValueUsd(chain?: string): Promise<{ valueUsd: number; costBasisUsd: number; openCount: number }> {
+async function getOpenPositionValueUsd(
+  chain?: string
+): Promise<{ valueUsd: number; costBasisUsd: number; openCount: number; valueUsdByChain: Record<ChainKey, number> }> {
   const openTrades = await db.trade.findMany({
     where: {
       status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] },
       ...(chain ? { token: { chain } } : {}),
     },
-    include: { snapshots: { orderBy: { capturedAt: "desc" }, take: 1 } },
+    include: { snapshots: { orderBy: { capturedAt: "desc" }, take: 1 }, token: { select: { chain: true } } },
   });
   let valueUsd = 0;
   let costBasisUsd = 0;
+  const valueUsdByChain: Record<ChainKey, number> = { robinhood: 0, solana: 0 };
   for (const t of openTrades) {
     const latest = t.snapshots[0];
     const remainingTokens = latest?.tokenAmountRemaining ?? t.entryTokenAmount ?? 0;
     const price = latest?.priceUsd ?? t.entryPriceUsd ?? 0;
     valueUsd += remainingTokens * price;
+    valueUsdByChain[chainKey(t.token.chain)] += remainingTokens * price;
     costBasisUsd += t.positionSizeUsd;
   }
-  return { valueUsd, costBasisUsd, openCount: openTrades.length };
+  return { valueUsd, costBasisUsd, openCount: openTrades.length, valueUsdByChain };
+}
+
+export type ChainKey = "robinhood" | "solana";
+export function chainKey(chain: string): ChainKey {
+  return chain === "solana" ? "solana" : "robinhood";
 }
 
 /**
@@ -354,6 +365,14 @@ export interface PortfolioState {
   // display, never fabricate a rate.
   ethPriceUsd?: number;
   solPriceUsd?: number;
+  // Each chain's own wallet: its cash plus its open positions' value. The
+  // Robinhood EVM wallet and the Solana wallet are separate money — a Solana
+  // buy can only spend Solana cash — so the capital brackets
+  // (sizeBrackets.ts) size each chain off its own equity. A wallet that
+  // can't be read (or priced) counts as $0 cash for this reading, the same
+  // undercounting-is-safe rule as getCashUsd. Paper/ledger mode has no
+  // per-wallet split, so both chains read the whole pool there.
+  chains: Record<ChainKey, { equityUsd: number; cashUsd: number }>;
 }
 
 export async function getPortfolioState(): Promise<PortfolioState> {
@@ -362,7 +381,7 @@ export async function getPortfolioState(): Promise<PortfolioState> {
   // dashboard. See getCachedEthPriceUsd/getCachedSolPriceUsd's doc comment.
   const ethPriceUsd = getCachedEthPriceUsd();
   const solPriceUsd = getCachedSolPriceUsd();
-  const [{ cashUsd, cashEth, cashSol }, positions, lockedProfitUsd] = await Promise.all([
+  const [{ cashUsd, cashEth, cashSol, cashUsdByChain }, positions, lockedProfitUsd] = await Promise.all([
     getCashUsd(ethPriceUsd, solPriceUsd),
     getOpenPositionValueUsd(),
     getLockedProfitUsd(),
@@ -380,6 +399,8 @@ export async function getPortfolioState(): Promise<PortfolioState> {
   const reserveTargetUsd = deployableEquityUsd * (tradingConfig.minReservePercent / 100);
   const deployableCapUsd = deployableEquityUsd * (tradingConfig.maxTotalDeployedPercent / 100);
   const availableToDeployUsd = Math.max(0, deployableCapUsd - positions.costBasisUsd);
+  const chainCash = (key: ChainKey) => (cashUsdByChain ? cashUsdByChain[key] : cashUsd);
+  const chainEquity = (key: ChainKey) => (cashUsdByChain ? cashUsdByChain[key] + positions.valueUsdByChain[key] : totalEquityUsd);
 
   return {
     cashUsd,
@@ -395,6 +416,10 @@ export async function getPortfolioState(): Promise<PortfolioState> {
     openPositionCount: positions.openCount,
     ethPriceUsd,
     solPriceUsd,
+    chains: {
+      robinhood: { equityUsd: chainEquity("robinhood"), cashUsd: chainCash("robinhood") },
+      solana: { equityUsd: chainEquity("solana"), cashUsd: chainCash("solana") },
+    },
   };
 }
 

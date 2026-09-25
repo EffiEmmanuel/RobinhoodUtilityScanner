@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { loadSizeBrackets } from "./sizeBrackets";
 
 function str(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
@@ -264,18 +265,27 @@ export const tradingConfig = {
   largeAccountEquityUsd: num("LARGE_ACCOUNT_EQUITY_USD", 300),
   smallAccountMaxSinglePositionPercent: num("SMALL_ACCOUNT_MAX_SINGLE_POSITION_PERCENT", 40),
   maxSinglePositionPercent: num("MAX_SINGLE_POSITION_PERCENT", 25),
-  // Ceiling for every entry the bot picks itself (anything but a manual
-  // buy-and-hold, which keeps the two limits above). 2026-09-25 review of
-  // the 66 closed autonomous LIVE trades: win rate ~24%, a mean price return
-  // of -6.7% per trade, and rugs that gap -85% to -100% before any stop can
-  // fire. At the sizes actually taken (median 15% of equity on Robinhood,
-  // 40% on Solana) the worst single trade cost 63% of equity (Socials);
-  // re-sized to 5% of equity at open, the worst would have cost 5.3%, and
-  // the 66 trades' total -$41.79 would have been -$14.52. The cost is the
-  // winners: CLIP +$7.15 would have been +$1.74, .agent +$6.48 +$0.81. A
-  // percent of equity, never dollars, so size grows with the account. Also
-  // bounded by the two limits above; 0 turns this ceiling off.
-  autonomousMaxSinglePositionPercent: num("AUTONOMOUS_MAX_SINGLE_POSITION_PERCENT", 5),
+  // Capital brackets for every entry the bot picks itself (anything but a
+  // manual buy-and-hold, which keeps the two limits above). User directive
+  // 2026-09-25: an autonomous position's slice of ITS CHAIN's equity starts
+  // high and steps down at capital milestones — see sizeBrackets.ts for the
+  // format and the default table (under $50 -> 40% ... $2,500+ -> 5%). Also
+  // never above the two limits above; the same slice caps a position's total
+  // cost including re-entries (positionStrategy.ts). Per chain because the
+  // Robinhood and Solana wallets are separate money: a Solana buy can only
+  // spend Solana capital. Replaced the flat AUTONOMOUS_MAX_SINGLE_POSITION_
+  // PERCENT=5 from earlier the same day. The user chose this knowing the
+  // cost: at ~40% of equity one -85% rug (Socials, 09-24) took 63% of equity.
+  autonomousSizeBrackets: {
+    robinhood: loadSizeBrackets(
+      process.env.AUTONOMOUS_SIZE_BRACKETS_ROBINHOOD ? "AUTONOMOUS_SIZE_BRACKETS_ROBINHOOD" : "AUTONOMOUS_SIZE_BRACKETS",
+      process.env.AUTONOMOUS_SIZE_BRACKETS_ROBINHOOD || process.env.AUTONOMOUS_SIZE_BRACKETS
+    ),
+    solana: loadSizeBrackets(
+      process.env.AUTONOMOUS_SIZE_BRACKETS_SOLANA ? "AUTONOMOUS_SIZE_BRACKETS_SOLANA" : "AUTONOMOUS_SIZE_BRACKETS",
+      process.env.AUTONOMOUS_SIZE_BRACKETS_SOLANA || process.env.AUTONOMOUS_SIZE_BRACKETS
+    ),
+  },
   // User directive 2026-09-11: this cap was blocking new entries outright
   // ("max open positions reached (2/2)") while capital was still available
   // under maxTotalDeployedPercent/maxSinglePositionPercent above — those two

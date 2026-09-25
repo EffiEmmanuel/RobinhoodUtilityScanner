@@ -9,7 +9,7 @@ import { PositionStrategySchema, POSITION_STRATEGY_JSON_SCHEMA, type PositionStr
 import { POSITION_STRATEGY_SYSTEM, buildPositionStrategyPrompt } from "../ai/prompts";
 import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type TechnicalFeatures } from "./marketAnalysis";
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
-import { validateEntry, gasViableFloorUsd } from "./riskEngine";
+import { validateEntry, gasViableFloorUsd, singlePositionLimit } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
 import { executeBuyFill, getBuyEstimate, isSellable, gasLedgerNote, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
@@ -272,7 +272,18 @@ export async function applyReentryTarget(trade: Trade, decision: PositionStrateg
  * Only actually buys if price has really reached the target the AI proposed
  * earlier, and only after the same entry-risk gate a fresh trade would face.
  */
-export async function checkAndExecutePendingReentry(trade: Trade, token: Token, pair: MarketPair | undefined, tier: ProjectTier): Promise<void> {
+/**
+ * How much of a pending re-entry fits: a position's total cost — first buy
+ * plus every re-entry — stays within the same single-position limit its
+ * first buy was sized under (user directive 2026-09-25: pullback buys and
+ * re-entries are capped at the capital bracket's percent too).
+ */
+export function reentryWithinLimitUsd(input: { pendingUsd: number; costBasisUsd: number; limitUsd: number }): { headroomUsd: number; reentryUsd: number } {
+  const headroomUsd = Math.max(0, input.limitUsd - input.costBasisUsd);
+  return { headroomUsd, reentryUsd: Math.min(input.pendingUsd, headroomUsd) };
+}
+
+export async function checkAndExecutePendingReentry(trade: Trade, token: Token, pair: MarketPair | undefined, tier: ProjectTier, manualHold: boolean): Promise<void> {
   if (!trade.pendingReentryTargetMcap || !trade.pendingReentryUsd) return;
 
   if (trade.pendingReentryExpiresAt && trade.pendingReentryExpiresAt.getTime() < Date.now()) {
@@ -285,8 +296,8 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   }
 
   // A re-entry is a slice of the original position, so it can fall below
-  // the size a fresh entry must reach to be worth its gas (25% of a 5%
-  // autonomous entry on a ~$21 account is ~$0.26). Held to the same floor.
+  // the size a fresh entry must reach to be worth its gas (25% of a $1
+  // position is $0.25). Held to the same floor.
   if (trade.pendingReentryUsd < gasViableFloorUsd(token.chain)) {
     await db.trade.update({
       where: { id: trade.id },
@@ -309,13 +320,30 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   if (trade.reentryCount >= reentryBudgetFor(tier).maxReentries) return; // budget used up between setting and now
   if (!pair) return;
 
+  const [portfolio, bought] = await Promise.all([
+    getPortfolioState(),
+    db.tradeExecution.aggregate({ where: { tradeId: trade.id, type: "BUY" }, _sum: { usdValue: true } }),
+  ]);
+  const costBasisUsd = bought._sum.usdValue ?? trade.positionSizeUsd;
+  const limit = singlePositionLimit(portfolio, token.chain, manualHold);
+  const { headroomUsd, reentryUsd } = reentryWithinLimitUsd({ pendingUsd: trade.pendingReentryUsd, costBasisUsd, limitUsd: limit.limitUsd });
+  const sizing = { tradeId: trade.id, pendingUsd: trade.pendingReentryUsd, costBasisUsd, limitUsd: limit.limitUsd, limit: limit.description, headroomUsd, reentryUsd };
+  if (reentryUsd < gasViableFloorUsd(token.chain)) {
+    await db.trade.update({
+      where: { id: trade.id },
+      data: { pendingReentryTargetMcap: null, pendingReentryUsd: null, pendingReentryExpiresAt: null, pendingReentryReason: null },
+    });
+    logger.info({ ...sizing, floorUsd: gasViableFloorUsd(token.chain) }, "pending re-entry dropped: what fits under the position's single-position limit is below the gas-viable floor");
+    return;
+  }
+  logger.info(sizing, reentryUsd < trade.pendingReentryUsd ? "re-entry clamped to the position's single-position limit" : "re-entry fits the position's single-position limit");
+
   // A fresh quote before every real buy, exactly like a first entry — never
   // trust the price/mcap in `pair` alone to imply slippage is acceptable.
-  const [circuitBreakersAll, portfolio, sellQuoteAvailable, buyEstimate] = await Promise.all([
+  const [circuitBreakersAll, sellQuoteAvailable, buyEstimate] = await Promise.all([
     checkCircuitBreakers(),
-    getPortfolioState(),
     isSellable(token.address, pair, token.chain, undefined),
-    getBuyEstimate(token.address, trade.pendingReentryUsd, pair, token.chain),
+    getBuyEstimate(token.address, reentryUsd, pair, token.chain),
   ]);
   // Scoped to this position's own chain — see entryMonitor.ts's identical
   // fix (confirmed live 2026-09-23: a Solana RPC outage must not block a
@@ -335,7 +363,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
     priceChange5mPercent: pair.priceChange5m,
     estimatedSlippageBps: buyEstimate.estimatedSlippageBps,
     estimatedPriceImpactPercent: buyEstimate.estimatedPriceImpactPercent,
-    positionSizeUsd: trade.pendingReentryUsd,
+    positionSizeUsd: reentryUsd,
     // A re-entry still has to fit the same deployable-capital bucket a fresh
     // trade would — the tier's maxPercentOfOriginal cap (reentryBudgetFor)
     // bounds this trade's own size, not the portfolio's overall exposure.
@@ -368,7 +396,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
 
   let fill: FillResult;
   try {
-    fill = await executeBuyFill(token.address, trade.pendingReentryUsd, pair, token.chain);
+    fill = await executeBuyFill(token.address, reentryUsd, pair, token.chain);
   } catch (err) {
     // Put the claim back so the next tick retries, same as before the claim existed.
     await db.trade.update({ where: { id: trade.id }, data: { ...pending, reentryCount: { decrement: 1 } } });
@@ -383,7 +411,7 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
       status: "CONFIRMED",
       txHash: fill.txHash,
       tokenAmount: fill.tokenAmount,
-      usdValue: trade.pendingReentryUsd,
+      usdValue: reentryUsd,
       actualPrice: fill.priceUsd,
       slippagePercent: fill.estimatedSlippageBps / 100,
       priceImpactPercent: fill.estimatedPriceImpactPercent,
@@ -394,9 +422,9 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
       confirmedAt: new Date(),
     },
   });
-  await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -trade.pendingReentryUsd, notes: `${fill.provider} re-entry — ${trade.pendingReentryReason ?? "AI-proposed dip buy"}` });
+  await recordLedgerEntry({ type: LedgerEntryType.BUY, tradeId: trade.id, amountUsd: -reentryUsd, notes: `${fill.provider} re-entry — ${trade.pendingReentryReason ?? "AI-proposed dip buy"}` });
   await recordLedgerEntry({ type: LedgerEntryType.GAS, tradeId: trade.id, amountUsd: -fill.gasCostUsd, notes: gasLedgerNote(fill) });
   attachPendingApprovalGas(fill, trade.id, buyExecution.id);
 
-  logger.info({ tradeId: trade.id, usdSpent: trade.pendingReentryUsd, tokenAmount: fill.tokenAmount, provider: fill.provider }, "re-entry buy executed — price reached the AI-proposed target");
+  logger.info({ tradeId: trade.id, usdSpent: reentryUsd, tokenAmount: fill.tokenAmount, provider: fill.provider }, "re-entry buy executed — price reached the AI-proposed target");
 }
