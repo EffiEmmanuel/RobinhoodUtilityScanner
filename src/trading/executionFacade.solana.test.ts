@@ -86,6 +86,23 @@ describe("closeTokenAccountAfterFullExit", () => {
     expect(result?.receipt.closeSkippedReason).toBe("still holds 3 raw units");
   });
 
+  it("gives up waiting after 15s so the other positions' checks aren't held up", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: (value: unknown) => void = () => {};
+      provider.closeEmptySolanaTokenAccount.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+      const pending = closeTokenAccountAfterFullExit(MINT, pair, "solana");
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await pending;
+      expect(result).toEqual({ gasCostUsd: 0, receipt: { closeSkippedReason: "close not finished within 15s; left booked as a cost" } });
+      // Landing late changes nothing booked.
+      finish({ status: "closed", signature: "late", refundLamports: RENT, feeLamports: 5_000 });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does nothing off Solana", async () => {
     expect(await closeTokenAccountAfterFullExit("0xabc", pair, "robinhood")).toBeUndefined();
     expect(provider.closeEmptySolanaTokenAccount).not.toHaveBeenCalled();

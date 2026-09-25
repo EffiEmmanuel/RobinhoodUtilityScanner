@@ -689,6 +689,8 @@ async function executeSolanaSellFill(tokenAddress: string, tokenAmount: number, 
   };
 }
 
+const ACCOUNT_CLOSE_TIMEOUT_MS = 15_000;
+
 /**
  * After a live Solana full exit that's already recorded: closes the emptied
  * token account and returns what that changed — the close fee minus the
@@ -702,7 +704,28 @@ export async function closeTokenAccountAfterFullExit(
   chain: string
 ): Promise<{ gasCostUsd: number; receipt: SolanaFillReceipt } | undefined> {
   if (chain !== "solana" || !isSolanaLiveModeReady()) return undefined;
-  const close = await closeEmptySolanaTokenAccount(tokenAddress).catch((err): TokenAccountCloseResult => ({ status: "skipped", reason: `close failed: ${String(err)}` }));
+  const closing = closeEmptySolanaTokenAccount(tokenAddress).catch((err): TokenAccountCloseResult => ({ status: "skipped", reason: `close failed: ${String(err)}` }));
+  // The position monitor checks every open trade in one sequential loop, and
+  // a confirmation can take until the blockhash expires (~60-90s) — too long
+  // to hold up every other position's stops. Past the ceiling the rent stays
+  // booked as a cost; if the close lands later the wallet has the refund
+  // anyway (P&L errs low), and the cleanup script sweeps any it missed.
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ACCOUNT_CLOSE_TIMEOUT_MS);
+  });
+  const outcome = await Promise.race([closing, timedOut]);
+  clearTimeout(timer);
+  if (outcome === "timeout") {
+    void closing.then((late) =>
+      logger.warn(
+        { tokenAddress, ...late },
+        "solana token-account close finished after the monitor moved on — any refund is in the wallet but not booked to the trade"
+      )
+    );
+    return { gasCostUsd: 0, receipt: { closeSkippedReason: `close not finished within ${ACCOUNT_CLOSE_TIMEOUT_MS / 1000}s; left booked as a cost` } };
+  }
+  const close = outcome;
   if (close.status !== "closed") {
     const reason = close.status === "skipped" ? close.reason : "not closed";
     logger.warn({ tokenAddress, reason }, "solana token account left open after a full exit — its rent stays a cost of the trade");
