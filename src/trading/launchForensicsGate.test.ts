@@ -156,6 +156,27 @@ describe("launchForensicsVerdict", () => {
     expect((await launchForensicsVerdict("c1", settings({ thresholds: { ...settings().thresholds, maxLaunchSlotBuySharePct: 0 } }))).passed).toBe(true);
   });
 
+  it("doesn't touch the database while every threshold is off (report-only)", async () => {
+    const { db } = await import("../db");
+    const findUnique = vi.mocked(db.launchForensicsSnapshot.findUnique);
+    findUnique.mockClear();
+    snapshots.set("c1", { candidateId: "c1", status: "READY", features: bundled });
+    const off = { maxFirst20BuyerSharePct: 0, maxLaunchSlotBuySharePct: 0, maxCreatorSoldPctOfPeak: 0, maxCreatorPriorDeadLaunches: 0, maxLinkedBuyerSharePct: 0 };
+    expect((await launchForensicsVerdict("c1", settings({ thresholds: off }))).passed).toBe(true);
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it("passes when the lookup itself fails", async () => {
+    const { db } = await import("../db");
+    vi.mocked(db.launchForensicsSnapshot.findUnique).mockRejectedValueOnce(new Error("db down"));
+    expect((await launchForensicsVerdict("c1", settings())).passed).toBe(true);
+  });
+
+  it("is on by default but gates nothing until a threshold is set", () => {
+    expect(launchForensicsSettings.enabled).toBe(true);
+    expect(Object.values(launchForensicsSettings.thresholds).every((t) => t === 0)).toBe(true);
+  });
+
   it("is a no-op when forensics are disabled", async () => {
     snapshots.set("c1", { candidateId: "c1", status: "READY", features: bundled });
     expect((await launchForensicsVerdict("c1", settings({ enabled: false }))).passed).toBe(true);

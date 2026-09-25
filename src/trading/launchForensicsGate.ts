@@ -35,7 +35,11 @@ function envBool(name: string, fallback: boolean): boolean {
 }
 
 export const launchForensicsSettings = {
-  enabled: envBool("LAUNCH_FORENSICS_ENABLED", false),
+  // On by default, report-only: every threshold below defaults to 0, so the
+  // loop only stores snapshots for later study. Worker B's replay (2026-09-25)
+  // found first-20 share >= 65% paid only on 09-16/17 and was flat after, so
+  // nothing gates until live data shows an edge that holds.
+  enabled: envBool("LAUNCH_FORENSICS_ENABLED", true),
   rpcUrl: process.env.FORENSICS_SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   /** For calls the main endpoint refuses (e.g. indexed lookups on a plan without them). */
   rpcFallbackUrl: process.env.FORENSICS_SOLANA_RPC_FALLBACK_URL || "https://api.mainnet-beta.solana.com",
@@ -228,12 +232,15 @@ export async function launchForensicsLoop(signal: { stopped: boolean }, deps: Fo
 /**
  * The entry check: the stored forensics against today's thresholds (so a
  * threshold change applies without re-reading). Passes when there's nothing
- * stored, the read failed, or no threshold is on.
+ * stored, the read failed, no threshold is on, or the lookup itself fails.
  */
 export async function launchForensicsVerdict(candidateId: string, settings: Settings = launchForensicsSettings): Promise<ConvictionResult> {
   const pass: ConvictionResult = { passed: true, failedChecks: [], reasons: [] };
-  if (!settings.enabled) return pass;
-  const snapshot = await db.launchForensicsSnapshot.findUnique({ where: { candidateId } });
+  if (!settings.enabled || Object.values(settings.thresholds).every((t) => t <= 0)) return pass;
+  const snapshot = await db.launchForensicsSnapshot.findUnique({ where: { candidateId } }).catch((err) => {
+    logger.warn({ candidateId, err: String(err) }, "launch forensics lookup failed — UNKNOWN, not blocking");
+    return null;
+  });
   if (!snapshot || snapshot.status !== "READY" || !snapshot.features) return pass;
   const verdict = evaluateLaunchForensics(snapshot.features as unknown as LaunchForensics, settings.thresholds);
   return { passed: verdict.passed, failedChecks: verdict.failedChecks.map((c) => `forensics:${c}`), reasons: verdict.reasons.map((r) => `launch forensics: ${r}`) };
