@@ -1,5 +1,5 @@
 import { logger } from "../logger";
-import { sendCircuitBreakerEmail } from "./notifications";
+import { sendCircuitBreakerEmail, sendLanePauseEmail } from "./notifications";
 import type { CircuitBreakerResult } from "./portfolio";
 
 /**
@@ -22,8 +22,22 @@ import type { CircuitBreakerResult } from "./portfolio";
  */
 export function createCircuitBreakerAlertTracker() {
   let lastMode: CircuitBreakerResult["mode"] | undefined;
+  // Chain+lane expectancy pauses (kpis.ts) seen on the last check — same
+  // rule as the mode: one email when a pause first appears, none while it
+  // stays, none when it lifts.
+  let lastLanePauses = new Set<string>();
 
   return function check(result: CircuitBreakerResult): void {
+    const pauseKey = (p: { chain: string; lane: string; strategyVersion: string }) => `${p.chain}|${p.lane}|${p.strategyVersion}`;
+    const newPauses = result.lanePauses.filter((p) => !lastLanePauses.has(pauseKey(p)));
+    lastLanePauses = new Set(result.lanePauses.map(pauseKey));
+    if (newPauses.length > 0) {
+      logger.warn({ pauses: newPauses }, "autonomous entries paused on negative rolling expectancy — emailing");
+      void sendLanePauseEmail({ reasons: newPauses.map((p) => p.reason) }).catch((err) =>
+        logger.error({ err: String(err) }, "failed to send expectancy-pause alert email")
+      );
+    }
+
     const mode = result.mode;
     const previousMode = lastMode;
     lastMode = mode;

@@ -499,6 +499,21 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     const tradeLane = normalizeTradeLane(planData.tradeLane ?? candidate.tradeLane);
     const conservative = circuitBreakers.mode === "CONSERVATIVE";
 
+    // Expectancy auto-pause (kpis.ts): this chain+lane's recent autonomous
+    // trades lost money on average. Held like a circuit-breaker pause — the
+    // entry stays pending — and before any quote or RPC work. A chain whose
+    // autonomous entries are off altogether is left to that check below, so
+    // its would-have-bought record still gets written.
+    const lanePause =
+      !manualEntryOverride && autonomousEntryAllowedOnChain(candidate.token.chain)
+        ? circuitBreakers.pausedLanes.find((p) => p.lane === tradeLane)
+        : undefined;
+    if (lanePause) {
+      await db.pendingEntry.update({ where: { id: entry.id }, data: { status: PendingEntryStatus.ACTIVE } });
+      logger.info({ pendingEntryId: entry.id, reasons: [lanePause.reason] }, "entry deferred (will retry)");
+      return;
+    }
+
     if (!manualEntryOverride) {
       const executionQuality = await evaluateExecutionQualityForEntry(candidate.token.address, candidate.token.chain);
       if (!executionQuality.passed) {

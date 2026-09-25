@@ -15,6 +15,9 @@ import { runBacktest, runEntryBacktest } from "./backtest";
 import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
 import { resolveEntryMode } from "./conservativeMode";
+import { getTradeKpis, currentTradeMode } from "./kpis";
+import { singlePositionLimit, autonomousEntryAllowedOnChain } from "./riskEngine";
+import type { PortfolioState, CircuitBreakerResult, ChainKey } from "./portfolio";
 import { LedgerEntryType, PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
 
 function startOfLocalDay(): Date {
@@ -65,6 +68,20 @@ async function getCheapCircuitBreakerSnapshot(): Promise<{
   return { openPositions, circuitBreakers: { paused: mode === "PAUSED", mode, reasons } };
 }
 
+/** Per chain: its equity, the capital bracket its next autonomous entry
+ * would be sized under, whether autonomous entries are on at all
+ * (AUTONOMOUS_ENTRY_CHAINS), and any lanes the expectancy auto-pause holds. */
+function autonomousSizingByChain(portfolio: PortfolioState, circuitBreakers: CircuitBreakerResult) {
+  const summary = (chain: ChainKey) => ({
+    equityUsd: portfolio.chains[chain].equityUsd,
+    cashUsd: portfolio.chains[chain].cashUsd,
+    autonomousEntries: autonomousEntryAllowedOnChain(chain),
+    bracket: singlePositionLimit(portfolio, chain, false).description,
+    pausedLanes: circuitBreakers.chains[chain].pausedLanes,
+  });
+  return { robinhood: summary("robinhood"), solana: summary("solana") };
+}
+
 /** Registers the trading extension's read/control endpoints onto the
  * existing API server (§78). No execution-trigger endpoints exist here —
  * there is nothing for a human or script to "fire" since everything is
@@ -109,6 +126,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
       mode: tradingConfig.mode,
       tradingEnabled: isTradingEnabled(),
       circuitBreakers,
+      autonomousSizing: autonomousSizingByChain(portfolio, circuitBreakers),
       portfolio: { ...portfolio, realizedPnlUsd, unrealizedPnlUsd, totalPnlUsd },
       // Per-chain position/PnL breakdown (see portfolio.ts's
       // getPortfolioByChain) — cash/equity above stays combined-only, this is
@@ -132,6 +150,28 @@ export function registerTradingRoutes(app: FastifyInstance): void {
           ready: isSolanaLiveModeReady(),
         },
       },
+    };
+  });
+
+  // Win rate, average win/loss, expectancy, profit factor and rolling
+  // expectancy per chain, lane, strategy version and origin (kpis.ts). All
+  // net of fees. ?mode=LIVE|SHADOW|PAPER|all, default the mode trading now.
+  app.get("/trading/kpis", async (req) => {
+    const { mode } = req.query as { mode?: string };
+    const tradeMode = mode === "all" ? undefined : mode === "LIVE" || mode === "SHADOW" || mode === "PAPER" ? mode : currentTradeMode();
+    const [groups, active, circuitBreakers] = await Promise.all([getTradeKpis({ mode: tradeMode }), getActiveStrategyVersion(), checkCircuitBreakers()]);
+    return {
+      mode: tradeMode ?? "all",
+      activeStrategyVersion: { id: active.id, version: active.version },
+      expectancyPause: { enabled: tradingConfig.expectancyPauseEnabled, windowTrades: tradingConfig.expectancyPauseWindowTrades },
+      lanePauses: circuitBreakers.lanePauses,
+      groups: groups.sort(
+        (a, b) =>
+          Number(b.strategyVersionId === active.id) - Number(a.strategyVersionId === active.id) ||
+          a.origin.localeCompare(b.origin) ||
+          a.chain.localeCompare(b.chain) ||
+          b.kpis.trades - a.kpis.trades
+      ),
     };
   });
 

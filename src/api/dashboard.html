@@ -1041,6 +1041,22 @@
         grid-template-columns: repeat(2, 1fr);
         gap: 10px;
       }
+      .chain-sizing {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--text-muted);
+        line-height: 1.5;
+      }
+      .chain-sizing strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .chain-sizing .paused-lane {
+        color: var(--bad);
+      }
+      tr.kpi-active td:first-child {
+        box-shadow: inset 3px 0 0 var(--accent);
+      }
       .chain-kpi {
         background: var(--surface);
         border-radius: 8px;
@@ -1427,6 +1443,34 @@
             </div>
             <div class="card">
               <div class="card-head">
+                <h2>Strategy KPIs</h2>
+                <span class="count-chip" id="kpi-version">&mdash;</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Chain</th>
+                      <th>Lane</th>
+                      <th>Version</th>
+                      <th>Origin</th>
+                      <th>Trades</th>
+                      <th>Win %</th>
+                      <th>Avg win</th>
+                      <th>Avg loss</th>
+                      <th>Win/loss</th>
+                      <th>Exp. / trade</th>
+                      <th>Exp. %</th>
+                      <th>Profit factor</th>
+                      <th>Rolling</th>
+                    </tr>
+                  </thead>
+                  <tbody id="kpi-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-head">
                 <h2>Discovery Activity</h2>
                 <span class="count-chip" id="activity-stats">0 seen</span>
               </div>
@@ -1719,6 +1763,8 @@
           positionsBody: document.getElementById("positions-body"),
           positionsCount: document.getElementById("positions-count"),
           closedBody: document.getElementById("closed-body"),
+          kpiBody: document.getElementById("kpi-body"),
+          kpiVersion: document.getElementById("kpi-version"),
           closedCount: document.getElementById("closed-count"),
           noTradeFeed: document.getElementById("no-trade-feed"),
           noTradeWindow: document.getElementById("no-trade-window"),
@@ -1890,8 +1936,25 @@
             '<div class="chain-kpis">' +
             kpis +
             "</div>" +
+            chainSizingHtml(cfg.sizing) +
             "</div>"
           );
+        }
+        // Whether the bot may open positions here by itself, the capital
+        // bracket its next one would be sized under, and any lane the
+        // expectancy auto-pause is holding.
+        function chainSizingHtml(sizing) {
+          if (!sizing) return "";
+          var line = sizing.autonomousEntries
+            ? "<strong>Autonomous entries: on</strong> &mdash; " + esc(sizing.bracket)
+            : "<strong>Autonomous entries: off</strong> &mdash; manual buys only (AUTONOMOUS_ENTRY_CHAINS); chain equity " +
+              fmtUsd(sizing.equityUsd);
+          var paused = (sizing.pausedLanes || [])
+            .map(function (p) {
+              return '<div class="paused-lane">Paused: ' + esc(p.reason) + "</div>";
+            })
+            .join("");
+          return '<div class="chain-sizing">' + line + paused + "</div>";
         }
         function esc(s) {
           if (s === null || s === undefined) return "";
@@ -2050,6 +2113,10 @@
             ),
             fetchJson("/learning/summary"),
             fetchJson("/trading/no-trade-diagnostics?hours=24&limit=60"),
+            // Never take the whole dashboard down over one card.
+            fetchJson("/trading/kpis").catch(function () {
+              return null;
+            }),
           ])
             .then(function (results) {
               state.connected = true;
@@ -2064,6 +2131,7 @@
                 tokens: results[6],
                 learning: results[7],
                 noTradeDiagnostics: results[8],
+                kpis: results[9],
               });
             })
             .catch(function (err) {
@@ -2223,11 +2291,13 @@
             gasEth !== null && gasEth !== undefined && p.ethPriceUsd
               ? fmtUsd(gasEth * p.ethPriceUsd)
               : null;
+          var sizing = s.autonomousSizing || {};
           var robinhoodPanel = {
             chain: "robinhood",
             chainLabel: "Robinhood Chain",
             ready: live.ready,
             stats: findChainStats("robinhood"),
+            sizing: sizing.robinhood,
             wallet: live.walletConfigured
               ? {
                   address: live.walletAddress,
@@ -2255,6 +2325,7 @@
             chainLabel: "Solana",
             ready: liveSolana.ready,
             stats: findChainStats("solana"),
+            sizing: sizing.solana,
             wallet: liveSolana.walletConfigured
               ? {
                   address: liveSolana.walletAddress,
@@ -2278,6 +2349,7 @@
           renderNoTradeDiagnostics(data.noTradeDiagnostics || null);
           renderPositions(data.positions || []);
           renderClosedTrades(data.closedTrades || []);
+          renderKpis(data.kpis);
           renderCandidates(
             (data.candidates && data.candidates.candidates) || [],
             (data.candidates && data.candidates.hasMore) || false
@@ -2372,6 +2444,56 @@
                 "<td>" +
                 fmtAgo(t.closedAt) +
                 "</td>" +
+                "</tr>"
+              );
+            })
+            .join("");
+        }
+
+        // Net of fees throughout (see kpis.ts). The active strategy
+        // version's rows come first and are marked; "Rolling" is the mean of
+        // the last N trades that the expectancy auto-pause watches, shown as
+        // a count until there are N.
+        function renderKpis(d) {
+          if (!d || !d.groups) {
+            els.kpiVersion.textContent = "unavailable";
+            els.kpiBody.innerHTML = '<tr class="empty-row"><td colspan="13">KPIs unavailable.</td></tr>';
+            return;
+          }
+          els.kpiVersion.textContent = "active " + d.activeStrategyVersion.version + " · " + d.mode;
+          if (!d.groups.length) {
+            els.kpiBody.innerHTML = '<tr class="empty-row"><td colspan="13">No closed trades with a known P&amp;L yet.</td></tr>';
+            return;
+          }
+          var ratio = function (n) {
+            return n === null || n === undefined ? "&mdash;" : n.toFixed(2);
+          };
+          var usd = function (n) {
+            return n === null || n === undefined ? "&mdash;" : fmtUsd(n);
+          };
+          els.kpiBody.innerHTML = d.groups
+            .map(function (g) {
+              var k = g.kpis;
+              var active = g.strategyVersionId === d.activeStrategyVersion.id;
+              var rolling =
+                k.rollingExpectancyUsd === null
+                  ? '<span title="needs ' + k.rollingWindow + ' trades">' + k.trades + "/" + k.rollingWindow + "</span>"
+                  : fmtUsdSpan(k.rollingExpectancyUsd);
+              return (
+                '<tr class="' + (active ? "kpi-active" : "") + '">' +
+                "<td>" + esc(g.chain) + "</td>" +
+                "<td>" + esc(g.lane) + "</td>" +
+                "<td>" + esc(g.strategyVersion) + "</td>" +
+                "<td>" + esc(g.origin) + "</td>" +
+                "<td>" + k.trades + "</td>" +
+                "<td>" + (k.winRatePercent === null ? "&mdash;" : k.winRatePercent.toFixed(0) + "%") + "</td>" +
+                "<td>" + usd(k.avgWinUsd) + "</td>" +
+                "<td>" + usd(k.avgLossUsd) + "</td>" +
+                "<td>" + ratio(k.winLossRatio) + "</td>" +
+                "<td>" + fmtUsdSpan(k.expectancyUsd) + "</td>" +
+                "<td>" + fmtPercentSpan(k.expectancyPercent) + "</td>" +
+                "<td>" + ratio(k.profitFactor) + "</td>" +
+                "<td>" + rolling + "</td>" +
                 "</tr>"
               );
             })

@@ -11,6 +11,7 @@ import { isSolanaWalletConfigured, getSolanaWalletBalanceSol } from "./live/sola
 import { summarizeError } from "../util/errors";
 import { withTimeout } from "../util/http";
 import { resolveEntryMode, type EntryMode, type EntryModeResult } from "./conservativeMode";
+import { getExpectancyPauses, type LanePause } from "./kpis";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const PAPER_WALLET_ADDRESS = "paper";
@@ -508,7 +509,11 @@ export interface CircuitBreakerResult {
   // Global reasons (kill switch, position cap, loss breakers) still apply to
   // every chain; only the two chain-specific gas/balance checks are scoped
   // here so one chain's infra problem can't block the other's entries.
-  chains: Record<"robinhood" | "solana", EntryModeResult>;
+  chains: Record<"robinhood" | "solana", EntryModeResult & { pausedLanes: LanePause[] }>;
+  // Expectancy auto-pauses (kpis.ts) in force, every chain — also split into
+  // each chain's pausedLanes above. A paused chain+lane takes no new
+  // autonomous entries; the chain's other lanes and manual buys carry on.
+  lanePauses: LanePause[];
 }
 
 export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
@@ -557,8 +562,12 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
     }
   }
 
-  const { dailyRealizedLossPercent, consecutiveLosses } = await getLossBreakerCounts(state.totalEquityUsd);
+  const [{ dailyRealizedLossPercent, consecutiveLosses }, lanePauses] = await Promise.all([
+    getLossBreakerCounts(state.totalEquityUsd),
+    getExpectancyPauses(),
+  ]);
   const lossInput = { dailyRealizedLossPercent, consecutiveLosses };
+  const pausedLanes = (chain: ChainKey) => lanePauses.filter((p) => p.chain === chain);
 
   // Top-level result — every reason folded together, exactly like before
   // this change, for the dashboard and anything else that just wants one
@@ -567,11 +576,17 @@ export async function checkCircuitBreakers(): Promise<CircuitBreakerResult> {
   const { mode, reasons } = resolveEntryMode({ hardPauseReasons: allHardPauseReasons, ...lossInput });
 
   const chains = {
-    robinhood: resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.robinhood], ...lossInput }),
-    solana: resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.solana], ...lossInput }),
+    robinhood: {
+      ...resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.robinhood], ...lossInput }),
+      pausedLanes: pausedLanes("robinhood"),
+    },
+    solana: {
+      ...resolveEntryMode({ hardPauseReasons: [...globalHardPauseReasons, ...chainHardPauseReasons.solana], ...lossInput }),
+      pausedLanes: pausedLanes("solana"),
+    },
   };
 
-  return { paused: mode === "PAUSED", mode, reasons, chains };
+  return { paused: mode === "PAUSED", mode, reasons, chains, lanePauses };
 }
 
 /**

@@ -1,14 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const sendCircuitBreakerEmail = vi.fn().mockResolvedValue(undefined);
-vi.mock("./notifications", () => ({ sendCircuitBreakerEmail: (...args: unknown[]) => sendCircuitBreakerEmail(...args) }));
+const sendLanePauseEmail = vi.fn().mockResolvedValue(undefined);
+vi.mock("./notifications", () => ({
+  sendCircuitBreakerEmail: (...args: unknown[]) => sendCircuitBreakerEmail(...args),
+  sendLanePauseEmail: (...args: unknown[]) => sendLanePauseEmail(...args),
+}));
 
 import { createCircuitBreakerAlertTracker } from "./circuitBreakerAlerts";
+import type { LanePause } from "./kpis";
 
-function result(mode: "NORMAL" | "CONSERVATIVE" | "PAUSED", reasons: string[] = ["some reason"]) {
-  const chain = { mode, reasons };
-  return { paused: mode === "PAUSED", mode, reasons, chains: { robinhood: chain, solana: chain } };
+function result(mode: "NORMAL" | "CONSERVATIVE" | "PAUSED", reasons: string[] = ["some reason"], lanePauses: LanePause[] = []) {
+  const chain = { mode, reasons, pausedLanes: [] };
+  return { paused: mode === "PAUSED", mode, reasons, chains: { robinhood: chain, solana: chain }, lanePauses };
 }
+
+const solanaTacticalPause: LanePause = { chain: "solana", lane: "MOMENTUM_TACTICAL", strategyVersion: "v1.8", reason: "solana MOMENTUM_TACTICAL lost money" };
 
 describe("circuit breaker alert tracker", () => {
   beforeEach(() => sendCircuitBreakerEmail.mockClear());
@@ -71,5 +78,31 @@ describe("circuit breaker alert tracker", () => {
     const check = createCircuitBreakerAlertTracker();
     check(result("PAUSED", ["global kill switch is engaged"]));
     expect(sendCircuitBreakerEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("expectancy pause alerts", () => {
+  beforeEach(() => {
+    sendCircuitBreakerEmail.mockClear();
+    sendLanePauseEmail.mockClear();
+  });
+
+  it("emails once when a lane pauses, and not again while it stays paused", () => {
+    const check = createCircuitBreakerAlertTracker();
+    check(result("NORMAL", []));
+    check(result("NORMAL", [], [solanaTacticalPause]));
+    check(result("NORMAL", [], [solanaTacticalPause]));
+    expect(sendLanePauseEmail).toHaveBeenCalledTimes(1);
+    expect(sendLanePauseEmail.mock.calls[0][0]).toEqual({ reasons: ["solana MOMENTUM_TACTICAL lost money"] });
+    // Not a circuit-breaker trip: the mode stayed NORMAL.
+    expect(sendCircuitBreakerEmail).not.toHaveBeenCalled();
+  });
+
+  it("emails again if the lane pauses again after lifting", () => {
+    const check = createCircuitBreakerAlertTracker();
+    check(result("NORMAL", [], [solanaTacticalPause]));
+    check(result("NORMAL", []));
+    check(result("NORMAL", [], [solanaTacticalPause]));
+    expect(sendLanePauseEmail).toHaveBeenCalledTimes(2);
   });
 });

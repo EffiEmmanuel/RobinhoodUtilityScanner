@@ -297,6 +297,14 @@ export const tradingConfig = {
 
   // Circuit breakers (§25).
   maxDailyRealizedLossPercent: num("MAX_DAILY_REALIZED_LOSS_PERCENT", 20),
+  // Expectancy auto-pause (kpis.ts): when the last this-many closed
+  // autonomous trades in a chain+lane, all under the active strategy
+  // version, average a loss after fees, new autonomous entries in that
+  // chain+lane stop (like a circuit breaker; see checkCircuitBreakers).
+  // Nothing pauses before that many exist, and a newly promoted version
+  // starts counting from zero. Manual buy-and-hold is never paused.
+  expectancyPauseEnabled: bool("EXPECTANCY_PAUSE_ENABLED", true),
+  expectancyPauseWindowTrades: num("EXPECTANCY_PAUSE_WINDOW_TRADES", 20),
   maxConsecutiveLosses: num("MAX_CONSECUTIVE_LOSSES", 3),
 
   // Conservative mode (user directive 2026-09-11). When one of the two LOSS

@@ -215,6 +215,17 @@ export async function sendCircuitBreakerEmail(input: { mode: "PAUSED" | "CONSERV
   );
 }
 
+export async function sendLanePauseEmail(input: { reasons: string[] }): Promise<void> {
+  await send(
+    "Autonomous entries PAUSED in a losing lane — negative rolling expectancy",
+    [
+      "The bot's recent trades in the lane(s) below lost money on average after fees, so it has stopped opening new positions there by itself. Other lanes, manual buys and every open position's exits carry on.",
+      "",
+      ...input.reasons.map((r) => `- ${r}`),
+    ].join("\n")
+  );
+}
+
 export async function sendMilestoneEmail(input: { targetUsd: number; portfolio: PortfolioState }): Promise<void> {
   await send(
     `Portfolio Milestone — Hit $${input.targetUsd.toLocaleString()}`,

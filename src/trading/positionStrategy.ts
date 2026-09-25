@@ -11,6 +11,7 @@ import { computeTechnicalFeatures, formatTechnicalFeaturesForPrompt, type Techni
 import { getActiveStrategyVersion, type ExitRules, type ProjectTier } from "./strategy";
 import { validateEntry, gasViableFloorUsd, singlePositionLimit } from "./riskEngine";
 import { recordLedgerEntry, checkCircuitBreakers, getPortfolioState } from "./portfolio";
+import { normalizeTradeLane } from "./tradeLane";
 import { executeBuyFill, getBuyEstimate, isSellable, gasLedgerNote, type FillResult } from "./executionFacade";
 import { LedgerEntryType } from "../generated/prisma";
 import { renderPositionChart } from "./chartVisionGate";
@@ -353,9 +354,16 @@ export async function checkAndExecutePendingReentry(trade: Trade, token: Token, 
   // fresh conservative-mode entry has to clear, so it waits until the loss
   // breakers reset.
   const conservative = circuitBreakers.mode === "CONSERVATIVE";
+  // Nor does the bot add to its own position in a chain+lane the
+  // expectancy auto-pause (kpis.ts) has stopped.
+  const lanePause = manualHold ? undefined : circuitBreakers.pausedLanes.find((p) => p.lane === normalizeTradeLane(trade.tradeLane));
   const entryCheck = validateEntry({
-    circuitBreakersPaused: circuitBreakers.mode === "PAUSED" || conservative,
-    circuitBreakerReasons: conservative ? [...circuitBreakers.reasons, "re-entries are off in conservative mode"] : circuitBreakers.reasons,
+    circuitBreakersPaused: circuitBreakers.mode === "PAUSED" || conservative || lanePause !== undefined,
+    circuitBreakerReasons: [
+      ...circuitBreakers.reasons,
+      ...(conservative ? ["re-entries are off in conservative mode"] : []),
+      ...(lanePause ? [lanePause.reason] : []),
+    ],
     currentLiquidityUsd: pair.liquidityUsd ?? 0,
     liquidityAtPlanUsd: pair.liquidityUsd ?? 0,
     sellQuoteAvailable,
