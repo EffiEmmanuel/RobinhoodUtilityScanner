@@ -15,7 +15,7 @@ import {
 import type { PendingEntry } from "../generated/prisma";
 import type { MarketPair } from "../dex/types";
 import { pollCandidateMarket, getRecentMcapRange, getRecentMcapTicks } from "./marketAnalysis";
-import { validateEntry, calculatePositionSize, gasViableFloorUsd, type RiskBucket } from "./riskEngine";
+import { validateEntry, calculatePositionSize, gasViableFloorUsd, autonomousEntryAllowedOnChain, type RiskBucket } from "./riskEngine";
 import { normalizeTradeLane, type TradeLane } from "./tradeLane";
 import { checkCircuitBreakers, getPortfolioState, recordLedgerEntry } from "./portfolio";
 import { getBuyEstimate, executeBuyFill, isSellable, canWalletTransferToken, type FillResult } from "./executionFacade";
@@ -591,6 +591,14 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
         });
     if (!manualEntryOverride && conservative && conviction && !conviction.passed) {
       await deferForConviction(entry, candidate.id, conviction, conservative);
+      return;
+    }
+
+    // Last, so the recorded reason means "cleared every entry check".
+    if (!manualEntryOverride && !autonomousEntryAllowedOnChain(candidate.token.chain)) {
+      await rejectEntry(entry, candidate.id, [
+        `autonomous entries are off on ${candidate.token.chain} (AUTONOMOUS_ENTRY_CHAINS=${tradingConfig.autonomousEntryChains.join(",")}); cleared every other entry check at mcap $${Math.round(mcap ?? 0).toLocaleString()}`,
+      ]);
       return;
     }
 

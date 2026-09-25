@@ -38,6 +38,15 @@ export function isBondingCurvePair(pair: { dexId?: string; liquidityUsd?: number
   return pair?.dexId === "pumpfun" && pair.liquidityUsd === undefined;
 }
 
+/**
+ * Whether the bot may open a position on this chain by itself — see
+ * autonomousEntryChains' config comment. Manual buy-and-hold entries never
+ * ask this.
+ */
+export function autonomousEntryAllowedOnChain(chain: string): boolean {
+  return tradingConfig.autonomousEntryChains.includes(chain.toLowerCase());
+}
+
 export interface EntryMarketInput {
   chain: string;
   marketCapUsd: number | undefined;

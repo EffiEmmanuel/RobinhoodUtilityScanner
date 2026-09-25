@@ -11,6 +11,7 @@ import {
   validateExit,
   estimatedSwapGasUsd,
   gasViableFloorUsd,
+  autonomousEntryAllowedOnChain,
 } from "./riskEngine";
 import type { SizingRules } from "./strategy";
 import type { PortfolioState } from "./portfolio";
@@ -240,6 +241,26 @@ function pinGasConfig() {
     Object.assign(tradingConfig, original);
   });
 }
+
+describe("autonomousEntryAllowedOnChain", () => {
+  const original = tradingConfig.autonomousEntryChains;
+  afterEach(() => {
+    tradingConfig.autonomousEntryChains = original;
+  });
+
+  it("allows Solana and not Robinhood by default", () => {
+    if (process.env.AUTONOMOUS_ENTRY_CHAINS) return; // a local override, not the default
+    expect(autonomousEntryAllowedOnChain("solana")).toBe(true);
+    expect(autonomousEntryAllowedOnChain("robinhood")).toBe(false);
+  });
+
+  it("follows the configured list, ignoring case", () => {
+    tradingConfig.autonomousEntryChains = ["solana", "robinhood"];
+    expect(autonomousEntryAllowedOnChain("Robinhood")).toBe(true);
+    tradingConfig.autonomousEntryChains = [];
+    expect(autonomousEntryAllowedOnChain("solana")).toBe(false);
+  });
+});
 
 describe("estimatedSwapGasUsd / gasViableFloorUsd", () => {
   pinGasConfig();

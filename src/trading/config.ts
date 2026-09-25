@@ -35,6 +35,15 @@ function bool(name: string, fallback: boolean): boolean {
   return v.toLowerCase() === "true" || v === "1";
 }
 
+function csv(name: string, fallback: string[]): string[] {
+  const v = process.env[name];
+  if (v === undefined || v.trim() === "") return fallback;
+  return v
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 type TradingMode = "DISABLED" | "PAPER" | "SHADOW" | "LIVE";
 
 function tradingMode(): TradingMode {
@@ -686,6 +695,19 @@ export const tradingConfig = {
   entryMaxPriceChange1hPercent: num("ENTRY_MAX_PRICE_CHANGE_1H_PERCENT", 1000),
   entryMinLiquidityToMarketCap: num("ENTRY_MIN_LIQUIDITY_TO_MARKET_CAP", 0.1),
   entryMaxLiquidityToMarketCap: num("ENTRY_MAX_LIQUIDITY_TO_MARKET_CAP", 0.6),
+  // Chains the bot may open new positions on by itself (comma-separated).
+  // Only the autonomous buy is skipped elsewhere: discovery, research,
+  // planning and outcome tracking keep running on every enabled chain, and
+  // manual buy-and-hold entries are unaffected. The skip happens at trigger
+  // time, after every other entry check, so the rejection records a real
+  // would-have-bought moment. Robinhood is off by default: in the
+  // 2026-09-24 study above, a sellable 2x within 24h happened for 2.6% of
+  // Robinhood candidates vs 16.5% on Solana, and the 63 closed autonomous
+  // Robinhood LIVE trades netted -$36.32 (17 wins +$24.60, 46 losses
+  // -$60.93; the 6 since the 09-18 utility pivot, -$3.32). Solana's own
+  // autonomous record is 3 trades, -$5.47 (one -$11.77 rug at ~40% size),
+  // too few to prove anything; the tilt rests on the candidate study.
+  autonomousEntryChains: csv("AUTONOMOUS_ENTRY_CHAINS", ["solana"]).map((chain) => chain.toLowerCase()),
   // A failing BUY doesn't retry the same candidate, so duration is
   // meaningless — what matters is the rate across all tokens. Several
   // failures in a short window means something systemic (RPC, gas, routing)
