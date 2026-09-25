@@ -16,6 +16,7 @@ import { getActiveStrategyVersion } from "./strategy";
 import { checkPortfolioMilestones } from "./milestones";
 import { rebuildCohortStats } from "./cohortStats";
 import { paperConfig, paperStrategiesLoop } from "./paper";
+import { launchForensicsLoop } from "./launchForensicsGate";
 
 const CANDIDATE_GENERATION_INTERVAL_SECONDS = 30;
 const OUTCOME_POLL_INTERVAL_SECONDS = 300; // 5 min — this is 15m/1h/6h/24h/48h bucketed data, no need to hammer it
@@ -282,6 +283,7 @@ export async function startTradingOrchestrator(): Promise<() => void> {
     // Paper strategies (off unless PAPER_STRATEGIES_ENABLED=true): their own
     // tables, quote-only, lowest rate-limit priority. See src/trading/paper/.
     ...(paperConfig.enabled ? [paperStrategiesLoop(signal)] : []),
+    launchForensicsLoop(signal),
   ];
   Promise.allSettled(loops);
 

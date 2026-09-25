@@ -1129,3 +1129,24 @@ model PaperEquitySnapshot {
 
   @@index([strategyId, capturedAt])
 }
+
+// Launch forensics (launchForensics.ts) read once per candidate, shortly
+// after it's created, by launchForensicsGate.ts's background loop — never in
+// the entry hot path. The entry check only reads this row; no row yet (or
+// status UNAVAILABLE) means UNKNOWN and never blocks. Keyed by candidateId
+// without a relation so TradeCandidate stays untouched.
+model LaunchForensicsSnapshot {
+  id          String @id @default(cuid())
+  candidateId String @unique
+  chain       String
+  token       String
+
+  status   String // READY | UNAVAILABLE
+  features Json? // LaunchForensics as read, bigints as strings
+  error    String?
+  rpcCalls Int?
+
+  computedAt DateTime @default(now())
+
+  @@index([computedAt])
+}

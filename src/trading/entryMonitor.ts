@@ -37,6 +37,7 @@ import {
 } from "./conservativeMode";
 import { getHolderSnapshot, evaluateHolderConcentration } from "./holderConcentration";
 import { getSolanaHolderSnapshot } from "./solanaHolderConcentration";
+import { launchForensicsVerdict } from "./launchForensicsGate";
 import { getCohortSizeMultiplier } from "./cohortStats";
 import { attachPendingApprovalGas } from "./approvalGas";
 import { getPublicClient } from "./live/wallet";
@@ -769,6 +770,17 @@ async function evaluateOnePendingEntry(entry: PendingEntry): Promise<boolean> {
     if (!manualEntryOverride && !agreement.passed) {
       await deferForConviction(entry, candidate.id, agreement, conservative);
       return;
+    }
+
+    // Launch forensics, read in the background when the candidate was created
+    // (launchForensicsGate.ts). Only stored positive evidence holds an entry;
+    // nothing stored yet is UNKNOWN and passes.
+    if (!manualEntryOverride) {
+      const forensics = await launchForensicsVerdict(candidate.id);
+      if (!forensics.passed) {
+        await deferForConviction(entry, candidate.id, forensics, conservative);
+        return;
+      }
     }
 
     // Holder concentration — every mode (user directive 2026-09-13: "how do
