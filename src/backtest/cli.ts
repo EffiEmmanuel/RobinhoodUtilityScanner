@@ -75,7 +75,8 @@ async function fetchAll(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
   const rand = mulberry32(20260925);
   const shuffled = snapshot.candidates.map((c) => ({ c, r: rand() }));
   const ordered = shuffled.sort((a, b) => rank(a.c) - rank(b.c) || a.r - b.r).map((x) => x.c);
-  const list = flags["only-traded"] ? ordered.filter((c) => c.trades.length > 0) : ordered;
+  const chain = typeof flags.chain === "string" ? flags.chain : undefined;
+  const list = ordered.filter((c) => (!flags["only-traded"] || c.trades.length > 0) && (!chain || c.chain === chain));
   // Pass "fine": 1m everywhere (and 5m for traded); pass "coarse": 5m everywhere.
   const pass = flags.pass === "coarse" ? "coarse" : "fine";
   let done = 0;
@@ -715,7 +716,7 @@ export async function main(argv: string[]): Promise<void> {
       console.log(`usage: tsx scripts/backtest-replay.ts <command> [flags]
 
   snapshot                     read the candidate universe + actual trades from prod (read-only) into the cache
-  fetch [--pass fine|coarse] [--only-traded]
+  fetch [--pass fine|coarse] [--chain c] [--only-traded]
                                fill the GeckoTerminal candle cache (~10 req/min, one request per pool per
                                pass). fine: 1m around decision/entry (traded also get 5m); coarse: 5m to +72h
   calibrate [--costs median|p75]
