@@ -15,7 +15,7 @@ import { runBacktest, runEntryBacktest } from "./backtest";
 import { trainOrAnalyze, exportFeatureDataset, computeOutcomeRateByTradeLane, computeOutcomeRateByQualificationPath, type OutcomeLabel } from "./learning";
 import { getActiveStrategyVersion } from "./strategy";
 import { resolveEntryMode } from "./conservativeMode";
-import { getTradeKpis, currentTradeMode } from "./kpis";
+import { getTradeKpis, currentTradeMode, LANE_PAUSE_RESUME_NOTE } from "./kpis";
 import { singlePositionLimit, autonomousEntryAllowedOnChain } from "./riskEngine";
 import type { PortfolioState, CircuitBreakerResult, ChainKey } from "./portfolio";
 import { LedgerEntryType, PendingEntryStatus, StrategyStatus, TradeCandidateStatus, TradeStatus, TradeDecision } from "../generated/prisma";
@@ -78,6 +78,7 @@ function autonomousSizingByChain(portfolio: PortfolioState, circuitBreakers: Cir
     autonomousEntries: autonomousEntryAllowedOnChain(chain),
     bracket: singlePositionLimit(portfolio, chain, false).description,
     pausedLanes: circuitBreakers.chains[chain].pausedLanes,
+    pauseResumeNote: LANE_PAUSE_RESUME_NOTE,
   });
   return { robinhood: summary("robinhood"), solana: summary("solana") };
 }
@@ -163,7 +164,7 @@ export function registerTradingRoutes(app: FastifyInstance): void {
     return {
       mode: tradeMode ?? "all",
       activeStrategyVersion: { id: active.id, version: active.version },
-      expectancyPause: { enabled: tradingConfig.expectancyPauseEnabled, windowTrades: tradingConfig.expectancyPauseWindowTrades },
+      expectancyPause: { enabled: tradingConfig.expectancyPauseEnabled, windowTrades: tradingConfig.expectancyPauseWindowTrades, resumeNote: LANE_PAUSE_RESUME_NOTE },
       lanePauses: circuitBreakers.lanePauses,
       groups: groups.sort(
         (a, b) =>

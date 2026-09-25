@@ -1954,6 +1954,7 @@
               return '<div class="paused-lane">Paused: ' + esc(p.reason) + "</div>";
             })
             .join("");
+          if (paused && sizing.pauseResumeNote) paused += "<div>" + esc(sizing.pauseResumeNote) + "</div>";
           return '<div class="chain-sizing">' + line + paused + "</div>";
         }
         function esc(s) {

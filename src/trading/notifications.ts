@@ -6,6 +6,7 @@ import type { Token, Trade } from "../generated/prisma";
 import type { PaperQuote } from "./execution";
 import { tradingConfig } from "./config";
 import type { PortfolioState } from "./portfolio";
+import { LANE_PAUSE_RESUME_NOTE } from "./kpis";
 
 // Every subject is tagged with the trading mode so a simulated trade can
 // never be mistaken for a real one in an inbox — there is no LIVE mode in
@@ -219,9 +220,11 @@ export async function sendLanePauseEmail(input: { reasons: string[] }): Promise<
   await send(
     "Autonomous entries PAUSED in a losing lane — negative rolling expectancy",
     [
-      "The bot's recent trades in the lane(s) below lost money on average after fees, so it has stopped opening new positions there by itself. Other lanes, manual buys and every open position's exits carry on.",
+      "The bot's recent trades in the lane(s) below lost money on average after fees, so it has stopped opening new positions there by itself. Other lanes and manual buys carry on.",
       "",
       ...input.reasons.map((r) => `- ${r}`),
+      "",
+      LANE_PAUSE_RESUME_NOTE,
     ].join("\n")
   );
 }

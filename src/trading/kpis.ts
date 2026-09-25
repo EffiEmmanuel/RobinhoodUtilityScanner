@@ -163,9 +163,13 @@ export function expectancyPauses(groups: KpiGroup[], activeStrategyVersionId: st
         `${g.chain} ${g.lane}: the last ${g.kpis.rollingWindow} autonomous trades under ${g.strategyVersion} averaged ` +
         `$${g.kpis.rollingExpectancyUsd!.toFixed(2)} a trade after fees (${g.kpis.trades} under this version, ` +
         `win rate ${g.kpis.winRatePercent!.toFixed(0)}%, profit factor ${g.kpis.profitFactor?.toFixed(2) ?? "n/a"}) — ` +
-        `new autonomous entries in this lane are paused while that holds (promoting a new strategy version starts a fresh count)`,
+        `new autonomous entries in this lane are paused`,
     }));
 }
+
+// A paused lane takes no new trades, so its record can't recover by itself.
+export const LANE_PAUSE_RESUME_NOTE =
+  "Stays paused until a new strategy version is promoted, or EXPECTANCY_PAUSE_ENABLED=false is set on Railway. Open positions still exit normally.";
 
 /** The expectancy pauses in force right now (EXPECTANCY_PAUSE_ENABLED). */
 export async function getExpectancyPauses(): Promise<LanePause[]> {
