@@ -1,6 +1,7 @@
 import { keccak256, encodeAbiParameters, getAddress, type PublicClient } from "viem";
 import { logger } from "../../logger";
 import { UNISWAP_V4_ADDRESSES, NATIVE_ETH_CURRENCY, POOL_MANAGER_ABI, STATE_VIEW_ABI, MAX_REASONABLE_POOL_FEE, DYNAMIC_FEE_FLAG } from "./contracts";
+import { loadDirectEthPool, saveDirectEthPool } from "./poolKeyStore";
 
 export interface PoolKey {
   currency0: `0x${string}`;
@@ -140,6 +141,36 @@ function rememberPoolDiscoveryFailure(key: string, err: unknown): void {
   poolDiscoveryFailureCache.set(key, { until: Date.now() + cooldownMs, error: String(err).replace(/\s+/g, " ").slice(0, 240) });
 }
 
+function rememberPool(key: string, token: `0x${string}`, allowHighFeePools: boolean, pool: PoolCandidate): void {
+  const entry = { poolKey: pool.poolKey, poolId: pool.poolId, initializedAtBlock: pool.initializedAtBlock };
+  poolKeyCache.set(key, entry);
+  saveDirectEthPool(token, allowHighFeePools, entry);
+}
+
+/**
+ * The pool an earlier process settled on (poolKeyStore.ts), so a restart
+ * doesn't re-scan Initialize logs for it. Dropped if that pool has no
+ * liquidity left, so a drained pool isn't carried forward across restarts.
+ */
+async function restoreStoredPool(client: PublicClient, key: string, token: `0x${string}`, allowHighFeePools: boolean): Promise<PoolCandidate | undefined> {
+  const stored = await loadDirectEthPool(token, allowHighFeePools);
+  if (!stored) return undefined;
+  try {
+    const liquidity = await client.readContract({
+      address: UNISWAP_V4_ADDRESSES.stateView as `0x${string}`,
+      abi: STATE_VIEW_ABI,
+      functionName: "getLiquidity",
+      args: [stored.poolId],
+    });
+    if (liquidity === 0n) return undefined;
+  } catch {
+    return undefined;
+  }
+  const entry = { poolKey: stored.poolKey, poolId: stored.poolId, initializedAtBlock: stored.initializedAtBlock };
+  poolKeyCache.set(key, entry);
+  return entry;
+}
+
 export async function discoverPool(
   client: PublicClient,
   tokenAddress: `0x${string}`,
@@ -157,7 +188,7 @@ export async function discoverPool(
     poolDiscoveryFailureCache.delete(key);
   }
 
-  const cached = poolKeyCache.get(key);
+  const cached = poolKeyCache.get(key) ?? (await restoreStoredPool(client, key, token, options.allowHighFeePools ?? false));
   if (cached) {
     // Liquidity is never cached — always re-read fresh (this is usually why
     // discoverPool is being called at all: to price against current depth).
@@ -200,11 +231,7 @@ export async function discoverPool(
       }));
       const withLiquidity = await pickPoolWithLiquidity(client, candidates, options);
       if (withLiquidity) {
-        poolKeyCache.set(key, {
-          poolKey: withLiquidity.poolKey,
-          poolId: withLiquidity.poolId,
-          initializedAtBlock: withLiquidity.initializedAtBlock,
-        });
+        rememberPool(key, token, options.allowHighFeePools ?? false, withLiquidity);
         return withLiquidity;
       }
     }
@@ -245,11 +272,7 @@ export async function discoverPool(
     throw err;
   }
   if (fallbackResult) {
-    poolKeyCache.set(key, {
-      poolKey: fallbackResult.poolKey,
-      poolId: fallbackResult.poolId,
-      initializedAtBlock: fallbackResult.initializedAtBlock,
-    });
+    rememberPool(key, token, options.allowHighFeePools ?? false, fallbackResult);
     return fallbackResult;
   }
 

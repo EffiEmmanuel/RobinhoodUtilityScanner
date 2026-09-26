@@ -33,6 +33,17 @@ export interface LiveQuote {
   gasEstimateUnits: bigint;
 }
 
+// Tokens a clean route search just came back empty for (not an RPC failure:
+// those throw). Finding routes means pool discovery, DexScreener listings and
+// Initialize-log scans, and it was being repeated every few minutes for the
+// same routeless tokens — 183 times for 12 tokens in 47 minutes (2026-09-26),
+// mostly outcome tracking's and planning's sell estimates. For 15 minutes a
+// sell-side estimate for such a token answers "no route" straight away.
+// Buy quotes always look (a waiting candidate's pool may open any minute),
+// an actual sell always looks (fresh), and any route found clears the entry.
+const NO_ROUTE_CACHE_MS = 15 * 60_000;
+const noRouteSince = new Map<string, number>();
+
 /**
  * Best real on-chain quote across every route from native ETH to the token
  * (see routing.ts) — `eth_call`-simulated via V4Quoter, never a state change.
@@ -41,10 +52,19 @@ export async function getLiveQuotes(
   tokenAddress: `0x${string}`,
   isBuy: boolean,
   amountIn: bigint,
-  options: { allowHighFeePools?: boolean } = {}
+  options: { allowHighFeePools?: boolean; fresh?: boolean } = {}
 ): Promise<LiveQuote[]> {
+  const key = tokenAddress.toLowerCase();
+  const noRouteAt = noRouteSince.get(key);
+  const recentNoRoute = noRouteAt !== undefined && Date.now() - noRouteAt < NO_ROUTE_CACHE_MS;
+  if (recentNoRoute && !isBuy && !options.fresh) return [];
   const ranked = await rankedRouteQuotes(getPublicClient(), tokenAddress, isBuy, amountIn, options);
-  if (ranked.length === 0) logger.warn({ tokenAddress }, "no live route found for this token — cannot quote");
+  if (ranked.length === 0) {
+    if (!recentNoRoute) logger.warn({ tokenAddress }, "no live route found for this token — cannot quote");
+    if (!recentNoRoute) noRouteSince.set(key, Date.now());
+  } else {
+    noRouteSince.delete(key);
+  }
   return ranked.map((q) => {
     const base = { route: q.route, routeLabel: routeLabel(q.route), amountOut: q.amountOut, gasEstimateUnits: q.gasEstimateUnits };
     if (isLegacyRoute(q.route)) return { ...base, poolId: q.route.pool };
@@ -263,7 +283,7 @@ export async function executeLiveSell(tokenAddress: `0x${string}`, tokenAmount: 
   if (!isWalletConfigured()) throw new Error("BOT_WALLET_PRIVATE_KEY is not set — cannot execute a live sell");
   // Exits may route through a predatory-fee pool when it's the only
   // venue — see DiscoverPoolOptions.allowHighFeePools. Entries never do.
-  const quotes = await getLiveQuotes(tokenAddress, false, tokenAmount, { allowHighFeePools: true });
+  const quotes = await getLiveQuotes(tokenAddress, false, tokenAmount, { allowHighFeePools: true, fresh: true });
   if (quotes.length === 0) throw new Error(`no live quote available for ${tokenAddress}`);
 
   // v2/v3 (SwapRouter02) pulls the token with a plain ERC20 approval; v4

@@ -1150,3 +1150,37 @@ model LaunchForensicsSnapshot {
 
   @@index([computedAt])
 }
+
+// Uniswap v4 pool keys found on-chain (routing.ts's resolvePoolKey and
+// on-chain pool search), kept across restarts so a deploy doesn't re-scan
+// PoolManager's Initialize logs for pools it already knew. A pool's key
+// never changes once it's initialized. Written and read by
+// live/poolKeyStore.ts, best-effort: a miss here only means a fresh lookup.
+model V4PoolKey {
+  poolId      String   @id // lowercase 0x-prefixed 32-byte id
+  currency0   String
+  currency1   String
+  fee         Int
+  tickSpacing Int
+  hooks       String
+  createdAt   DateTime @default(now())
+}
+
+// The direct native-ETH pool poolDiscovery.ts settled on for a token (one
+// choice for entries, one for exits, which may use a high-fee pool), kept
+// across restarts for the same reason as V4PoolKey. A restored choice is
+// dropped if its pool has no liquidity left.
+model DirectEthPool {
+  tokenAddress       String // lowercase
+  allowHighFeePools  Boolean
+  poolId             String
+  currency0          String
+  currency1          String
+  fee                Int
+  tickSpacing        Int
+  hooks              String
+  initializedAtBlock BigInt?
+  createdAt          DateTime @default(now())
+
+  @@id([tokenAddress, allowHighFeePools])
+}

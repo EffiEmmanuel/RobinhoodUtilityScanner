@@ -22,6 +22,7 @@ import {
   isRouterAllowed,
 } from "./contracts";
 import { discoverPool, isPoolDiscoveryInconclusiveError, type PoolKey } from "./poolDiscovery";
+import { loadPoolKey, savePoolKey } from "./poolKeyStore";
 import type { PathKey } from "./swapEncoding";
 
 /**
@@ -268,6 +269,11 @@ async function resolvePoolKey(client: PublicClient, poolId: `0x${string}`, creat
   const cached = poolKeyById.get(id);
   if (cached) return cached;
   if ((unresolvablePoolUntil.get(id) ?? 0) > Date.now()) return undefined;
+  const stored = await loadPoolKey(id);
+  if (stored && same(computePoolId(stored), poolId)) {
+    poolKeyById.set(id, stored);
+    return stored;
+  }
 
   const [currency0, currency1, fee, tickSpacing, hooks] = await client.readContract({
     address: UNISWAP_V4_ADDRESSES.positionManager as `0x${string}`,
@@ -288,6 +294,7 @@ async function resolvePoolKey(client: PublicClient, poolId: `0x${string}`, creat
     return undefined;
   }
   poolKeyById.set(id, key);
+  savePoolKey(id, key);
   return key;
 }
 
@@ -518,6 +525,7 @@ export async function onChainV4Pools(client: PublicClient, token: `0x${string}`)
     if (r.status !== "fulfilled" || r.value === 0n) return;
     const { id, key: poolKey } = found[i];
     poolKeyById.set(id.toLowerCase(), poolKey);
+    savePoolKey(id, poolKey);
     pools.push({ pool: { poolKey, poolId: id }, counter: otherCurrency(poolKey, token), liquidityUsd: 0 });
   });
   onChainV4Cache.set(key, { at: Date.now(), pools });
