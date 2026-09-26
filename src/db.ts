@@ -1,3 +1,5 @@
+// First, before anything opens a connection — see netDefaults.ts.
+import "./netDefaults";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "./generated/prisma";
 import { config } from "./config";
