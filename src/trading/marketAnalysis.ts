@@ -184,7 +184,8 @@ export async function computeTechnicalFeatures(tokenId: string, latestPair: Mark
     supportResistanceSource: "SNAPSHOT_POLLING",
     currentMcap: latestPair?.marketCapUsd ?? mcaps[mcaps.length - 1],
     liquidityToMcapRatio:
-      latestPair?.liquidityUsd !== undefined && latestPair?.marketCapUsd
+      // Missing liquidity (0 or none reported) is unknown, not a 0 ratio.
+      latestPair?.liquidityUsd && latestPair.liquidityUsd > 0 && latestPair?.marketCapUsd
         ? latestPair.liquidityUsd / latestPair.marketCapUsd
         : undefined,
     priceChange5mPercent: latestPair?.priceChange5m,

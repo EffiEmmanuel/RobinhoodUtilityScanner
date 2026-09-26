@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { liquidityWaitDecision, tacticalScoutActionForWatchOnly } from "./planning";
+import { liquidityWaitDecision, tacticalScoutActionForWatchOnly, summarizeMarket } from "./planning";
+import { TRADE_ANALYSIS_SYSTEM } from "./prompts";
 import type { CandidateRiskResult } from "./riskEngine";
 import { tradingConfig } from "./config";
 import { TradePlanAction } from "../generated/prisma";
@@ -136,5 +137,36 @@ describe("tacticalScoutActionForWatchOnly", () => {
     });
 
     expect(result).toBeUndefined();
+  });
+});
+
+describe("summarizeMarket (the planner's market block)", () => {
+  it("writes a bonding curve's liquidity as UNKNOWN, never $0", () => {
+    const text = summarizeMarket({ mcap: 40_000, liquidityUsd: undefined, onBondingCurve: true });
+    expect(text).toContain("Liquidity: UNKNOWN (pump.fun bonding curve");
+    expect(text).not.toMatch(/Liquidity: \$0/);
+  });
+
+  it("writes a pool with no reported liquidity as UNKNOWN, including a reported 0", () => {
+    for (const liquidityUsd of [undefined, 0]) {
+      const text = summarizeMarket({ mcap: 40_000, liquidityUsd, onBondingCurve: false });
+      expect(text).toContain("Liquidity: UNKNOWN (DexScreener reports none");
+      expect(text).not.toMatch(/\$0\b/);
+    }
+  });
+
+  it("reports real liquidity, and says when a live quote confirmed our minimum position executes", () => {
+    expect(summarizeMarket({ mcap: 40_000, liquidityUsd: 12_345, onBondingCurve: false })).toContain("Liquidity: $12,345");
+    expect(summarizeMarket({ mcap: 40_000, liquidityUsd: undefined, onBondingCurve: false, executableAtMinimumSize: true })).toContain(
+      "A live on-chain quote confirmed our minimum position executes"
+    );
+  });
+});
+
+describe("TRADE_ANALYSIS_SYSTEM", () => {
+  it("tells the planner missing liquidity is unknown, not a reason to reject", () => {
+    expect(TRADE_ANALYSIS_SYSTEM).toContain("Absent liquidity data is UNKNOWN, not zero. Do not reject on it or on having few snapshots.");
+    expect(TRADE_ANALYSIS_SYSTEM).toContain("Executability is already verified.");
+    expect(TRADE_ANALYSIS_SYSTEM).toContain("falling knife");
   });
 });

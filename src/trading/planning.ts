@@ -138,7 +138,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
         await db.tradeDecisionSnapshot.update({ where: { id: existingWait.id }, data: { deterministicRules } });
       } else {
         await recordDecision(candidate.id, null, TradeDecision.WAIT, "planning_retry", strategy.id, {
-          market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+          market: summarizeMarket({ mcap: market.primaryPair?.marketCapUsd, liquidityUsd: market.primaryPair?.liquidityUsd, onBondingCurve }),
           project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
           technical,
           walletSignals,
@@ -170,7 +170,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
       ...utilityGate.reasons,
     ];
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
-      market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+      market: summarizeMarket({ mcap: market.primaryPair?.marketCapUsd, liquidityUsd: market.primaryPair?.liquidityUsd, onBondingCurve }),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       walletSignals,
@@ -194,7 +194,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
     : [];
   if (marketFilterReasons.length > 0) {
     await recordDecision(candidate.id, null, TradeDecision.SKIP, "planning", strategy.id, {
-      market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+      market: summarizeMarket({ mcap: market.primaryPair?.marketCapUsd, liquidityUsd: market.primaryPair?.liquidityUsd, onBondingCurve }),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       walletSignals,
@@ -217,7 +217,13 @@ export async function planCandidate(candidateId: string): Promise<void> {
         researchConfidence: candidate.researchConfidence ?? 0,
         tradeLane: lane.tradeLane,
         laneReasons: lane.reasons,
-        marketText: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd, market.primaryPair?.priceUsd, executableAtMinimumSize),
+        marketText: summarizeMarket({
+          mcap: market.primaryPair?.marketCapUsd,
+          liquidityUsd: market.primaryPair?.liquidityUsd,
+          onBondingCurve,
+          price: market.primaryPair?.priceUsd,
+          executableAtMinimumSize,
+        }),
         technicalText: formatTechnicalFeaturesForPrompt(technical),
         walletSignalsText: formatWalletSignalsForPrompt(walletSignals),
       }),
@@ -342,7 +348,7 @@ export async function planCandidate(candidateId: string): Promise<void> {
     "planning",
     strategy.id,
     {
-      market: summarizeMarket(market.primaryPair?.marketCapUsd, liquidityUsd),
+      market: summarizeMarket({ mcap: market.primaryPair?.marketCapUsd, liquidityUsd: market.primaryPair?.liquidityUsd, onBondingCurve }),
       project: { qualityScore: candidate.qualityScore, researchConfidence: candidate.researchConfidence, tradeLane: lane.tradeLane, laneReasons: lane.reasons },
       technical,
       aiAnalysis: analysis,
@@ -565,12 +571,33 @@ function strategyTtlMs(strategy: { configuration: unknown }): number {
   return (strategyConfig.defaultEntryPlanTtlMinutes ?? tradingConfig.defaultEntryPlanTtlMinutes) * 60_000;
 }
 
-function summarizeMarket(mcap: number | undefined, liquidity: number, price?: number, executableAtMinimumSize?: boolean): string {
+/**
+ * The planner's market block. Liquidity DexScreener doesn't report — a
+ * pump.fun bonding curve, or a pool it hasn't indexed yet — is written as
+ * UNKNOWN with its source, never as $0: the planner read "$0" as an
+ * execution hazard and blocked winners on it (09-26 review of 20 blocked
+ * paper trades: that argument covered 12 of them at a mean of -19%, vs
+ * -14.6% for everything, and blocked two +57%/+63% runs). Executability is
+ * checked separately, on-chain.
+ */
+export function summarizeMarket(input: {
+  mcap: number | undefined;
+  liquidityUsd: number | undefined;
+  onBondingCurve: boolean;
+  price?: number;
+  executableAtMinimumSize?: boolean;
+}): string {
+  const { mcap, liquidityUsd, onBondingCurve, price, executableAtMinimumSize } = input;
+  const liquidityLine = onBondingCurve
+    ? "Liquidity: UNKNOWN (pump.fun bonding curve: DexScreener reports no pool liquidity for these; not zero)"
+    : liquidityUsd === undefined || !(liquidityUsd > 0)
+      ? "Liquidity: UNKNOWN (DexScreener reports none for this pool yet, typical of a newly created or unindexed pool; not zero)"
+      : `Liquidity: $${Math.round(liquidityUsd).toLocaleString()} (DexScreener's reading of the pool we execute through)`;
   const parts = [
     mcap !== undefined ? `Market cap: $${Math.round(mcap).toLocaleString()}` : "Market cap: unknown",
-    `Liquidity: $${Math.round(liquidity).toLocaleString()}`,
+    liquidityLine,
     executableAtMinimumSize
-      ? "Note: that liquidity figure is DexScreener's reading of the one pool we execute through, and badly understates real depth on this chain — a live on-chain quote just confirmed our position size buys within the price-impact limit and can be sold back, so don't treat the low figure as thin liquidity."
+      ? "A live on-chain quote confirmed our minimum position executes: it buys within the price-impact limit and can be sold back. DexScreener's liquidity figure badly understates real depth on this chain, so don't treat a low or missing figure as thin liquidity."
       : undefined,
     price !== undefined ? `Price: $${price}` : undefined,
   ].filter(Boolean);

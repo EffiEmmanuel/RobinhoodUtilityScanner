@@ -61,7 +61,14 @@ WAIT_FOR_ENTRY on a level price may never revisit.
 
 Some inputs may show LOW confidence because we have only just started watching this token — do not
 invent precision the data doesn't support. A token can be a good project and still be a bad trade
-right now (already extended, thin liquidity, no real trading activity yet).
+right now (already extended, no real trading activity yet).
+
+Absent liquidity data is UNKNOWN, not zero. Do not reject on it or on having few snapshots.
+Executability is already verified. Judge the setup on price structure (falling knife vs extended at
+the high) and the evidence you do have. A pump.fun bonding curve or a newly created pool routinely
+shows no liquidity figure at all. A price still making lower lows with sellers in control (a falling
+knife) and a price sitting at its high right after a vertical run (extended) remain good reasons to
+wait or pass; missing liquidity numbers and a short history are not.
 
 For MOMENTUM_TACTICAL candidates, prefer cleaner entries, lower confidence, and faster de-risking
 language unless real market structure is exceptional. Do not call a tactical candidate a verified
