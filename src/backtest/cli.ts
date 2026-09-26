@@ -7,7 +7,7 @@ import { asPaperTrade, type FidelityPair, loadPaperBook, type PaperBook, summari
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
-import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAULTS, type SurvivorParams } from "./entries";
+import { atActualEntry, atDecision, atSignal, type EntryStrategy, parseSignalRows, survivor, SURVIVOR_DEFAULTS, type SurvivorParams } from "./entries";
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
@@ -1148,6 +1148,71 @@ async function paperFidelityCmd(snapshot: UniverseSnapshot, flags: CliArgs["flag
   console.log(out.join("\n"));
 }
 
+/**
+ * C2 smart-wallet signals: (1) does a signal pick better candidates? At
+ * decision-time entry, signal-present vs absent (kept minus removed, as a
+ * filter would). (2) does waiting for the signal help? The same candidates
+ * entered at the signal vs at decision, paired. Both wick modes, date halves.
+ */
+async function signalsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const file = typeof flags.table === "string" ? flags.table : undefined;
+  if (!file) throw new Error("signals needs --table <C2 signal table .json>");
+  const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>[] | { rows: Record<string, unknown>[] };
+  const signals = parseSignalRows(Array.isArray(raw) ? raw : raw.rows, typeof flags.field === "string" ? flags.field : undefined);
+  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const exit = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const refSize = Number(flags["ref-size"] ?? 1.25);
+  const getSeries = seriesLoader(geckoClient(true));
+  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain }));
+  const sorted = universe.map((c) => c.createdAt).sort((a, b) => a - b);
+  const split = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  const withSignal = universe.filter((c) => signals.has(c.candidateId));
+  const out: string[] = [
+    `## C2 signals, ${chain} (${exit.name} exits, ${usd(refSize)} positions)`,
+    "",
+    `${signals.size} signals in the table; ${withSignal.length} of ${universe.length} ${chain} candidates have one (${withSignal.filter((c) => signals.get(c.candidateId)! < c.createdAt).length} fired before the decision and enter at it).`,
+    "",
+  ];
+  const rows: (string | number)[][] = [];
+  for (const mode of ["worst", "close"] as const) {
+    const cfg = { name: exit.name, exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, intrabar: mode };
+    const atDec = (await runStrategy(universe, getSeries, { ...cfg, entry: atDecision() })).filter((r) => r.valued);
+    const atSig = (await runStrategy(withSignal, getSeries, { ...cfg, entry: atSignal(signals) })).filter((r) => r.valued);
+    for (const [label, keep] of [
+      ["all", () => true],
+      ["early half", (c: UniverseCandidate) => c.createdAt < split],
+      ["late half", (c: UniverseCandidate) => c.createdAt >= split],
+    ] as const) {
+      const dec = atDec.filter((r) => keep(r.candidate));
+      const yes = dec.filter((r) => signals.has(r.candidate.candidateId)).map((r) => r.valued!.netPct);
+      const no = dec.filter((r) => !signals.has(r.candidate.candidateId)).map((r) => r.valued!.netPct);
+      const ci = bootstrapDiffCI(yes, no);
+      const paired = summarizePairs(label, pairRows(dec.filter((r) => signals.has(r.candidate.candidateId)), atSig.filter((r) => keep(r.candidate))));
+      rows.push([
+        mode,
+        label,
+        `${yes.length} with / ${no.length} without`,
+        yes.length && no.length ? `${pct(mean(yes) - mean(no))} [${pct(ci[0])}, ${pct(ci[1])}]` : "n/a",
+        `${pct(mean(yes))}`,
+        paired.n ? `${pct(paired.diffMeanPct)} [${pct(paired.diffCI90[0])}, ${pct(paired.diffCI90[1])}] ${paired.bBetter}/${paired.bWorse} n=${paired.n}` : "n/a",
+        paired.n ? pct(paired.bMeanPct) : "n/a",
+      ]);
+    }
+    if (mode === "worst") {
+      const best = atSig.sort((a, b) => b.valued!.netPct - a.valued!.netPct).slice(0, 8);
+      out.push(`Best entries at the signal (worst-case wicks): ${best.map((r) => `${r.candidate.symbol ?? "?"} ${pct(r.valued!.netPct, 0)}`).join(", ")}`, "");
+    }
+  }
+  out.push(
+    table(
+      ["wicks", "dates", "candidates", "signal picks better? with - without, at decision", "with signal, at decision", "waiting for it: at signal - at decision (paired)", "with signal, at signal"],
+      rows
+    )
+  );
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1192,6 +1257,10 @@ export async function main(argv: string[]): Promise<void> {
       await paperFidelityCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
       return;
     }
+    case "signals": {
+      await signalsCmd(await getSnapshot(false), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1231,6 +1300,9 @@ export async function main(argv: string[]): Promise<void> {
   paper-fidelity [--min 30] [--refresh-universe] [--cached]
                                replay each paper strategy's closed positions (read-only paper book) at the
                                paper entry, fill and size, and compare trade by trade: the sim's calibration check
+  signals --table <C2 json> [--field firedAt] [--chain solana]
+                               C2 signals: do signal candidates do better at decision, and does entering at
+                               the signal beat entering at decision (paired)? Both wick modes, date halves
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

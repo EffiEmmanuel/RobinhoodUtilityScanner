@@ -106,3 +106,33 @@ export function survivor(p: SurvivorParams): EntryStrategy {
     },
   };
 }
+
+/**
+ * Enter when an external signal fired (e.g. C2's smart-wallet buys), given
+ * as candidateId -> unix seconds. A signal before the decision time enters
+ * at the decision: the bot can't act on a candidate it hasn't created yet.
+ */
+export function atSignal(signals: Map<string, number>, label = "signal"): EntryStrategy {
+  return {
+    name: `at-${label}`,
+    decide: ({ candidate }) => {
+      const ts = signals.get(candidate.candidateId);
+      if (ts === undefined) return { skip: `no ${label}` };
+      return { ts: Math.max(ts, candidate.createdAt), note: ts < candidate.createdAt ? `${label} before decision` : undefined };
+    },
+  };
+}
+
+/** Reads a signal table: rows with candidateId and a fired-at time (unix seconds, ms, or ISO). */
+export function parseSignalRows(rows: Record<string, unknown>[], field?: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const id = r.candidateId;
+    const raw = field ? r[field] : (r.firedAt ?? r.firedAtUnix ?? r.fired_at ?? r.signalAt ?? r.ts);
+    if (typeof id !== "string" || raw === null || raw === undefined || raw === "") continue;
+    let ts = typeof raw === "number" ? raw : Number.isFinite(Number(raw)) ? Number(raw) : Date.parse(String(raw)) / 1000;
+    if (ts > 1e11) ts /= 1000; // milliseconds
+    if (Number.isFinite(ts)) out.set(id, Math.min(out.get(id) ?? Infinity, ts));
+  }
+  return out;
+}

@@ -6,7 +6,7 @@ import { exitCategory, fillPrice, fillSamples, calibrateChain, costModelFrom } f
 import { type Candle, GeckoTerminalClient, candleAt, mergePages, parseOhlcvList, stitchSeries } from "./candles";
 import { parseArgs, universeFilter } from "./cli";
 import { buyImpactPct, liquidityAt, sellImpactPct } from "./costs";
-import { atDecision, historyView, survivor, SURVIVOR_DEFAULTS } from "./entries";
+import { atDecision, atSignal, historyView, parseSignalRows, survivor, SURVIVOR_DEFAULTS } from "./entries";
 import type { SimResult } from "./simulate";
 import { bootstrapDiffCI, bootstrapMeanCI, simulatePortfolio, tradeStats } from "./stats";
 import { gasNetOfRent, loadUniverse, parsePrimaryPair, type UniverseCandidate } from "./universe";
@@ -272,6 +272,28 @@ describe("survivor entry", () => {
     const upToCheck = candles.filter((c) => c.t + c.d <= T0 + 6 * H);
     // Same history up to the check, different future: the pre-check decision inputs are identical.
     expect(survivor(params).decide({ candidate: cand, closedBy: historyView(upToCheck) })).toEqual({ skip: "no breakout" });
+  });
+});
+
+describe("signal entries", () => {
+  it("parses fired-at times in seconds, milliseconds or ISO, keeping each candidate's first", () => {
+    const m = parseSignalRows([
+      { candidateId: "a", firedAt: T0 + 100 },
+      { candidateId: "a", firedAt: (T0 + 50) * 1000 },
+      { candidateId: "b", firedAt: new Date((T0 + 10) * 1000).toISOString() },
+      { candidateId: "c", firedAt: "" },
+    ]);
+    expect([...m.entries()]).toEqual([
+      ["a", T0 + 50],
+      ["b", T0 + 10],
+    ]);
+  });
+  it("enters at the signal, never before the candidate exists", () => {
+    const e = atSignal(new Map([["a", T0 + 300], ["b", T0 - 60]]));
+    const c = (candidateId: string) => ({ candidateId, createdAt: T0 }) as UniverseCandidate;
+    expect(e.decide({ candidate: c("a"), closedBy: () => [] })).toEqual({ ts: T0 + 300, note: undefined });
+    expect(e.decide({ candidate: c("b"), closedBy: () => [] })).toEqual({ ts: T0, note: "signal before decision" });
+    expect(e.decide({ candidate: c("x"), closedBy: () => [] })).toEqual({ skip: "no signal" });
   });
 });
 
