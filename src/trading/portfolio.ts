@@ -63,7 +63,10 @@ export async function ensurePaperWalletSeeded(): Promise<void> {
 //     stale is far more honest than the ledger-sum fallback, which can be
 //     stale by days and silently ignores ETH price movement entirely.
 const ETH_PRICE_CANDIDATE_TOKENS = 10;
-const ETH_PRICE_CACHE_MAX_AGE_MS = 30 * 60_000;
+// How long the last good ETH/USD rate stands in for a fresh one, for both
+// the live fetch below and the cached reads equity uses. Past it, EVM cash
+// is omitted from equity rather than valued at an arbitrarily old rate.
+export const ETH_PRICE_CACHE_MAX_AGE_MS = 15 * 60_000;
 let cachedEthPriceUsd: { rate: number; at: number } | undefined;
 
 /**
@@ -185,8 +188,9 @@ export async function getSolPriceUsd(): Promise<number | undefined> {
  * (nothing fetched successfully yet this process) — callers already have
  * their own documented fallback for that (see getCashUsd).
  */
-export function getCachedEthPriceUsd(): number | undefined {
-  return cachedEthPriceUsd?.rate;
+export function getCachedEthPriceUsd(now: number = Date.now()): number | undefined {
+  if (!cachedEthPriceUsd || now - cachedEthPriceUsd.at > ETH_PRICE_CACHE_MAX_AGE_MS) return undefined;
+  return cachedEthPriceUsd.rate;
 }
 export function getCachedSolPriceUsd(): number | undefined {
   return cachedSolPriceUsd?.rate;
@@ -220,6 +224,19 @@ export function startBackgroundPriceRefresh(): Promise<void> {
 /** True only when Solana trading is both enabled AND actually has a signer configured. */
 function isSolanaLiveReady(): boolean {
   return config.solanaTradingEnabled && isSolanaWalletConfigured();
+}
+
+// Whether each wallet's cash is currently left out of equity for want of a
+// price. Equity is read every few seconds, so this logs once when that
+// starts and once when it ends, not on every read (it logged 229 times in
+// ~15 minutes on 2026-09-25).
+const cashOmitted: Record<"robinhood" | "solana", boolean> = { robinhood: false, solana: false };
+export function noteCashOmitted(chain: "robinhood" | "solana", omitted: boolean): void {
+  if (cashOmitted[chain] === omitted) return;
+  cashOmitted[chain] = omitted;
+  const unit = chain === "solana" ? "SOL" : "ETH";
+  if (omitted) logger.warn({ chain }, `live ${chain} wallet balance read but no current ${unit}/USD rate — its cash is left out of equity until a rate is back`);
+  else logger.info({ chain }, `${unit}/USD rate is back — ${chain} wallet cash counted in equity again`);
 }
 
 /**
@@ -266,6 +283,7 @@ async function getCashUsd(
       cashEth = await getWalletGasBalanceEth();
       if (ethPriceUsd !== undefined) {
         evmUsd = cashEth * ethPriceUsd;
+        noteCashOmitted("robinhood", false);
       } else if (!solanaLive) {
         // Solo-EVM behavior, unchanged from before the Solana fix: no price
         // yet to convert a known real balance, so fall back to the ledger
@@ -273,7 +291,7 @@ async function getCashUsd(
         const entries = await db.ledgerEntry.findMany({ where: { type: { in: CASH_MOVEMENT_TYPES } } });
         return { cashUsd: entries.reduce((sum, e) => sum + (e.amountUsd ?? 0), 0), cashEth, cashSol: undefined };
       } else {
-        logger.warn("live EVM wallet balance read but no current ETH/USD rate available — EVM cash omitted from this reading");
+        noteCashOmitted("robinhood", true);
       }
     } catch (err) {
       if (!solanaLive) {
@@ -290,8 +308,9 @@ async function getCashUsd(
       cashSol = await getSolanaWalletBalanceSol();
       if (solPriceUsd !== undefined) {
         solUsd = cashSol * solPriceUsd;
+        noteCashOmitted("solana", false);
       } else {
-        logger.warn("live Solana wallet balance read but no current SOL/USD rate available — Solana cash omitted from this reading");
+        noteCashOmitted("solana", true);
       }
     } catch (err) {
       logger.warn({ err: String(err) }, "failed to read live Solana wallet balance — Solana cash omitted from this reading");

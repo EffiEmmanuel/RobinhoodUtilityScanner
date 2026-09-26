@@ -11,9 +11,10 @@ import {
   ROBINHOOD_USDG,
   ROBINHOOD_USDG_DECIMALS,
   SWAP_ROUTER_02_ABI,
+  NATIVE_ETH_CURRENCY,
 } from "./contracts";
 import { discoverPool, type PoolKey } from "./poolDiscovery";
-import { bestRouteQuote, quoteRoute, rankedRouteQuotes, isLegacyRoute, pathFor, routeLabel, tokenSidePool, v2PathFor, v3PathFor, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
+import { bestRouteQuote, computePoolId, quoteRoute, rankedRouteQuotes, isLegacyRoute, pathFor, routeLabel, tokenSidePool, v2PathFor, v3PathFor, zeroForOneFor, type AnyRoute, type LegacyRoute, type SwapRoute } from "./routing";
 import { encodeV4Swap, encodeV4SwapExactIn, encodeV4SwapExactInSingle, type V4SwapSpec } from "./swapEncoding";
 import { ensureSellApprovals, ensureSwapRouter02Approval } from "./permit2Approvals";
 import { getPublicClient, getWalletAddress, signAndSendTransaction, isWalletConfigured } from "./wallet";
@@ -295,22 +296,62 @@ const ROUTE_WARMUP_AMOUNT_WEI = 1_000_000_000_000_000n; // 0.001 ETH
 
 /**
  * ETH/USD on Robinhood Chain itself: what 0.01 ETH buys in the chain's
- * native-ETH/USDG v4 pool (USDG is Paxos' $1 stablecoin), found on-chain
- * and quoted in ~200ms. Confirmed live 2026-09-24 that the DexScreener-pair
- * method in portfolio.ts couldn't be relied on: its calls share DexScreener's
+ * native-ETH/USDG v4 pools (USDG is Paxos' $1 stablecoin), quoted in
+ * ~200ms. Confirmed live 2026-09-24 that the DexScreener-pair method in
+ * portfolio.ts couldn't be relied on: its calls share DexScreener's
  * one-request-per-second queue with research and never got a slot within
- * their 3s budget, so the portfolio showed no EVM cash at all. Undefined when
- * the pool can't be found or the quote is implausible (a drained pool).
+ * their 3s budget, so the portfolio showed no EVM cash at all.
+ *
+ * Quoted against pinned pools (ETH_USD_REFERENCE_POOLS), not a fresh pool
+ * discovery: that scanned PoolManager's Initialize logs, which the RPC
+ * rate-limited after every restart in production (2026-09-25), leaving no
+ * rate and no EVM cash in equity; and there are 556 native-ETH/USDG pools,
+ * mostly spam, of which discovery only weighed the newest few. The median
+ * of the pinned pools that quote plausibly, so one drained or pushed pool
+ * can't set the rate. Undefined when none does.
  */
 export async function quoteEthPriceUsd(): Promise<number | undefined> {
   const client = getPublicClient();
-  const pool = await discoverPool(client, ROBINHOOD_USDG);
-  if (!pool) return undefined;
-  const route: SwapRoute = { pools: [{ poolKey: pool.poolKey, poolId: pool.poolId }], hubs: [] };
-  const quote = await quoteRoute(client, route, ROBINHOOD_USDG, true, ETH_PRICE_QUOTE_WEI);
-  const rate = Number(quote.amountOut) / 10 ** ROBINHOOD_USDG_DECIMALS / (Number(ETH_PRICE_QUOTE_WEI) / 1e18);
-  return rate >= ETH_PRICE_PLAUSIBLE_USD.min && rate <= ETH_PRICE_PLAUSIBLE_USD.max ? rate : undefined;
+  const rates = await Promise.all(
+    ETH_USD_REFERENCE_POOLS.map(async (poolKey) => {
+      try {
+        const route: SwapRoute = { pools: [{ poolKey, poolId: computePoolId(poolKey) }], hubs: [] };
+        const quote = await quoteRoute(client, route, ROBINHOOD_USDG, true, ETH_PRICE_QUOTE_WEI);
+        return Number(quote.amountOut) / 10 ** ROBINHOOD_USDG_DECIMALS / (Number(ETH_PRICE_QUOTE_WEI) / 1e18);
+      } catch (err) {
+        logger.debug({ poolId: computePoolId(poolKey), err: String(err) }, "ETH/USD reference pool quote failed");
+        return undefined;
+      }
+    })
+  );
+  return medianPlausibleEthRate(rates);
 }
+
+/** The median of the rates inside ETH_PRICE_PLAUSIBLE_USD. */
+export function medianPlausibleEthRate(rates: (number | undefined)[]): number | undefined {
+  const ok = rates
+    .filter((r): r is number => r !== undefined && r >= ETH_PRICE_PLAUSIBLE_USD.min && r <= ETH_PRICE_PLAUSIBLE_USD.max)
+    .sort((a, b) => a - b);
+  if (ok.length === 0) return undefined;
+  const mid = Math.floor(ok.length / 2);
+  return ok.length % 2 ? ok[mid] : (ok[mid - 1] + ok[mid]) / 2;
+}
+
+// The three deepest native-ETH/USDG v4 pools by active liquidity, found by
+// scanning every Initialize event for the pair on the public RPC and
+// quoting the top candidates (2026-09-25): 1 ETH sold for $2,676.82,
+// $2,676.41 and $2,674.97 respectively. A pool key never changes once
+// initialized; if these ever stop quoting, the DexScreener fallback in
+// portfolio.ts still applies.
+export const ETH_USD_REFERENCE_POOLS: PoolKey[] = [
+  // Dynamic-fee pool behind hook 0x06a8…, initialized at block 41,259,014.
+  // Deepest by far: no visible price impact at 1 ETH.
+  { currency0: NATIVE_ETH_CURRENCY, currency1: ROBINHOOD_USDG, fee: 0x800000, tickSpacing: 10, hooks: "0x06a889870C8f83640D6816319f72e2aA579b6080" },
+  // Hookless 0.01% pool, block 1,146,712.
+  { currency0: NATIVE_ETH_CURRENCY, currency1: ROBINHOOD_USDG, fee: 100, tickSpacing: 1, hooks: "0x0000000000000000000000000000000000000000" },
+  // Hookless 0.046% pool, block 4,429,344.
+  { currency0: NATIVE_ETH_CURRENCY, currency1: ROBINHOOD_USDG, fee: 460, tickSpacing: 9, hooks: "0x0000000000000000000000000000000000000000" },
+];
 const ETH_PRICE_QUOTE_WEI = 10_000_000_000_000_000n; // 0.01 ETH
 // Wide on purpose: only catches a drained or broken pool, never a real move.
 const ETH_PRICE_PLAUSIBLE_USD = { min: 100, max: 100_000 };
