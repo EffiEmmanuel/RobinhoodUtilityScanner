@@ -116,6 +116,22 @@ describe("simulatePosition through the live evaluateExits", () => {
     expect(sim(bars, { intrabar: "close" }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
   });
 
+  it("with stop confirmation, survives a one-minute wick but still sells a crash at the confirming close", () => {
+    const confirm = { maxLoss: "close" as const, catastrophic: "intrabar" as const };
+    // UNPEG-style: -20% low inside a minute that closes back at -5%.
+    const wick = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.8, 0.95), candle(2, 0.95, 1, 0.95, 1)];
+    expect(sim(wick).legs[0].type).toBe("RISK_EXIT");
+    expect(sim(wick, { stopConfirm: confirm }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
+    // A real slide: the -15% line holds at the close, so it sells there (not at the low).
+    const slide = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.8, 0.82), candle(2, 0.82, 0.82, 0.7, 0.7)];
+    const confirmed = sim(slide, { stopConfirm: confirm });
+    expect(confirmed.legs[0]).toMatchObject({ type: "RISK_EXIT", mid: 0.82 });
+    // A -30% wick still trips the intrabar catastrophic stop under S1, but not under S3.
+    const deep = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.7, 0.95), candle(2, 0.95, 1, 0.95, 1)];
+    expect(sim(deep, { stopConfirm: confirm }).legs[0].reason).toMatch(/catastrophic/);
+    expect(sim(deep, { stopConfirm: { maxLoss: "close", catastrophic: "close" } }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
+  });
+
   it("fires the underwater time exit even when nothing trades for hours", () => {
     const r = sim([candle(0, 1, 1, 1, 1), candle(1, 0.95, 0.95, 0.95, 0.95), candle(60 * 30, 0.95, 0.95, 0.95, 0.95)], {
       exitRules: { ...rules, maxHoldMinutes: 60 },

@@ -3,7 +3,7 @@ import type { Candle } from "./candles";
 import { type CostModel, chainCosts } from "./costs";
 import { type EntryStrategy, historyView } from "./entries";
 import type { PriceSeries } from "./marketData";
-import { DEFAULT_HOLD_WINDOW_S, type IntrabarMode, type SimCandidateMeta, type SimResult, type ValuedTrade, simulatePosition, valueAtSize } from "./simulate";
+import { DEFAULT_HOLD_WINDOW_S, type IntrabarMode, type SimCandidateMeta, type StopConfirm, type SimResult, type ValuedTrade, simulatePosition, valueAtSize } from "./simulate";
 import type { UniverseCandidate } from "./universe";
 
 export interface RunConfig {
@@ -16,6 +16,7 @@ export interface RunConfig {
   sizeFor?: (c: UniverseCandidate) => number; // overrides refSizeUsd per candidate (calibration: the real size)
   holdWindowS?: number;
   intrabar?: IntrabarMode;
+  stopConfirm?: StopConfirm;
   // Calibration: price entries at our real fill instead of the fill model.
   useActualEntryFill?: boolean;
 }
@@ -89,6 +90,7 @@ export async function runStrategy(
       sizeUsd,
       holdWindowS: cfg.holdWindowS,
       intrabar: cfg.intrabar,
+      stopConfirm: cfg.stopConfirm,
       legacyProfitSteps: cfg.legacyProfitSteps?.(candidate) ?? false,
       entryFillOverride: actualFill,
     });

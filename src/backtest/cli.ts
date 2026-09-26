@@ -10,7 +10,7 @@ import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAU
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
-import type { IntrabarMode } from "./simulate";
+import type { IntrabarMode, StopConfirm } from "./simulate";
 import { bootstrapDiffCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
@@ -960,6 +960,91 @@ async function forensicsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"])
   console.log(out.join("\n"));
 }
 
+const STOPS_RULE = [
+  "Pre-registered (coordinator, 2026-09-26), all v1.8 exits otherwise, full Solana universe, entry at decision:",
+  "- S0: v1.8 as is. Every stop sells on the first mark past its line, intrabar wick or not.",
+  "- S1: the 15% max-loss stop acts only if the loss still holds at a 1-minute candle close (filled at that close); the 25% catastrophic stop still fires intrabar.",
+  "- S3: both stops act only on a close (no intrabar stop at all).",
+  "- S2: max-loss on a close; catastrophic intrabar but at 40%.",
+  "- Same rule as B2: paired vs S0; primary worst-case wicks, median costs; qualifies if >= 0 there and doesn't lose close-only.",
+  "  Simplest first: S1, then S3, then S2. A later one replaces the incumbent only if ahead in both modes with a CI clear of 0.",
+  "- Close-only ticks are all closes, so S1 and S3 equal S0 there by construction; the secondary only constrains S2.",
+];
+
+/** B5: wick-proof stops, paired against S0 (v1.8 as is). */
+async function stopsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const base = findExitRules(snapshot, "v1.8");
+  const variants: { name: string; describe: string; rules: ExitRules; stopConfirm?: StopConfirm }[] = [
+    { name: "S0", describe: "v1.8 as is", rules: base },
+    { name: "S1", describe: "max-loss on a close", rules: base, stopConfirm: { maxLoss: "close", catastrophic: "intrabar" } },
+    { name: "S3", describe: "both stops on a close", rules: base, stopConfirm: { maxLoss: "close", catastrophic: "close" } },
+    { name: "S2", describe: "max-loss on a close, catastrophic 40% intrabar", rules: { ...base, catastrophicLossPercent: 40 }, stopConfirm: { maxLoss: "close", catastrophic: "intrabar" } },
+  ];
+  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const refSize = Number(flags["ref-size"] ?? 1.25);
+  const getSeries = seriesLoader(geckoClient(true));
+  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain }));
+  const actual = perTrade(snapshot, (c) => c.trades.length > 0 && c.qualificationPath !== "MANUAL_BUY_AND_HOLD" && c.chain === chain).filter((c) => c.trades[0].mode === "LIVE");
+  const cells: { key: string; mode: IntrabarMode; pick: "median" | "p75"; subset: "universe" | "actual" }[] = [
+    { key: "primary", mode: "worst", pick: "median", subset: "universe" },
+    { key: "secondary", mode: "close", pick: "median", subset: "universe" },
+    { key: "p75 costs", mode: "worst", pick: "p75", subset: "universe" },
+    { key: `our ${actual.length} live ${chain} trades`, mode: "worst", pick: "median", subset: "actual" },
+  ];
+  const runs = new Map<string, RunRow[]>();
+  for (const cell of cells) {
+    const { model } = await loadCosts(cell.pick);
+    for (const v of variants) {
+      const cfg = { name: v.name, exitRules: () => v.rules, stopConfirm: v.stopConfirm, costs: model, refSizeUsd: refSize, intrabar: cell.mode };
+      runs.set(
+        `${cell.key}|${v.name}`,
+        cell.subset === "universe"
+          ? await runStrategy(universe, getSeries, { ...cfg, entry: atDecision() })
+          : await runStrategy(actual, getSeries, { ...cfg, entry: atActualEntry(), useActualEntryFill: true, sizeFor: (c) => c.trades[0].positionSizeUsd })
+      );
+    }
+  }
+  const pairsOf = (cell: string, a: string, b: string) => pairRows(runs.get(`${cell}|${a}`)!, runs.get(`${cell}|${b}`)!);
+  const out: string[] = [`## B5 stop confirmation, ${chain}`, "", ...STOPS_RULE, ""];
+  const headers = ["variant", "S0 -> variant mean", "all", "peak <2x", "peak 2-4x", "peak >=4x", "total"];
+  for (const cell of cells) {
+    out.push(`### ${cell.key}: ${cell.mode === "worst" ? "worst-case wicks" : "close-only"}, ${cell.pick} costs`, "");
+    out.push(table(headers, variants.slice(1).map((v) => gridRow(v.name, summarizeByPeak(pairsOf(cell.key, "S0", v.name))))), "");
+  }
+  out.push("### Launch venue split (primary)", "");
+  out.push(
+    table(
+      ["variant", "pump.fun launches", "other launches"],
+      variants.slice(1).map((v) => {
+        const [pump, other] = summarizePumpVsOther(pairsOf("primary", "S0", v.name));
+        const cell = (x: PairSummary) => (x.n ? `S0 ${pct(x.aMeanPct)}, delta ${pct(x.diffMeanPct)} [${pct(x.diffCI90[0])}, ${pct(x.diffCI90[1])}] ${x.bBetter}/${x.bWorse} n=${x.n}` : "n=0");
+        return [v.name, cell(pump), cell(other)];
+      })
+    ),
+    ""
+  );
+  for (const v of variants.slice(1)) {
+    const pairs = pairsOf("primary", "S0", v.name);
+    const line = (p: (typeof pairs)[number]) => `${p.symbol ?? "?"} ${pct(p.aPct, 0)} -> ${pct(p.bPct, 0)} (${p.bExit.slice(0, 48)})`;
+    const worse = pairs.filter((p) => p.bPct < p.aPct - 1e-6).sort((a, b) => a.bPct - a.aPct - (b.bPct - b.aPct));
+    const better = pairs.filter((p) => p.bPct > p.aPct + 1e-6).sort((a, b) => b.bPct - b.aPct - (a.bPct - a.aPct));
+    out.push(`${v.name} made ${worse.length} trades worse (held into the crash), worst first: ${worse.slice(0, 8).map(line).join("; ")}`, "");
+    out.push(`${v.name} made ${better.length} trades better (wick survived), best first: ${better.slice(0, 8).map(line).join("; ")}`, "");
+  }
+  const summaryAll = (cell: string, a: string, b: string) => summarizePairs("all", pairsOf(cell, a, b));
+  const decision = decideGrid(
+    variants.slice(1).map((v) => ({ name: v.name, primary: summaryAll("primary", "S0", v.name), secondary: summaryAll("secondary", "S0", v.name) })),
+    (challenger, incumbent) => ({ primary: summaryAll("primary", incumbent, challenger), secondary: summaryAll("secondary", incumbent, challenger) })
+  );
+  out.push("### Verdict under the pre-registered rule", "", ...decision.reasons.map((r) => `- ${r}`), "", `Winner: ${decision.winner === "V0" ? "S0 (keep v1.8 stops)" : decision.winner}`);
+  const file = await writeOut(typeof flags.out === "string" ? flags.out : "b5-stops", {
+    decision,
+    pairs: Object.fromEntries(cells.flatMap((c) => variants.slice(1).map((v) => [`${c.key}|${v.name}`, pairsOf(c.key, "S0", v.name)]))),
+  });
+  out.push("", `Per-trade pairs: ${file}`);
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -996,6 +1081,10 @@ export async function main(argv: string[]): Promise<void> {
       await forensicsCmd(await getSnapshot(false), flags);
       return;
     }
+    case "stops": {
+      await stopsCmd(await getSnapshot(false), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1030,6 +1119,7 @@ export async function main(argv: string[]): Promise<void> {
   forensics --table <C's json> [--exit v1.8]
                                C's pre-registered launch-forensics gates (F1-F4 Solana, R1 RH) judged by
                                replay P&L: kept minus removed with a CI, both wick modes, winners cut
+  stops [--chain solana]       B5: stop confirmation S1-S3 vs v1.8's intrabar stops, pre-registered rule
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates
