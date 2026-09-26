@@ -3,7 +3,7 @@ import path from "node:path";
 import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
-import { asPaperTrade, type FidelityPair, loadPaperBook, loadPaperForensics, type PaperBook, summarizeFidelity } from "./fidelity";
+import { asPaperTrade, type FidelityPair, loadPaperBook, loadPaperForensics, type PaperBook, type PaperPair, pairPaperStrategies, summarizeFidelity } from "./fidelity";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -12,7 +12,7 @@ import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
 import type { IntrabarMode } from "./simulate";
-import { bootstrapDiffCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
+import { bootstrapDiffCI, bootstrapMeanCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
 export const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -1288,6 +1288,61 @@ async function paperForensicsCmd(flags: CliArgs["flags"]): Promise<void> {
   console.log(out.join("\n"));
 }
 
+/**
+ * Paper strategies against a base paper strategy (V0), paired on the
+ * candidates both entered and closed. Real marks, so stop-confirmation
+ * variants are judged without the replay's 1m-wick limit. Read-only.
+ */
+async function paperCompareCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const base = typeof flags.base === "string" ? flags.base : "V0 all Solana";
+  const min = Number(flags.min ?? 30);
+  let book: PaperBook;
+  if (flags.cached) book = JSON.parse(await readFile(PAPER_FILE, "utf8")) as PaperBook;
+  else {
+    console.error("reading the paper book from the production DB (read-only)...");
+    book = await withReadOnlyProdQuery(loadPaperBook);
+    await mkdir(CACHE_DIR, { recursive: true });
+    await writeFile(PAPER_FILE, JSON.stringify(book));
+  }
+  if (!book.tablesExist) {
+    console.log("The paper tables don't exist in this database yet.");
+    return;
+  }
+  const venue = new Map(snapshot.candidates.map((c) => [c.candidateId, launchVenue(c)]));
+  const names = [...new Set(book.positions.map((p) => p.strategyName))].filter((n) => n !== base).sort();
+  const rows: (string | number)[][] = [];
+  for (const name of names) {
+    const pairs = pairPaperStrategies(book.positions, base, name);
+    if (pairs.length < min) {
+      rows.push([name, `${pairs.length} paired, fewer than ${min}`, "", "", "", ""]);
+      continue;
+    }
+    const cell = (ps: PaperPair[]) => {
+      if (!ps.length) return "n=0";
+      const d = ps.map((p) => p.otherPct - p.basePct);
+      const [lo, hi] = bootstrapMeanCI(d);
+      return `${pct(mean(d))} [${pct(lo)}, ${pct(hi)}] ${d.filter((x) => x > 1e-6).length}/${d.filter((x) => x < -1e-6).length} n=${ps.length}`;
+    };
+    rows.push([
+      name,
+      `${pairs.length} paired`,
+      `${pct(mean(pairs.map((p) => p.basePct)))} -> ${pct(mean(pairs.map((p) => p.otherPct)))}`,
+      cell(pairs),
+      cell(pairs.filter((p) => venue.get(p.candidateId) === "pump.fun")),
+      cell(pairs.filter((p) => venue.has(p.candidateId) && venue.get(p.candidateId) !== "pump.fun")),
+    ]);
+  }
+  console.log(
+    [
+      `## Paper strategies vs "${base}", paired on candidates both closed (real Jupiter quotes)`,
+      "",
+      "Net return per position (% of cost basis incl. modeled gas); cells: strategy minus base, mean [90% CI] better/worse n. Venue from the universe snapshot (run with --refresh-universe after new candidates).",
+      "",
+      table(["strategy", "pairs", `${base} -> strategy mean`, "all", "pump.fun launches", "other launches"], rows),
+    ].join("\n")
+  );
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1340,6 +1395,10 @@ export async function main(argv: string[]): Promise<void> {
       await paperForensicsCmd(flags);
       return;
     }
+    case "paper-compare": {
+      await paperCompareCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1385,6 +1444,9 @@ export async function main(argv: string[]): Promise<void> {
   paper-forensics [--strategy "V0 all Solana"] [--min 100]
                                F4 and the other forensics gates judged on real paper quotes, split by the
                                live LaunchForensicsSnapshot and by launch venue (read-only)
+  paper-compare [--base "V0 all Solana"] [--min 30] [--cached] [--refresh-universe]
+                               paper strategies vs a base paper strategy, paired on shared closed candidates
+                               (real marks: the arbiter for stop confirmation, E2, ...), read-only
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

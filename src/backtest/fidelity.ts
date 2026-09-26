@@ -201,3 +201,23 @@ export async function loadPaperForensics(query: (sql: string) => Promise<Row[]>,
     dexId: typeof r.dexId === "string" ? r.dexId : null,
   }));
 }
+
+export interface PaperPair {
+  candidateId: string;
+  basePct: number;
+  otherPct: number;
+}
+
+/**
+ * Two paper strategies that both enter candidates at decision, paired on the
+ * candidates both entered and closed: real-quote evidence for an exit
+ * change, free of the replay's wick-resolution limit.
+ */
+export function pairPaperStrategies(positions: PaperBookPosition[], base: string, other: string): PaperPair[] {
+  const netPct = (p: PaperBookPosition) => (p.realizedPnlUsd! / p.costBasisUsd) * 100;
+  const closed = (name: string) =>
+    new Map(positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null).map((p) => [p.candidateId, p]));
+  const a = closed(base);
+  const b = closed(other);
+  return [...b.values()].filter((p) => a.has(p.candidateId)).map((p) => ({ candidateId: p.candidateId, basePct: netPct(a.get(p.candidateId)!), otherPct: netPct(p) }));
+}

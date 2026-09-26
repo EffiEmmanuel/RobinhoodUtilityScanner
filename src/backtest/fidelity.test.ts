@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FORENSICS_GATES } from "./compare";
-import { asPaperTrade, flattenFeatures, loadPaperBook, loadPaperForensics, type PaperBookPosition, summarizeFidelity } from "./fidelity";
+import { asPaperTrade, flattenFeatures, loadPaperBook, loadPaperForensics, pairPaperStrategies, type PaperBookPosition, summarizeFidelity } from "./fidelity";
 import type { UniverseCandidate } from "./universe";
 
 const position: PaperBookPosition = {
@@ -80,5 +80,17 @@ describe("paper forensics", () => {
     expect(sqls[1]).toContain("'c1','cdroptablex--'");
     expect(sqls[1]).not.toContain("LaunchForensicsSnapshot");
     expect(rows[0]).toMatchObject({ candidateId: "c1", status: null, features: {} });
+  });
+});
+
+describe("paper strategy pairing", () => {
+  it("pairs two strategies on the candidates both entered and closed", () => {
+    const p = (strategyName: string, candidateId: string, pnl: number | null, status = "CLOSED") => ({ ...position, id: `${strategyName}-${candidateId}`, strategyName, candidateId, realizedPnlUsd: pnl, costBasisUsd: 10, status });
+    const pairs = pairPaperStrategies(
+      [p("V0", "a", -2), p("V0", "b", 1), p("V0", "c", 3, "OPEN"), p("S3", "a", 1), p("S3", "c", 2), p("S3", "d", 5)],
+      "V0",
+      "S3"
+    );
+    expect(pairs).toEqual([{ candidateId: "a", basePct: -20, otherPct: 10 }]);
   });
 });
