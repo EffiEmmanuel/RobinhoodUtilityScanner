@@ -116,20 +116,22 @@ describe("simulatePosition through the live evaluateExits", () => {
     expect(sim(bars, { intrabar: "close" }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
   });
 
-  it("with stop confirmation, survives a one-minute wick but still sells a crash at the confirming close", () => {
-    const confirm = { maxLoss: "close" as const, catastrophic: "intrabar" as const };
-    // UNPEG-style: -20% low inside a minute that closes back at -5%.
+  it("runs exitRules.stopConfirm through the live evaluateExits, timed by tick", () => {
+    const s1: ExitRules = { ...rules, stopConfirm: { seconds: 30, appliesTo: "maxLoss" } };
+    // Down bar O,H,L,C: -20% at the 40s tick, back to -5% at the close: a wick, held.
     const wick = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.8, 0.95), candle(2, 0.95, 1, 0.95, 1)];
     expect(sim(wick).legs[0].type).toBe("RISK_EXIT");
-    expect(sim(wick, { stopConfirm: confirm }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
-    // A real slide: the -15% line holds at the close, so it sells there (not at the low).
-    const slide = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.8, 0.82), candle(2, 0.82, 0.82, 0.7, 0.7)];
-    const confirmed = sim(slide, { stopConfirm: confirm });
-    expect(confirmed.legs[0]).toMatchObject({ type: "RISK_EXIT", mid: 0.82 });
-    // A -30% wick still trips the intrabar catastrophic stop under S1, but not under S3.
+    expect(sim(wick, { exitRules: s1 }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
+    // A slide that stays past the line: sells at the first tick 30s after it crossed.
+    const slide = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.8, 0.82), candle(2, 0.82, 0.82, 0.7, 0.72)];
+    const confirmed = sim(slide, { exitRules: s1 });
+    expect(confirmed.legs[0].type).toBe("RISK_EXIT");
+    expect(confirmed.legs[0].reason).toMatch(/stayed past the max-loss stop/);
+    expect(confirmed.legs[0].ts - (T0 + 60 + 40)).toBeGreaterThanOrEqual(30);
+    // A -30% wick still trips the immediate catastrophic stop under maxLoss-only confirmation, not under "both".
     const deep = [candle(0, 1, 1, 1, 1), candle(1, 1, 1, 0.7, 0.95), candle(2, 0.95, 1, 0.95, 1)];
-    expect(sim(deep, { stopConfirm: confirm }).legs[0].reason).toMatch(/catastrophic/);
-    expect(sim(deep, { stopConfirm: { maxLoss: "close", catastrophic: "close" } }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
+    expect(sim(deep, { exitRules: s1 }).legs[0].reason).toMatch(/catastrophic/);
+    expect(sim(deep, { exitRules: { ...rules, stopConfirm: { seconds: 30, appliesTo: "both" } } }).legs.map((l) => l.type)).toEqual(["DATA_END"]);
   });
 
   it("fires the underwater time exit even when nothing trades for hours", () => {

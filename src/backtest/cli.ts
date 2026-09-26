@@ -11,7 +11,7 @@ import { atActualEntry, atDecision, type EntryStrategy, survivor, SURVIVOR_DEFAU
 import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
-import type { IntrabarMode, StopConfirm } from "./simulate";
+import type { IntrabarMode } from "./simulate";
 import { bootstrapDiffCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
@@ -971,22 +971,24 @@ async function forensicsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"])
 const STOPS_RULE = [
   "Pre-registered (coordinator, 2026-09-26), all v1.8 exits otherwise, full Solana universe, entry at decision:",
   "- S0: v1.8 as is. Every stop sells on the first mark past its line, intrabar wick or not.",
-  "- S1: the 15% max-loss stop acts only if the loss still holds at a 1-minute candle close (filled at that close); the 25% catastrophic stop still fires intrabar.",
-  "- S3: both stops act only on a close (no intrabar stop at all).",
-  "- S2: max-loss on a close; catastrophic intrabar but at 40%.",
+  "- S1: exitRules.stopConfirm { seconds, appliesTo: maxLoss }: the 15% stop sells only once the mark has stayed past it for `seconds`; the 25% catastrophic stop stays immediate.",
+  "- S3: stopConfirm { seconds, appliesTo: both }: no immediate price stop at all.",
+  "- S2: S1 with catastrophicLossPercent 40.",
+  "- Runs through the live evaluateExits and nextStopBreach (positionManager.ts), with the replay's tick times as mark times:",
+  "  worst-case wicks tick every 20s along the bar (O,L,H,C or O,H,L,C), close-only every 60s at the closes.",
   "- Same rule as B2: paired vs S0; primary worst-case wicks, median costs; qualifies if >= 0 there and doesn't lose close-only.",
   "  Simplest first: S1, then S3, then S2. A later one replaces the incumbent only if ahead in both modes with a CI clear of 0.",
-  "- Close-only ticks are all closes, so S1 and S3 equal S0 there by construction; the secondary only constrains S2.",
 ];
 
 /** B5: wick-proof stops, paired against S0 (v1.8 as is). */
 async function stopsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
   const base = findExitRules(snapshot, "v1.8");
-  const variants: { name: string; describe: string; rules: ExitRules; stopConfirm?: StopConfirm }[] = [
+  const seconds = Number(flags.seconds ?? 30);
+  const variants: { name: string; describe: string; rules: ExitRules }[] = [
     { name: "S0", describe: "v1.8 as is", rules: base },
-    { name: "S1", describe: "max-loss on a close", rules: base, stopConfirm: { maxLoss: "close", catastrophic: "intrabar" } },
-    { name: "S3", describe: "both stops on a close", rules: base, stopConfirm: { maxLoss: "close", catastrophic: "close" } },
-    { name: "S2", describe: "max-loss on a close, catastrophic 40% intrabar", rules: { ...base, catastrophicLossPercent: 40 }, stopConfirm: { maxLoss: "close", catastrophic: "intrabar" } },
+    { name: "S1", describe: `max-loss confirmed ${seconds}s`, rules: { ...base, stopConfirm: { seconds, appliesTo: "maxLoss" } } },
+    { name: "S3", describe: `both stops confirmed ${seconds}s`, rules: { ...base, stopConfirm: { seconds, appliesTo: "both" } } },
+    { name: "S2", describe: `max-loss confirmed ${seconds}s, catastrophic 40%`, rules: { ...base, catastrophicLossPercent: 40, stopConfirm: { seconds, appliesTo: "maxLoss" } } },
   ];
   const chain = typeof flags.chain === "string" ? flags.chain : "solana";
   const refSize = Number(flags["ref-size"] ?? 1.25);
@@ -1003,7 +1005,7 @@ async function stopsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
   for (const cell of cells) {
     const { model } = await loadCosts(cell.pick);
     for (const v of variants) {
-      const cfg = { name: v.name, exitRules: () => v.rules, stopConfirm: v.stopConfirm, costs: model, refSizeUsd: refSize, intrabar: cell.mode };
+      const cfg = { name: v.name, exitRules: () => v.rules, costs: model, refSizeUsd: refSize, intrabar: cell.mode };
       runs.set(
         `${cell.key}|${v.name}`,
         cell.subset === "universe"
@@ -1013,7 +1015,7 @@ async function stopsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
     }
   }
   const pairsOf = (cell: string, a: string, b: string) => pairRows(runs.get(`${cell}|${a}`)!, runs.get(`${cell}|${b}`)!);
-  const out: string[] = [`## B5 stop confirmation, ${chain}`, "", ...STOPS_RULE, ""];
+  const out: string[] = [`## B5 stop confirmation (${seconds}s), ${chain}`, "", ...STOPS_RULE, ""];
   const headers = ["variant", "S0 -> variant mean", "all", "peak <2x", "peak 2-4x", "peak >=4x", "total"];
   for (const cell of cells) {
     out.push(`### ${cell.key}: ${cell.mode === "worst" ? "worst-case wicks" : "close-only"}, ${cell.pick} costs`, "");
@@ -1224,7 +1226,8 @@ export async function main(argv: string[]): Promise<void> {
   forensics --table <C's json> [--exit v1.8]
                                C's pre-registered launch-forensics gates (F1-F4 Solana, R1 RH) judged by
                                replay P&L: kept minus removed with a CI, both wick modes, winners cut
-  stops [--chain solana]       B5: stop confirmation S1-S3 vs v1.8's intrabar stops, pre-registered rule
+  stops [--chain solana] [--seconds 30]
+                               B5: exitRules.stopConfirm S1-S3 vs v1.8's immediate stops, pre-registered rule
   paper-fidelity [--min 30] [--refresh-universe] [--cached]
                                replay each paper strategy's closed positions (read-only paper book) at the
                                paper entry, fill and size, and compare trade by trade: the sim's calibration check

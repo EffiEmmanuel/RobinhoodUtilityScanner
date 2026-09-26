@@ -1,5 +1,5 @@
 import type { Trade } from "../generated/prisma";
-import { evaluateExits, stopBaseline } from "../trading/positionManager";
+import { evaluateExits, nextStopBreach, stopBaseline } from "../trading/positionManager";
 import type { ExitRules, ProjectTier } from "../trading/strategy";
 import { type Candle, candleAt } from "./candles";
 import { type ChainCostModel, buyFillPrice, liquidityAt, sellFillPrice } from "./costs";
@@ -77,7 +77,6 @@ export interface SimulateInput {
   holdWindowS?: number;
   legacyProfitSteps?: boolean; // pre-2026-09-22 PROFIT_TARGET ladder, for as-was replays
   intrabar?: IntrabarMode;
-  stopConfirm?: StopConfirm;
   entryFillOverride?: number; // calibration: the real fill price
 }
 
@@ -138,32 +137,19 @@ interface Tick {
   price: number;
   atHigh: boolean;
   barClose: number;
-  isClose: boolean; // a candle close (or a no-trade clock tick): where a confirmed stop may act
-}
-
-/**
- * B5 stop confirmation. "close" makes that stop act only if its condition
- * still holds at a candle close (with 1m candles: held for up to a minute,
- * as a live monitor requiring the loss on a mark ~60s later would), filling
- * at that close. "intrabar" is live's current behaviour: the first mark
- * past the line sells, wick or not.
- */
-export interface StopConfirm {
-  maxLoss: "intrabar" | "close";
-  catastrophic: "intrabar" | "close";
 }
 
 export type IntrabarMode = "worst" | "close";
 
 function ticksOf(c: Candle, mode: IntrabarMode): Tick[] {
-  if (mode === "close") return [{ ts: c.t + c.d, price: c.c, atHigh: false, barClose: c.c, isClose: true }];
+  if (mode === "close") return [{ ts: c.t + c.d, price: c.c, atHigh: false, barClose: c.c }];
   const up = c.c >= c.o;
   const [a, b] = up ? [c.l, c.h] : [c.h, c.l];
   return [
-    { ts: c.t, price: c.o, atHigh: false, barClose: c.c, isClose: false },
-    { ts: c.t + c.d / 3, price: a, atHigh: !up, barClose: c.c, isClose: false },
-    { ts: c.t + (2 * c.d) / 3, price: b, atHigh: up, barClose: c.c, isClose: false },
-    { ts: c.t + c.d, price: c.c, atHigh: false, barClose: c.c, isClose: true },
+    { ts: c.t, price: c.o, atHigh: false, barClose: c.c },
+    { ts: c.t + c.d / 3, price: a, atHigh: !up, barClose: c.c },
+    { ts: c.t + (2 * c.d) / 3, price: b, atHigh: up, barClose: c.c },
+    { ts: c.t + c.d, price: c.c, atHigh: false, barClose: c.c },
   ];
 }
 
@@ -197,6 +183,9 @@ export function simulatePosition(input: SimulateInput): SimResult | { skip: stri
   let mfePercent: number | null = null;
   let maePercent: number | null = null;
   let profitStepsTaken = 0;
+  // ExitRules.stopConfirm's timer, driven by tick time the way live drives
+  // it by mark time (nextStopBreach, positionManager.ts).
+  let stopBreachSinceMs: number | undefined;
   let lastPrice = entryMid;
   let lastTs = entryTs;
   let exitReason = "";
@@ -209,6 +198,9 @@ export function simulatePosition(input: SimulateInput): SimResult | { skip: stri
     maePercent = Math.min(maePercent ?? pnl, pnl);
     const liq = liquidityAt(entryLiquidityUsd, entryMid, tick.price);
     const holdingMs = (tick.ts - entryTs) * 1000;
+    const stopPnlPercent = (mark / baseline - 1) * 100;
+    const breach = nextStopBreach({ exitRules, stopPnlPercent, manualHold, sinceMs: stopBreachSinceMs, nowMs: tick.ts * 1000 });
+    stopBreachSinceMs = breach.sinceMs;
     const trade = {
       id: "backtest",
       tradeLane: meta.tradeLane,
@@ -234,18 +226,14 @@ export function simulatePosition(input: SimulateInput): SimResult | { skip: stri
       remainingTokens: remaining * tokens,
       totalBoughtTokens: tokens,
       manualHold,
-      stopPnlPercent: (mark / baseline - 1) * 100,
+      stopPnlPercent,
+      stopBreachSeconds: breach.seconds,
       // v1.9's costRecovery inputs; evaluateExits ignores them before v1.9.
       costBasisUsd: sizeUsd + costs.gasBuyUsd,
       realizedProceedsUsd,
       estimatedSellGasUsd: costs.gasSellUsd,
     };
     let decision = evaluateExits(ctx);
-    if (decision?.type === "RISK_EXIT" && input.stopConfirm && !tick.isClose) {
-      const catastrophic = /catastrophic loss/.test(decision.reason);
-      const maxLoss = /max tolerated loss/.test(decision.reason);
-      if ((catastrophic && input.stopConfirm.catastrophic === "close") || (maxLoss && input.stopConfirm.maxLoss === "close")) decision = null;
-    }
     if (input.legacyProfitSteps && (!decision || decision.type === "TRAILING_EXIT" || decision.type === "TIME_EXIT")) {
       const step = exitRules.profitSteps[profitStepsTaken];
       if (step && currentMultiple >= step.multiple) {
@@ -274,7 +262,7 @@ export function simulatePosition(input: SimulateInput): SimResult | { skip: stri
     // move then, but the clock can run into the underwater time exit.
     const timeExitAt = entryTs + exitRules.maxHoldMinutes * 60;
     if (timeExitAt > lastTs && timeExitAt < c.t && timeExitAt < endTs) {
-      closed = evaluate({ ts: timeExitAt, price: lastPrice, atHigh: false, barClose: lastPrice, isClose: true });
+      closed = evaluate({ ts: timeExitAt, price: lastPrice, atHigh: false, barClose: lastPrice });
       if (closed) break;
     }
     for (const tick of ticksOf(c, input.intrabar ?? "worst")) {
@@ -287,7 +275,7 @@ export function simulatePosition(input: SimulateInput): SimResult | { skip: stri
   }
   if (!closed) {
     const timeExitAt = entryTs + exitRules.maxHoldMinutes * 60;
-    if (timeExitAt > lastTs && timeExitAt < endTs) closed = evaluate({ ts: timeExitAt, price: lastPrice, atHigh: false, barClose: lastPrice, isClose: true });
+    if (timeExitAt > lastTs && timeExitAt < endTs) closed = evaluate({ ts: timeExitAt, price: lastPrice, atHigh: false, barClose: lastPrice });
   }
   if (!closed && remaining > 1e-9) {
     const openAtEnd = endTs >= input.coverageEnd && input.coverageEnd < entryTs + (input.holdWindowS ?? DEFAULT_HOLD_WINDOW_S);

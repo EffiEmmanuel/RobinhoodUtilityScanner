@@ -288,7 +288,9 @@ const paperStopBreachSince = new Map<string, number>();
 async function manage(strategy: Strategy, exitRules: ExitRules, now: Date, quotes: TickQuoteCache): Promise<void> {
   const open = await db.paperPosition.findMany({ where: { strategyId: strategy.id, status: "OPEN" } });
   for (const p of open) {
-    if (!markDue(p.openedAt, p.lastMarkAt, now)) continue;
+    // A pending stop confirmation is re-checked every tick, not on the thinned
+    // cadence, or a 30s confirmation would wait minutes for its next mark.
+    if (!markDue(p.openedAt, p.lastMarkAt, now) && !paperStopBreachSince.has(p.id)) continue;
     const remainingRaw = BigInt(p.tokensRemainingRaw);
     const quote = await quotes.sell(p.tokenAddress, remainingRaw);
     if ("unavailable" in quote) {
