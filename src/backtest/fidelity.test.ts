@@ -54,6 +54,8 @@ describe("paper-vs-replay fidelity", () => {
     // One honeypot write-off the sim can't see wrecks the correlation; hence the separate count.
     expect(f.correlation).toBeCloseTo(0.0917, 3);
     expect(f.paperTotalUsd).toBeCloseTo(-6);
+    expect(f.meanGapPts).toBeCloseTo((-2 - 10 + 110) / 3);
+    expect(f.meanGapCI90[0]).toBeLessThan(f.meanGapPts);
   });
 });
 

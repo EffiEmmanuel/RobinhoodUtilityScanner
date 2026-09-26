@@ -1,5 +1,5 @@
 import { exitCategory } from "./calibrate";
-import { mean, quantile } from "./stats";
+import { bootstrapMeanCI, mean, quantile } from "./stats";
 import type { ActualTrade, UniverseCandidate } from "./universe";
 
 /**
@@ -117,6 +117,8 @@ export interface FidelitySummary {
   simMeanPct: number;
   meanAbsErrorPts: number;
   medianAbsErrorPts: number;
+  meanGapPts: number; // replay minus paper, per trade
+  meanGapCI90: [number, number];
   correlation: number;
   sameExitType: number;
   paperWriteOffs: number; // honeypots / no sell route: the sim can't see these
@@ -147,6 +149,8 @@ export function summarizeFidelity(pairs: FidelityPair[]): FidelitySummary {
     simMeanPct: mean(pairs.map((p) => p.simPct)),
     meanAbsErrorPts: mean(errors),
     medianAbsErrorPts: quantile(errors, 0.5),
+    meanGapPts: mean(pairs.map((p) => p.simPct - p.paperPct)),
+    meanGapCI90: bootstrapMeanCI(pairs.map((p) => p.simPct - p.paperPct)),
     correlation: pearson(
       pairs.map((p) => p.paperPct),
       pairs.map((p) => p.simPct)

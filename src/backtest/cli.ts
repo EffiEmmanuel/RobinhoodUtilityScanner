@@ -1132,6 +1132,7 @@ async function paperFidelityCmd(snapshot: UniverseSnapshot, flags: CliArgs["flag
         `${f.n} of ${closed.length}${missing ? ` (${missing} not in snapshot)` : ""}`,
         `${usd(f.paperTotalUsd)} / ${pct(f.paperMeanPct)}`,
         `${usd(f.simTotalUsd)} / ${pct(f.simMeanPct)}`,
+        `${pct(f.meanGapPts)} [${pct(f.meanGapCI90[0])}, ${pct(f.meanGapCI90[1])}]`,
         `${num(f.meanAbsErrorPts, 1)} (median ${num(f.medianAbsErrorPts, 1)})`,
         num(f.correlation),
         `${f.sameExitType}/${f.n}`,
@@ -1143,7 +1144,7 @@ async function paperFidelityCmd(snapshot: UniverseSnapshot, flags: CliArgs["flag
         out.push(table(["symbol", "paper", "paper exit", "replay", "replay exit"], gaps.map((g) => [g.symbol ?? "?", pct(g.paperPct), g.paperExit.slice(0, 40), pct(g.simPct), g.simExit.slice(0, 40)])), "");
       }
     }
-    out.push(table(["wicks", "positions", "paper total / mean", "replay total / mean", "mean abs error, pts", "correlation", "same exit type", "paper write-offs"], rows), "");
+    out.push(table(["wicks", "positions", "paper total / mean", "replay total / mean", "replay - paper per trade [90% CI]", "mean abs error, pts", "correlation", "same exit type", "paper write-offs"], rows), "");
   }
   console.log(out.join("\n"));
 }
