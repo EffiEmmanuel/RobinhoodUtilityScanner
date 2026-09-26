@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
+import { classifyBlock } from "./gateAudit";
 import { asPaperTrade, type FidelityPair, loadPaperBook, loadPaperForensics, type PaperBook, type PaperPair, pairPaperStrategies, summarizeFidelity } from "./fidelity";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
@@ -1343,6 +1344,87 @@ async function paperCompareCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags
   );
 }
 
+/**
+ * Gate audit on real quotes: for each closed paper position (V0 and E2 by
+ * default), the live gate that blocked its candidate, and per gate the
+ * blocked trades vs everything else (kept - removed, 90% CI) with the
+ * winners it turned away. Read-only.
+ */
+async function paperGateAuditCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const names = (typeof flags.strategies === "string" ? flags.strategies : "V0 all Solana,V0 non-pump (E2)").split(",");
+  console.error("reading the paper book and live decisions from the production DB (read-only)...");
+  const { book, decisions } = await withReadOnlyProdQuery(async (query) => {
+    const b = await loadPaperBook(query);
+    const ids = [...new Set(b.positions.filter((p) => names.includes(p.strategyName)).map((p) => p.candidateId))].map((id) => `'${id.replace(/[^A-Za-z0-9_-]/g, "")}'`);
+    const d = ids.length
+      ? await query(`
+          select tc.id as "candidateId", tc.status::text as status, last.stage, last.decision, last."finalReasons" as reasons
+            from "TradeCandidate" tc
+            left join lateral (
+              select ds.stage, ds.decision::text as decision, ds."finalReasons"
+                from "TradeDecisionSnapshot" ds
+               where ds."candidateId" = tc.id
+               order by (ds.decision::text in ('SKIP', 'BUY')) desc, ds."createdAt" desc
+               limit 1) last on true
+           where tc.id in (${ids.join(",")})`)
+      : [];
+    return { book: b, decisions: d };
+  });
+  if (!book.tablesExist) {
+    console.log("The paper tables don't exist in this database yet.");
+    return;
+  }
+  const gateOf = new Map(
+    decisions.map((d) => [
+      String(d.candidateId),
+      classifyBlock(String(d.status), d.stage ? { stage: String(d.stage), decision: String(d.decision), reasons: d.reasons } : undefined),
+    ])
+  );
+  const venue = new Map(snapshot.candidates.map((c) => [c.candidateId, launchVenue(c)]));
+  const sym = new Map(snapshot.candidates.map((c) => [c.candidateId, c.symbol]));
+  const out: string[] = ["## Paper gate audit: what the live gate blocked, on real quotes", ""];
+  for (const name of names) {
+    const closed = book.positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null);
+    const net = (p: (typeof closed)[number]) => (p.realizedPnlUsd! / p.costBasisUsd) * 100;
+    const gateName = (p: (typeof closed)[number]) => gateOf.get(p.candidateId)?.gate ?? "unknown";
+    out.push(`### ${name}: ${closed.length} closed, mean ${pct(mean(closed.map(net)))}`, "");
+    const rows: (string | number)[][] = [];
+    const livePassed = (p: (typeof closed)[number]) => /^passed|WATCH_ONLY/.test(gateName(p));
+    const cmp = (removed: typeof closed, label: string, kind: string) => {
+      const kept = closed.filter((p) => !removed.includes(p));
+      const r = removed.map(net);
+      const k = kept.map(net);
+      const [lo, hi] = bootstrapDiffCI(k, r);
+      const winners = removed.filter((p) => net(p) >= 50).sort((a, b) => net(b) - net(a));
+      rows.push([
+        label,
+        kind,
+        `${r.length} blocked, mean ${pct(mean(r))}`,
+        `${k.length} rest, mean ${pct(mean(k))}`,
+        r.length && k.length ? `${pct(mean(k) - mean(r))} [${pct(lo)}, ${pct(hi)}]` : "n/a",
+        winners.map((p) => `${sym.get(p.candidateId) ?? p.candidateId.slice(-6)} ${pct(net(p), 0)}`).join(", ") || "-",
+      ]);
+    };
+    cmp(closed.filter((p) => !livePassed(p)), "LIVE GATE OVERALL (blocked vs passed)", "all");
+    const gates = [...new Set(closed.map(gateName))].sort();
+    for (const g of gates) {
+      const blocked = closed.filter((p) => gateName(p) === g);
+      const kind = [...gateOf.values()].find((b) => b.gate === g)?.kind ?? "quality";
+      cmp(blocked, g, kind === "quality" ? "quality gate" : `${kind}: report only`);
+    }
+    out.push(table(["gate", "kind", "blocked", "everything else", "rest - blocked [90% CI]", "winners (>= +50%) it blocked"], rows), "");
+    for (const v of ["pump.fun", "other"] as const) {
+      const set = closed.filter((p) => (venue.get(p.candidateId) === "pump.fun") === (v === "pump.fun"));
+      const blocked = set.filter((p) => !livePassed(p)).map(net);
+      const passed = set.filter(livePassed).map(net);
+      out.push(`${v} launches: ${set.length} closed; live-blocked ${blocked.length} (mean ${pct(mean(blocked))}), live-passed ${passed.length} (mean ${pct(mean(passed))})`);
+    }
+    out.push("");
+  }
+  out.push("Positive 'rest - blocked' means the gate blocked worse-than-average trades (it earns its place); negative means it turned away better ones. Kill switch and safety gates are reported only.");
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1399,6 +1481,10 @@ export async function main(argv: string[]): Promise<void> {
       await paperCompareCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
       return;
     }
+    case "paper-gate-audit": {
+      await paperGateAuditCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1447,6 +1533,9 @@ export async function main(argv: string[]): Promise<void> {
   paper-compare [--base "V0 all Solana"] [--min 30] [--cached] [--refresh-universe]
                                paper strategies vs a base paper strategy, paired on shared closed candidates
                                (real marks: the arbiter for stop confirmation, E2, ...), read-only
+  paper-gate-audit [--strategies "V0 all Solana,V0 non-pump (E2)"] [--refresh-universe]
+                               which live gate blocked each paper-traded candidate, and per gate the blocked
+                               trades vs the rest on real quotes (safety gates and kill switch report-only)
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates
