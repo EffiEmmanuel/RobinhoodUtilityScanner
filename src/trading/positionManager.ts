@@ -72,6 +72,8 @@ export async function runPositionMonitorTick(): Promise<void> {
     where: { status: { in: [TradeStatus.OPEN, TradeStatus.PARTIALLY_EXITED] } },
     include: { token: false },
   });
+  // Stop-confirmation timers of trades no longer open.
+  for (const id of stopBreachSince.keys()) if (!openTrades.some((t) => t.id === id)) stopBreachSince.delete(id);
   for (const trade of openTrades) {
     try {
       await monitorOneTrade(trade);
@@ -140,6 +142,9 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
   const unrealizedPnlPercent = (currentMultiple - 1) * 100;
   const stopBaseline = await stopBaselinePriceUsd(trade, priceUsd);
   const stopPnlPercent = stopBaseline > 0 ? (priceUsd / stopBaseline - 1) * 100 : unrealizedPnlPercent;
+  const stopBreach = nextStopBreach({ exitRules, stopPnlPercent, manualHold, sinceMs: stopBreachSince.get(trade.id), nowMs: Date.now() });
+  if (stopBreach.sinceMs === undefined) stopBreachSince.delete(trade.id);
+  else stopBreachSince.set(trade.id, stopBreach.sinceMs);
   const unrealizedPnlUsd = remainingTokens * priceUsd - remainingTokens * entryPriceUsd;
 
   const newMfe = Math.max(trade.mfePercent ?? unrealizedPnlPercent, unrealizedPnlPercent);
@@ -239,6 +244,7 @@ async function monitorOneTrade(trade: Trade): Promise<void> {
     totalBoughtTokens: tokenAmounts.totalBoughtTokens,
     manualHold,
     stopPnlPercent,
+    stopBreachSeconds: stopBreach.seconds,
     costBasisUsd: tokenAmounts.costBasisUsd,
     realizedProceedsUsd: tokenAmounts.realizedProceedsUsd,
     estimatedSellGasUsd: estimatedSwapGasUsd(token.chain),
@@ -404,6 +410,29 @@ export function stopBaseline(entryPriceUsd: number, firstMarkPriceUsd: number | 
   return Math.max(Math.min(entryPriceUsd, firstMarkPriceUsd), entryPriceUsd * (1 - MAX_ROUND_TRIP_COST));
 }
 const MAX_ROUND_TRIP_COST = 0.12;
+
+/**
+ * The stop-confirmation timer (ExitRules.stopConfirm): when the mark first
+ * went past the max-loss line (the shallower one, so it also covers the
+ * catastrophic line) and how long it has stayed there. A mark back above
+ * the line clears it. Pure: live keeps `since` per trade in memory
+ * (stopBreachSince), the paper engine per paper position, and a replay per
+ * tick — so a restart just re-arms the timer, erring toward holding a
+ * little longer.
+ */
+export function nextStopBreach(input: {
+  exitRules: ExitRules;
+  stopPnlPercent: number;
+  manualHold?: boolean;
+  sinceMs: number | undefined;
+  nowMs: number;
+}): { sinceMs: number | undefined; seconds: number } {
+  const { exitRules } = input;
+  if (!exitRules.stopConfirm || input.manualHold || input.stopPnlPercent > -exitRules.maxLossPercent) return { sinceMs: undefined, seconds: 0 };
+  const sinceMs = input.sinceMs ?? input.nowMs;
+  return { sinceMs, seconds: (input.nowMs - sinceMs) / 1000 };
+}
+const stopBreachSince = new Map<string, number>();
 const STOP_BASELINE_WINDOW_MS = 60_000;
 const stopBaselineByTrade = new Map<string, number>();
 
@@ -575,16 +604,22 @@ export function evaluateExits(ctx: {
   costBasisUsd?: number;
   realizedProceedsUsd?: number;
   estimatedSellGasUsd?: number;
+  // Read only under exitRules.stopConfirm: how long the mark has stayed past
+  // the max-loss line (nextStopBreach); 0 or undefined when it isn't now.
+  stopBreachSeconds?: number;
 }): ExitDecision | null {
   const { trade, plan, exitRules } = ctx;
+  // Stops that wait for confirmation (ExitRules.stopConfirm) are taken out
+  // of validatePosition here and checked below, after invalidation.
+  const stopConfirm = ctx.manualHold ? undefined : exitRules.stopConfirm;
 
   // Priority 1: emergency/risk exit (§75).
   const positionRisk = validatePosition({
     liquidityUsd: ctx.liquidityUsd,
     liquidityAtEntryUsd: trade.entryLiquidityUsd ?? ctx.liquidityUsd, // falls back to current (no-op check) only for trades opened before entryLiquidityUsd existed
     unrealizedPnlPercent: ctx.stopPnlPercent ?? ctx.unrealizedPnlPercent,
-    maxLossPercent: exitRules.maxLossPercent,
-    catastrophicLossPercent: exitRules.catastrophicLossPercent,
+    maxLossPercent: stopConfirm ? Number.POSITIVE_INFINITY : exitRules.maxLossPercent,
+    catastrophicLossPercent: stopConfirm?.appliesTo === "both" ? Number.POSITIVE_INFINITY : exitRules.catastrophicLossPercent,
     buySellRatio5m: ctx.buySellRatio5m,
     totalTxns5m: ctx.totalTxns5m,
     sellQuoteAvailable: ctx.sellQuoteAvailable,
@@ -640,6 +675,19 @@ export function evaluateExits(ctx: {
   }
   if (positionRisk.riskExitTriggered) {
     return { type: "RISK_EXIT", sellPercentOfRemaining: 100, reason: positionRisk.reasons.join("; "), isEmergency: true };
+  }
+  if (stopConfirm) {
+    const lossPercent = ctx.stopPnlPercent ?? ctx.unrealizedPnlPercent;
+    const heldSeconds = ctx.stopBreachSeconds ?? 0;
+    if (lossPercent <= -exitRules.maxLossPercent && heldSeconds >= stopConfirm.seconds) {
+      const line = lossPercent <= -exitRules.catastrophicLossPercent && stopConfirm.appliesTo === "both" ? "catastrophic" : "max-loss";
+      return {
+        type: "RISK_EXIT",
+        sellPercentOfRemaining: 100,
+        reason: `loss ${lossPercent.toFixed(1)}% stayed past the ${line} stop for ${Math.round(heldSeconds)}s (confirmation ${stopConfirm.seconds}s)`,
+        isEmergency: true,
+      };
+    }
   }
 
   // v1.9+ (exitRules.costRecovery): the one deterministic profit-take. At

@@ -110,6 +110,24 @@ export interface ExitRules {
   // 1.36x peak, later ran to 5.8x); of 66 autonomous trades only 11 ever
   // offered a 2x.
   costRecovery?: CostRecoveryRules;
+
+  // v1.10 candidates (B5 replay, 2026-09-26, paired over the full Solana
+  // universe): act on a loss stop only once the mark has stayed past its line
+  // for `seconds`, instead of on the first mark past it — most wicks through
+  // the stop recover within a minute. appliesTo "maxLoss" confirms only the
+  // max-loss stop (catastrophicLossPercent stays immediate); "both" confirms
+  // the catastrophic stop too. Measured: +2.3 [+1.0,+3.6] pts/trade with
+  // maxLoss confirmed, +6.0 [+4.4,+7.7] with both; the cost is a rug that
+  // gaps through within the window is eaten in full (XPAY -23% -> -99% with
+  // both). Liquidity pulls, a vanished sell quote and invalidation stay
+  // immediate always; manual holds have no price stops. Undefined (v1.8)
+  // keeps every stop immediate.
+  stopConfirm?: StopConfirmRules;
+}
+
+export interface StopConfirmRules {
+  seconds: number;
+  appliesTo: "maxLoss" | "both";
 }
 
 export interface CostRecoveryRules {

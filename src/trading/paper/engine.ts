@@ -3,7 +3,7 @@ import { logger } from "../../logger";
 import type { Trade } from "../../generated/prisma";
 import { resolveTierPure } from "../../backtest/simulate";
 import { parsePrimaryPair } from "../../backtest/universe";
-import { evaluateExits, stopBaseline } from "../positionManager";
+import { evaluateExits, stopBaseline, nextStopBreach } from "../positionManager";
 import type { ExitRules } from "../strategy";
 import { paperConfig } from "./config";
 import { inferDecimals, paperBuyQuote, paperSellQuote } from "./quotes";
@@ -49,6 +49,9 @@ export interface MarkResult {
   firstMarkPriceUsd: number;
   mfePercent: number;
   maePercent: number;
+  // When this position's mark first went past its max-loss line, for
+  // ExitRules.stopConfirm; undefined when it isn't past it now.
+  stopBreachSinceMs: number | undefined;
   sell?: { raw: bigint; proceedsUsd: number; closes: boolean; type: string; reason: string };
 }
 
@@ -64,6 +67,8 @@ export function evaluatePaperMark(input: {
   exitRules: ExitRules;
   gasSellUsd: number;
   maxHoldHours: number;
+  // The previous mark's MarkResult.stopBreachSinceMs.
+  stopBreachSinceMs?: number;
 }): MarkResult {
   const { state, quoteUsd, now } = input;
   const tokens = Number(state.tokensRemainingRaw) / 10 ** state.decimals;
@@ -92,6 +97,8 @@ export function evaluatePaperMark(input: {
     positionSizeUsd: state.sizeUsd,
   } as unknown as Trade;
   const holdingMs = now.getTime() - state.openedAt.getTime();
+  const stopPnlPercent = baseline > 0 ? (markPriceUsd / baseline - 1) * 100 : pnl;
+  const stopBreach = nextStopBreach({ exitRules, stopPnlPercent, sinceMs: input.stopBreachSinceMs, nowMs: now.getTime() });
   // evaluateExits reads the clock itself; shift openedAt so it sees this mark's holding time.
   trade.openedAt = new Date(Date.now() - holdingMs);
   let decision = evaluateExits({
@@ -108,7 +115,8 @@ export function evaluatePaperMark(input: {
     remainingTokens: tokens,
     totalBoughtTokens: state.sizeUsd / state.entryPriceUsd,
     manualHold: false,
-    stopPnlPercent: baseline > 0 ? (markPriceUsd / baseline - 1) * 100 : pnl,
+    stopPnlPercent,
+    stopBreachSeconds: stopBreach.seconds,
     costBasisUsd: state.costBasisUsd,
     realizedProceedsUsd: state.realizedProceedsUsd,
     estimatedSellGasUsd: input.gasSellUsd,
@@ -116,7 +124,7 @@ export function evaluatePaperMark(input: {
   if (!decision && holdingMs >= input.maxHoldHours * 3_600_000) {
     decision = { type: "TIME_EXIT", sellPercentOfRemaining: 100, reason: `paper hold window of ${input.maxHoldHours}h over`, isEmergency: false };
   }
-  const result: MarkResult = { markPriceUsd, currentMultiple, firstMarkPriceUsd, mfePercent, maePercent };
+  const result: MarkResult = { markPriceUsd, currentMultiple, firstMarkPriceUsd, mfePercent, maePercent, stopBreachSinceMs: stopBreach.sinceMs };
   if (!decision || !(decision.sellPercentOfRemaining > 0)) return result;
   const closes = decision.sellPercentOfRemaining >= 100;
   const raw = closes ? state.tokensRemainingRaw : (state.tokensRemainingRaw * BigInt(Math.round(decision.sellPercentOfRemaining * 100))) / 10_000n;
@@ -273,6 +281,10 @@ export class TickQuoteCache {
   }
 }
 
+// Stop-confirmation timers per paper position, in memory like live's: a
+// restart just re-arms them.
+const paperStopBreachSince = new Map<string, number>();
+
 async function manage(strategy: Strategy, exitRules: ExitRules, now: Date, quotes: TickQuoteCache): Promise<void> {
   const open = await db.paperPosition.findMany({ where: { strategyId: strategy.id, status: "OPEN" } });
   for (const p of open) {
@@ -308,7 +320,10 @@ async function manage(strategy: Strategy, exitRules: ExitRules, now: Date, quote
       exitRules,
       gasSellUsd: paperConfig.gasSellUsd,
       maxHoldHours: paperConfig.maxHoldHours,
+      stopBreachSinceMs: paperStopBreachSince.get(p.id),
     });
+    if (mark.stopBreachSinceMs === undefined || mark.sell?.closes) paperStopBreachSince.delete(p.id);
+    else paperStopBreachSince.set(p.id, mark.stopBreachSinceMs);
     await db.paperPosition.update({
       where: { id: p.id },
       data: {

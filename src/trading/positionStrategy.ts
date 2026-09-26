@@ -91,7 +91,10 @@ export function formatExitRulesState(exitRules: ExitRules, currentMultiple: numb
     ...profitLines,
     // The runner's own trail replaces this one once cost is back.
     ...(recovery && costRecovered ? [] : [trailingLine]),
-    `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.`,
+    `Hard stop: ${exitRules.maxLossPercent}% loss | Catastrophic/emergency stop: ${exitRules.catastrophicLossPercent}% loss.` +
+      (exitRules.stopConfirm
+        ? ` The ${exitRules.stopConfirm.appliesTo === "both" ? "stops act" : "hard stop acts"} only once the loss has held past the line for ${exitRules.stopConfirm.seconds}s.`
+        : ""),
     `Max-hold time-exit: ${holdCapText}, but ONLY while this position is currently underwater (below entry price) — it never force-closes a position that's up, no matter how long it's been held.`,
   ].join("\n");
 }

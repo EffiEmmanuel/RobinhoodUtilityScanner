@@ -41,6 +41,18 @@ const mark = (quoteUsd: number, over: Partial<Parameters<typeof evaluatePaperMar
   evaluatePaperMark({ state: state(), quoteUsd, now: new Date(openedAt.getTime() + 10 * 60_000), exitRules: v18, gasSellUsd: 0.014, maxHoldHours: 48, ...over });
 
 describe("evaluatePaperMark through the live evaluateExits", () => {
+  it("confirms a stop only after the mark has stayed past it 30s under stopConfirm", () => {
+    const s1: ExitRules = { ...v18, stopConfirm: { seconds: 30, appliesTo: "maxLoss" } };
+    const t0 = new Date(openedAt.getTime() + 10 * 60_000);
+    const first = mark(7.9, { exitRules: s1, now: t0 });
+    expect(first.sell).toBeUndefined();
+    expect(first.stopBreachSinceMs).toBe(t0.getTime());
+    const held = mark(7.9, { exitRules: s1, now: new Date(t0.getTime() + 30_000), stopBreachSinceMs: first.stopBreachSinceMs });
+    expect(held.sell).toMatchObject({ type: "RISK_EXIT", closes: true });
+    const recovered = mark(9, { exitRules: s1, now: new Date(t0.getTime() + 20_000), stopBreachSinceMs: first.stopBreachSinceMs });
+    expect(recovered.stopBreachSinceMs).toBeUndefined();
+  });
+
   it("holds a small dip and stops out past -15% from the first mark", () => {
     expect(mark(9).sell).toBeUndefined();
     const stop = mark(7.9); // 0.0079 vs a 0.0095 first mark: -16.8%

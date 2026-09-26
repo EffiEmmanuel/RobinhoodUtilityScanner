@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Trade } from "../generated/prisma";
-import { evaluateExits, stopBaseline, costRecoverySellPercent, applyFastFlipProfile } from "./positionManager";
+import { evaluateExits, stopBaseline, costRecoverySellPercent, applyFastFlipProfile, nextStopBreach } from "./positionManager";
 import type { ExitRules } from "./strategy";
 
 const exitRules: ExitRules = {
@@ -389,5 +389,77 @@ describe("applyFastFlipProfile", () => {
     const rules = applyFastFlipProfile(withFastFlip(tier));
     expect(rules).toMatchObject({ trailingActivationMultiple: 1.6, trailingPercent: 20, maxHoldMinutes: 60 });
     expect(rules.profitSteps).toEqual(exitRules.profitSteps);
+  });
+});
+
+describe("stop confirmation (exitRules.stopConfirm)", () => {
+  // Stops at 15% (max loss) and 25% (catastrophic), as in v1.8.
+  const v18Stops: ExitRules = { ...exitRules, maxLossPercent: 15, catastrophicLossPercent: 25, maxHoldMinutes: 1440 };
+  const s1: ExitRules = { ...v18Stops, stopConfirm: { seconds: 30, appliesTo: "maxLoss" } };
+  const s3: ExitRules = { ...v18Stops, stopConfirm: { seconds: 30, appliesTo: "both" } };
+  const at = (pnl: number, exitRulesUsed: ExitRules, stopBreachSeconds?: number, extra: Record<string, unknown> = {}) =>
+    evaluateExits({
+      trade: trade({ openedAt: new Date(Date.now() - 5 * 60_000) }),
+      plan: null,
+      exitRules: exitRulesUsed,
+      currentMcap: 80_000,
+      currentMultiple: 1 + pnl / 100,
+      unrealizedPnlPercent: pnl,
+      stopPnlPercent: pnl,
+      liquidityUsd: 25_000,
+      buySellRatio5m: 0.55,
+      totalTxns5m: 8,
+      sellQuoteAvailable: true,
+      remainingTokens: 100,
+      totalBoughtTokens: 100,
+      stopBreachSeconds,
+      ...extra,
+    });
+
+  describe("nextStopBreach", () => {
+    it("starts the timer on the first mark past the max-loss line and counts from there", () => {
+      const first = nextStopBreach({ exitRules: s1, stopPnlPercent: -16, sinceMs: undefined, nowMs: 1_000 });
+      expect(first).toEqual({ sinceMs: 1_000, seconds: 0 });
+      expect(nextStopBreach({ exitRules: s1, stopPnlPercent: -18, sinceMs: first.sinceMs, nowMs: 31_000 })).toEqual({ sinceMs: 1_000, seconds: 30 });
+    });
+
+    it("resets once a mark is back above the line", () => {
+      expect(nextStopBreach({ exitRules: s1, stopPnlPercent: -10, sinceMs: 1_000, nowMs: 20_000 })).toEqual({ sinceMs: undefined, seconds: 0 });
+    });
+
+    it("never runs without stopConfirm or for a manual hold", () => {
+      expect(nextStopBreach({ exitRules: v18Stops, stopPnlPercent: -30, sinceMs: undefined, nowMs: 1 }).sinceMs).toBeUndefined();
+      expect(nextStopBreach({ exitRules: s1, stopPnlPercent: -30, manualHold: true, sinceMs: undefined, nowMs: 1 }).sinceMs).toBeUndefined();
+    });
+  });
+
+  it("leaves v1.8 exactly as it was: the max-loss stop fires on the first mark", () => {
+    expect(at(-16, v18Stops)).toMatchObject({ type: "RISK_EXIT" });
+  });
+
+  it("holds the max-loss stop until the loss has stayed past it 30s, then sells", () => {
+    expect(at(-16, s1, 0)).toBeNull();
+    expect(at(-16, s1, 29.9)).toBeNull();
+    const sold = at(-16, s1, 30);
+    expect(sold).toMatchObject({ type: "RISK_EXIT", sellPercentOfRemaining: 100, isEmergency: true });
+    expect(sold!.reason).toContain("stayed past the max-loss stop for 30s");
+  });
+
+  it("keeps an uncovered stop immediate: with only max-loss confirmed, the catastrophic stop fires at once", () => {
+    expect(at(-30, s1, 0)).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+  });
+
+  it("confirms the catastrophic stop too when both are covered", () => {
+    expect(at(-30, s3, 10)).toBeNull();
+    expect(at(-30, s3, 30)!.reason).toContain("catastrophic stop");
+  });
+
+  it("never delays a pulled pool or a vanished sell quote", () => {
+    expect(at(-30, s3, 0, { sellQuoteAvailable: false })).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+    expect(at(-30, s3, 0, { liquidityUsd: 10_000 })).toMatchObject({ type: "RISK_EXIT", isEmergency: true });
+  });
+
+  it("leaves a manual hold without price stops", () => {
+    expect(at(-30, s3, 60, { manualHold: true })).toBeNull();
   });
 });
