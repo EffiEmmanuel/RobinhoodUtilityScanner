@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
+import { asPaperTrade, type FidelityPair, loadPaperBook, type PaperBook, summarizeFidelity } from "./fidelity";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -76,7 +77,13 @@ async function fetchAll(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
   const shuffled = snapshot.candidates.map((c) => ({ c, r: rand() }));
   const ordered = shuffled.sort((a, b) => rank(a.c) - rank(b.c) || a.r - b.r).map((x) => x.c);
   const chain = typeof flags.chain === "string" ? flags.chain : undefined;
-  const list = ordered.filter((c) => (!flags["only-traded"] || c.trades.length > 0) && (!chain || c.chain === chain));
+  // --ids <json file>: only candidates listed there (any array of rows with a candidateId), e.g. C's forensics table.
+  let ids: Set<string> | undefined;
+  if (typeof flags.ids === "string") {
+    const raw = JSON.parse(await readFile(flags.ids, "utf8")) as { candidateId?: string }[] | { rows: { candidateId?: string }[] };
+    ids = new Set((Array.isArray(raw) ? raw : raw.rows).map((r) => String(r.candidateId)));
+  }
+  const list = ordered.filter((c) => (!flags["only-traded"] || c.trades.length > 0) && (!chain || c.chain === chain) && (!ids || ids.has(c.candidateId)));
   // Pass "fine": 1m everywhere (and 5m for traded); pass "coarse": 5m everywhere.
   const pass = flags.pass === "coarse" ? "coarse" : "fine";
   let done = 0;
@@ -1045,6 +1052,99 @@ async function stopsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
   console.log(out.join("\n"));
 }
 
+export const PAPER_FILE = path.join(CACHE_DIR, "paper.json");
+
+/**
+ * Paper-vs-replay fidelity: each paper strategy's closed positions replayed
+ * through the backtester at the paper entry time, fill and size, compared
+ * trade by trade. Needs a fresh universe snapshot and candles for the
+ * candidates the paper book traded (snapshot, then fetch --chain solana).
+ */
+async function paperFidelityCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const min = Number(flags.min ?? 30);
+  let book: PaperBook;
+  if (flags.cached) {
+    book = JSON.parse(await readFile(PAPER_FILE, "utf8")) as PaperBook;
+  } else {
+    console.error("reading the paper book from the production DB (read-only)...");
+    book = await withReadOnlyProdQuery(loadPaperBook);
+    await mkdir(CACHE_DIR, { recursive: true });
+    await writeFile(PAPER_FILE, JSON.stringify(book));
+  }
+  if (!book.tablesExist) {
+    console.log("The paper tables don't exist in this database yet (deployed with B4 on the next release). Nothing to compare.");
+    return;
+  }
+  const byCandidate = new Map(snapshot.candidates.map((c) => [c.candidateId, c]));
+  const versions = new Map(snapshot.strategyVersions.map((v) => [v.id, v]));
+  const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
+  const getSeries = seriesLoader(geckoClient(true));
+  const out: string[] = ["## Paper vs replay fidelity", ""];
+  const strategies = [...new Set(book.positions.map((p) => p.strategyName))].sort();
+  for (const name of strategies) {
+    const closed = book.positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null);
+    const missing = closed.filter((p) => !byCandidate.has(p.candidateId)).length;
+    if (closed.length < min) {
+      out.push(`${name}: ${closed.length} closed positions, fewer than ${min}. Skipped.`, "");
+      continue;
+    }
+    const version = versions.get(closed[0].strategyVersionId);
+    if (!version) {
+      out.push(`${name}: its StrategyVersion ${closed[0].strategyVersionId} isn't in the snapshot; run snapshot again.`, "");
+      continue;
+    }
+    const pseudo = closed.filter((p) => byCandidate.has(p.candidateId)).map((p) => asPaperTrade(byCandidate.get(p.candidateId)!, p));
+    const byId = new Map(closed.map((p) => [p.id, p]));
+    const rows: (string | number)[][] = [];
+    for (const mode of ["worst", "close"] as const) {
+      const run = await runStrategy(pseudo, getSeries, {
+        name,
+        entry: atActualEntry(),
+        exitRules: () => version.exitRules,
+        costs: model,
+        refSizeUsd: 1,
+        sizeFor: (c) => c.trades[0].positionSizeUsd,
+        useActualEntryFill: true,
+        intrabar: mode,
+      });
+      const pairs: FidelityPair[] = run
+        .filter((r) => r.valued)
+        .map((r) => {
+          const p = byId.get(r.candidate.trades[0].id)!;
+          return {
+            positionId: p.id,
+            symbol: r.candidate.symbol,
+            paperUsd: p.realizedPnlUsd!,
+            simUsd: r.valued!.netUsd,
+            paperPct: (p.realizedPnlUsd! / p.costBasisUsd) * 100,
+            // Same base as the paper book's: size plus buy gas.
+            simPct: (r.valued!.netUsd / (r.valued!.sizeUsd + chainCosts(model, r.chain).gasBuyUsd)) * 100,
+            paperExit: p.exitReason ?? "",
+            simExit: r.sim!.exitReason,
+          };
+        });
+      const f = summarizeFidelity(pairs);
+      rows.push([
+        mode,
+        `${f.n} of ${closed.length}${missing ? ` (${missing} not in snapshot)` : ""}`,
+        `${usd(f.paperTotalUsd)} / ${pct(f.paperMeanPct)}`,
+        `${usd(f.simTotalUsd)} / ${pct(f.simMeanPct)}`,
+        `${num(f.meanAbsErrorPts, 1)} (median ${num(f.medianAbsErrorPts, 1)})`,
+        num(f.correlation),
+        `${f.sameExitType}/${f.n}`,
+        f.paperWriteOffs,
+      ]);
+      if (mode === "worst") {
+        const gaps = [...pairs].sort((a, b) => Math.abs(b.simPct - b.paperPct) - Math.abs(a.simPct - a.paperPct)).slice(0, 8);
+        out.push(`### ${name} (${version.version})`, "", "Largest gaps, worst-case wicks:", "");
+        out.push(table(["symbol", "paper", "paper exit", "replay", "replay exit"], gaps.map((g) => [g.symbol ?? "?", pct(g.paperPct), g.paperExit.slice(0, 40), pct(g.simPct), g.simExit.slice(0, 40)])), "");
+      }
+    }
+    out.push(table(["wicks", "positions", "paper total / mean", "replay total / mean", "mean abs error, pts", "correlation", "same exit type", "paper write-offs"], rows), "");
+  }
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1085,6 +1185,10 @@ export async function main(argv: string[]): Promise<void> {
       await stopsCmd(await getSnapshot(false), flags);
       return;
     }
+    case "paper-fidelity": {
+      await paperFidelityCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1097,7 +1201,7 @@ export async function main(argv: string[]): Promise<void> {
       console.log(`usage: tsx scripts/backtest-replay.ts <command> [flags]
 
   snapshot                     read the candidate universe + actual trades from prod (read-only) into the cache
-  fetch [--pass fine|coarse] [--chain c] [--only-traded]
+  fetch [--pass fine|coarse] [--chain c] [--only-traded] [--ids file.json]
                                fill the GeckoTerminal candle cache (~10 req/min, one request per pool per
                                pass). fine: 1m around decision/entry (traded also get 5m); coarse: 5m to +72h
   calibrate [--costs median|p75]
@@ -1120,6 +1224,9 @@ export async function main(argv: string[]): Promise<void> {
                                C's pre-registered launch-forensics gates (F1-F4 Solana, R1 RH) judged by
                                replay P&L: kept minus removed with a CI, both wick modes, winners cut
   stops [--chain solana]       B5: stop confirmation S1-S3 vs v1.8's intrabar stops, pre-registered rule
+  paper-fidelity [--min 30] [--refresh-universe] [--cached]
+                               replay each paper strategy's closed positions (read-only paper book) at the
+                               paper entry, fill and size, and compare trade by trade: the sim's calibration check
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

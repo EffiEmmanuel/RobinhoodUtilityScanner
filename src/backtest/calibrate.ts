@@ -138,7 +138,7 @@ export function costModelFrom(calibration: Record<string, ChainCalibration>, pic
 export function exitCategory(reason: string | null | undefined): string {
   const r = (reason ?? "").toLowerCase();
   if (!r) return "unknown";
-  if (r.includes("written off") || r.includes("cannot transfer") || r.includes("honeypot")) return "write-off";
+  if (r.includes("written off") || r.includes("write-off") || r.includes("no sell route") || r.includes("cannot transfer") || r.includes("honeypot")) return "write-off";
   if (r.includes("external/manual wallet exit")) return "external";
   if (r.includes("liquidity dropped")) return "liquidity-pull";
   if (r.includes("catastrophic")) return "catastrophic-stop";
@@ -147,7 +147,7 @@ export function exitCategory(reason: string | null | undefined): string {
   if (r.includes("retraced") || r.includes("trailing")) return "trailing";
   if (r.includes("ai strategy") || r.includes("ai_strategy")) return "ai-exit";
   if (r.includes("profit target") || r.includes("partial_profit")) return "profit-target";
-  if (r.includes("max hold") || r.includes("held") || r.includes("time_exit")) return "time";
+  if (r.includes("max hold") || r.includes("held") || r.includes("time_exit") || r.includes("hold window")) return "time";
   if (r.includes("window_end") || r.includes("data_end")) return "held-to-end";
   if (r.includes("sell pressure") || r.includes("volume faded") || r.includes("buy pressure")) return "flow-exit";
   if (r.includes("fully exited via partial")) return "partials";
