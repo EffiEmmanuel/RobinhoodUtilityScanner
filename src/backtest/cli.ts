@@ -80,8 +80,9 @@ async function fetchAll(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Pr
   // --ids <json file>: only candidates listed there (any array of rows with a candidateId), e.g. C's forensics table.
   let ids: Set<string> | undefined;
   if (typeof flags.ids === "string") {
-    const raw = JSON.parse(await readFile(flags.ids, "utf8")) as { candidateId?: string }[] | { rows: { candidateId?: string }[] };
-    ids = new Set((Array.isArray(raw) ? raw : raw.rows).map((r) => String(r.candidateId)));
+    // An array of rows, C's { rows }, or the cached paper book's { positions }.
+    const raw = JSON.parse(await readFile(flags.ids, "utf8")) as { candidateId?: string }[] | { rows?: { candidateId?: string }[]; positions?: { candidateId?: string }[] };
+    ids = new Set((Array.isArray(raw) ? raw : (raw.rows ?? raw.positions ?? [])).map((r) => String(r.candidateId)));
   }
   const list = ordered.filter((c) => (!flags["only-traded"] || c.trades.length > 0) && (!chain || c.chain === chain) && (!ids || ids.has(c.candidateId)));
   // Pass "fine": 1m everywhere (and 5m for traded); pass "coarse": 5m everywhere.
