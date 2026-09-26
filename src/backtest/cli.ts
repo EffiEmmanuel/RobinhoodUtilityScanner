@@ -1425,6 +1425,64 @@ async function paperGateAuditCmd(snapshot: UniverseSnapshot, flags: CliArgs["fla
   console.log(out.join("\n"));
 }
 
+/**
+ * The AI planner's stored reasoning for every paper position it blocked,
+ * winners it turned away (>= +50%) next to losers it rightly stopped, so a
+ * prompt or rule fix can target the arguments that turned out wrong.
+ * Read-only.
+ */
+async function plannerReasonsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const name = typeof flags.strategy === "string" ? flags.strategy : "V0 all Solana";
+  const { book, rows } = await withReadOnlyProdQuery(async (query) => {
+    const b = await loadPaperBook(query);
+    const ids = [...new Set(b.positions.filter((p) => p.strategyName === name).map((p) => p.candidateId))].map((id) => `'${id.replace(/[^A-Za-z0-9_-]/g, "")}'`);
+    const r = ids.length
+      ? await query(`
+          select tc.id as "candidateId", tc.status::text as status, last.stage, last.decision, last."finalReasons" as reasons,
+                 (select tp."planData" from "TradePlan" tp where tp."candidateId" = tc.id order by tp."createdAt" desc limit 1) as plan
+            from "TradeCandidate" tc
+            left join lateral (
+              select ds.stage, ds.decision::text as decision, ds."finalReasons"
+                from "TradeDecisionSnapshot" ds where ds."candidateId" = tc.id
+               order by (ds.decision::text in ('SKIP', 'BUY')) desc, ds."createdAt" desc limit 1) last on true
+           where tc.id in (${ids.join(",")})`)
+      : [];
+    return { book: b, rows: r };
+  });
+  const sym = new Map(snapshot.candidates.map((c) => [c.candidateId, c.symbol]));
+  const byId = new Map(rows.map((r) => [String(r.candidateId), r]));
+  const closed = book.positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null);
+  const blocked = closed.filter((p) => {
+    const r = byId.get(p.candidateId);
+    return r?.stage && classifyBlock(String(r.status), { stage: String(r.stage), decision: String(r.decision), reasons: r.reasons }).gate === "AI planner: REJECT_TRADE";
+  });
+  const net = (p: (typeof closed)[number]) => (p.realizedPnlUsd! / p.costBasisUsd) * 100;
+  const aiLines = (r: Record<string, unknown> | undefined): string[] => {
+    const nested = Array.isArray(r?.reasons) ? (r!.reasons as unknown[]).filter(Array.isArray).flat() : [];
+    const plan = r?.plan as Record<string, unknown> | null | undefined;
+    const planText = plan ? [plan.reasoning, plan.rationale, plan.summary, (plan.ai as Record<string, unknown> | undefined)?.reasoning].filter((x) => typeof x === "string") : [];
+    return [...nested.map(String), ...(planText as string[])];
+  };
+  const section = (title: string, list: typeof closed) => {
+    const lines = [`### ${title} (${list.length})`, ""];
+    for (const p of list.sort((a, b) => net(b) - net(a))) {
+      lines.push(`**${sym.get(p.candidateId) ?? p.candidateId} ${pct(net(p), 0)}** (paper exit: ${p.exitReason ?? "?"})`);
+      for (const l of aiLines(byId.get(p.candidateId))) lines.push(`- ${l}`);
+      lines.push("");
+    }
+    return lines;
+  };
+  console.log(
+    [
+      `## AI planner REJECT_TRADE reasoning vs real-quote paper outcome: "${name}"`,
+      "",
+      ...section("Winners it blocked (>= +50%)", blocked.filter((p) => net(p) >= 50)),
+      ...section("Other positive trades it blocked", blocked.filter((p) => net(p) > 0 && net(p) < 50)),
+      ...section("Losers it blocked", blocked.filter((p) => net(p) <= 0)),
+    ].join("\n")
+  );
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1485,6 +1543,10 @@ export async function main(argv: string[]): Promise<void> {
       await paperGateAuditCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
       return;
     }
+    case "planner-reasons": {
+      await plannerReasonsCmd(await getSnapshot(false), flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1536,6 +1598,8 @@ export async function main(argv: string[]): Promise<void> {
   paper-gate-audit [--strategies "V0 all Solana,V0 non-pump (E2)"] [--refresh-universe]
                                which live gate blocked each paper-traded candidate, and per gate the blocked
                                trades vs the rest on real quotes (safety gates and kill switch report-only)
+  planner-reasons [--strategy "V0 all Solana"]
+                               the AI planner's stored REJECT_TRADE reasoning for paper winners vs losers it blocked
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates
