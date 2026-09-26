@@ -189,6 +189,12 @@ function launchScenario() {
 }
 
 describe("getSolanaLaunchForensics", () => {
+  it("has no default RPC, so nothing spends the prod key by accident", () => {
+    // @ts-expect-error rpc is required (typecheck fails if it gets a default again)
+    const call = () => getSolanaLaunchForensics("mint", undefined);
+    expect(typeof call).toBe("function");
+  });
+
   it("reads the bundle, the dev dump, the serial launcher and the shared funder from one launch", async () => {
     const { mint, rpc, deployer, curveCreator } = launchScenario();
     const f = await getSolanaLaunchForensics(mint, undefined, rpc, DEFAULT_SOLANA_FORENSICS_OPTIONS);

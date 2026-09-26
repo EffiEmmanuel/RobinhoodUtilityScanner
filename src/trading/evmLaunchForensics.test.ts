@@ -72,6 +72,12 @@ describe("blockAt", () => {
 });
 
 describe("getEvmLaunchForensics", () => {
+  it("has no default reader, so nothing spends the prod RPC by accident", () => {
+    // @ts-expect-error reader is required (typecheck fails if it gets a default again)
+    const call = () => getEvmLaunchForensics("0x1", undefined);
+    expect(typeof call).toBe("function");
+  });
+
   it("reads a direct deploy by a serial deployer: bundle, first-20 share, dead prior tokens", async () => {
     const token = getContractAddress({ from: DEPLOYER, nonce: 5n }).toLowerCase();
     const priorLive = getContractAddress({ from: DEPLOYER, nonce: 1n }).toLowerCase();

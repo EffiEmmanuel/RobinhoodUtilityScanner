@@ -1,7 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
-import { config } from "../config";
-import { logger } from "../logger";
 import {
   computeCreatorHolding,
   computeEarlyBuyerFeatures,
@@ -286,11 +284,16 @@ async function isBusyWallet(rpc: SolanaRpc, wallet: string, before: string): Pro
  * Launch forensics for one Solana mint as of `asOf` (defaults to now).
  * Throws only when nothing at all could be read; partial reads land in
  * `unknowns`.
+ *
+ * `rpc` is required on purpose. A read costs ~60-95 calls, and the prod
+ * Solana key (SOLANA_RPC_URL) has a daily cap that a bulk study exhausted on
+ * 2026-09-25. Live callers use launchForensicsGate's forensicsSolanaRpc,
+ * which has its own endpoint and a daily budget.
  */
 export async function getSolanaLaunchForensics(
   mint: string,
   asOf: Date | undefined,
-  rpc: SolanaRpc = defaultSolanaRpc(),
+  rpc: SolanaRpc,
   opts: SolanaForensicsOptions = DEFAULT_SOLANA_FORENSICS_OPTIONS
 ): Promise<LaunchForensics> {
   const unknowns: string[] = [];
@@ -433,39 +436,4 @@ async function creatorPumpLaunches(rpc: SolanaRpc, insiders: string[], mint: str
     return oldest ? { launchTime: oldest, graduated: curves.get(a.mint)!.complete } : undefined;
   });
   return dated.filter((d): d is LaunchRecord => Boolean(d));
-}
-
-const RETRYABLE = /429|Too many|unhealthy|timeout|timed out|ECONNRESET|fetch failed|503|502|504/i;
-
-/** Plain JSON-RPC over every configured Solana endpoint, with backoff on rate limits. */
-export function defaultSolanaRpc(): SolanaRpc {
-  const urls = [config.solanaRpcUrl, ...config.solanaRpcExtraUrls, config.solanaRpcFallbackUrl].filter((u): u is string => Boolean(u));
-  if (urls.length === 0) throw new Error("SOLANA_RPC_URL is not set — cannot read launch forensics");
-  return {
-    async call<T>(method: string, params: unknown[]): Promise<T> {
-      let lastErr: unknown;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const url = urls[attempt % urls.length];
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-            signal: AbortSignal.timeout(20_000),
-          });
-          const text = await res.text();
-          if (!res.ok) throw new Error(`${method}: HTTP ${res.status} ${text.slice(0, 120)}`);
-          const body = JSON.parse(text) as { result?: T; error?: { code: number; message: string } };
-          if (body.error) throw new Error(`${method}: ${body.error.code} ${body.error.message}`);
-          return body.result as T;
-        } catch (err) {
-          lastErr = err;
-          if (!RETRYABLE.test(String(err))) throw err;
-          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
-        }
-      }
-      logger.warn({ method, err: String(lastErr) }, "launch forensics RPC call failed after retries");
-      throw lastErr;
-    },
-  };
 }

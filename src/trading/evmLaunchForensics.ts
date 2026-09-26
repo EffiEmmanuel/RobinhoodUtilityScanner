@@ -48,7 +48,7 @@ export interface RawLog {
   transactionHash: string;
 }
 
-/** The handful of reads this needs; `defaultEvmReader` is the real one. */
+/** The handful of reads this needs: `jsonRpcEvmReader` over any endpoint, or `prodRhRpcEvmReader`. */
 export interface EvmReader {
   getBlockNumber(): Promise<bigint>;
   getBlockTimestamp(block: bigint): Promise<number>;
@@ -118,12 +118,14 @@ export function transfersToLaunchTxs(logs: TransferLog[], contracts: Map<string,
 
 /**
  * Launch forensics for one Robinhood Chain token as of `asOf` (defaults to
- * now). Throws only when the mint itself can't be found.
+ * now). Throws only when the mint itself can't be found. `reader` is
+ * required so no caller spends the prod RPC by accident; see
+ * prodRhRpcEvmReader.
  */
 export async function getEvmLaunchForensics(
   token: string,
   asOf: Date | undefined,
-  reader: EvmReader = defaultEvmReader(),
+  reader: EvmReader,
   opts: EvmForensicsOptions = DEFAULT_EVM_FORENSICS_OPTIONS
 ): Promise<LaunchForensics> {
   const unknowns: string[] = [];
@@ -336,8 +338,15 @@ export function jsonRpcEvmReader(rpc: JsonRpc): EvmReader {
 
 const EVM_RETRYABLE = /429|Too Many|timeout|timed out|ECONNRESET|fetch failed|50\d/i;
 
-/** The configured RH RPC, then its fallback. */
-export function defaultEvmReader(): EvmReader {
+/**
+ * The PROD Robinhood RPC (RH_RPC_URL, then RH_RPC_FALLBACK_URL): the same
+ * endpoints that sign and confirm our trades. No live code calls this
+ * today. Before anything does, give it its own daily call budget, the way
+ * launchForensicsGate.ts's withBudget does for Solana: a read costs ~25+
+ * calls, and a bulk Solana study exhausted a prod key's daily cap on
+ * 2026-09-25.
+ */
+export function prodRhRpcEvmReader(): EvmReader {
   const urls = [config.rhRpcUrl, config.rhRpcFallbackUrl].filter(Boolean);
   return jsonRpcEvmReader({
     async call<T>(method: string, params: unknown[]): Promise<T> {
