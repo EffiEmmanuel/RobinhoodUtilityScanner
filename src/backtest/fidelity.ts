@@ -155,3 +155,45 @@ export function summarizeFidelity(pairs: FidelityPair[]): FidelitySummary {
     paperWriteOffs: pairs.filter((p) => /write-off|no sell route/i.test(p.paperExit)).length,
   };
 }
+
+/** Nested LaunchForensics JSON as the dotted keys C's table (and FORENSICS_GATES) use. */
+export function flattenFeatures(value: unknown, prefix = "", out: Record<string, unknown> = {}): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) flattenFeatures(v, prefix ? `${prefix}.${k}` : k, out);
+  } else if (prefix) {
+    out[prefix] = value;
+  }
+  return out;
+}
+
+export interface PaperForensicsRow {
+  candidateId: string;
+  status: string | null; // READY | UNAVAILABLE | null (no snapshot)
+  features: Record<string, unknown>; // flattened
+  tokenAddress: string;
+  chain: string;
+  dexId: string | null;
+}
+
+/** Read-only: the live LaunchForensicsSnapshot and launch venue for each paper-traded candidate. */
+export async function loadPaperForensics(query: (sql: string) => Promise<Row[]>, candidateIds: string[]): Promise<PaperForensicsRow[]> {
+  if (!candidateIds.length) return [];
+  const [exists] = await query(`select to_regclass('"LaunchForensicsSnapshot"') is not null as ok`);
+  const list = candidateIds.map((id) => `'${id.replace(/[^A-Za-z0-9_-]/g, "")}'`).join(",");
+  const rows = await query(`
+    select tc.id as "candidateId", t.address, t.chain, rr."rawResearch"->'market'->'primaryPair'->>'dexId' as "dexId"
+           ${exists?.ok ? `, lf.status, lf.features` : ""}
+      from "TradeCandidate" tc
+      join "Token" t on t.id = tc."tokenId"
+      left join "ResearchRun" rr on rr.id = tc."researchRunId"
+      ${exists?.ok ? `left join "LaunchForensicsSnapshot" lf on lf."candidateId" = tc.id` : ""}
+     where tc.id in (${list})`);
+  return rows.map((r) => ({
+    candidateId: String(r.candidateId),
+    status: typeof r.status === "string" ? r.status : null,
+    features: flattenFeatures(r.features ?? {}),
+    tokenAddress: String(r.address),
+    chain: String(r.chain),
+    dexId: typeof r.dexId === "string" ? r.dexId : null,
+  }));
+}

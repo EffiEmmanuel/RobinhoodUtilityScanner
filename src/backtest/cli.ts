@@ -3,7 +3,7 @@ import path from "node:path";
 import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
-import { asPaperTrade, type FidelityPair, loadPaperBook, type PaperBook, summarizeFidelity } from "./fidelity";
+import { asPaperTrade, type FidelityPair, loadPaperBook, loadPaperForensics, type PaperBook, summarizeFidelity } from "./fidelity";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
 import { flatRule, sizingSweep, userBrackets } from "./sizing";
@@ -1213,6 +1213,71 @@ async function signalsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): 
   console.log(out.join("\n"));
 }
 
+/**
+ * F4 (and the other launch-forensics gates) judged on REAL paper quotes:
+ * a paper strategy that enters every candidate at decision, split by each
+ * candidate's live LaunchForensicsSnapshot (unknown or unavailable = kept),
+ * and by launch venue. Read-only.
+ */
+async function paperForensicsCmd(flags: CliArgs["flags"]): Promise<void> {
+  const name = typeof flags.strategy === "string" ? flags.strategy : "V0 all Solana";
+  const min = Number(flags.min ?? 100);
+  console.error("reading the paper book and forensics snapshots from the production DB (read-only)...");
+  const { book, forensics } = await withReadOnlyProdQuery(async (query) => {
+    const b = await loadPaperBook(query);
+    const closed = b.positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null);
+    return { book: b, forensics: await loadPaperForensics(query, [...new Set(closed.map((p) => p.candidateId))]) };
+  });
+  if (!book.tablesExist) {
+    console.log("The paper tables don't exist in this database yet.");
+    return;
+  }
+  const byCandidate = new Map(forensics.map((f) => [f.candidateId, f]));
+  const closed = book.positions.filter((p) => p.strategyName === name && p.status === "CLOSED" && p.realizedPnlUsd !== null);
+  const ready = closed.filter((p) => byCandidate.get(p.candidateId)?.status === "READY");
+  const out: string[] = [
+    `## Launch-forensics gates on real paper quotes: "${name}"`,
+    "",
+    `${closed.length} closed positions, ${ready.length} with a READY forensics snapshot (the rest have none or it was UNAVAILABLE; those count as kept, since unknown passes).`,
+    "",
+  ];
+  if (ready.length < min) {
+    console.log([...out, `Fewer than ${min} with a READY snapshot: not judged yet.`].join("\n"));
+    return;
+  }
+  const net = (p: (typeof closed)[number]) => (p.realizedPnlUsd! / p.costBasisUsd) * 100;
+  const venueOf = (id: string) => {
+    const f = byCandidate.get(id);
+    return f ? launchVenue({ chain: f.chain, tokenAddress: f.tokenAddress, pair: f.dexId ? { pairAddress: "", dexId: f.dexId } : null }) : "unknown";
+  };
+  const rows: (string | number)[][] = [];
+  for (const gate of FORENSICS_GATES.filter((g) => g.chain === "solana" && ["F4", "F3", "F3|F4", "F1"].includes(g.name))) {
+    for (const [label, keep] of [
+      ["all venues", () => true],
+      ["pump.fun launches", (id: string) => venueOf(id) === "pump.fun"],
+      ["other launches (E2)", (id: string) => venueOf(id) !== "pump.fun"],
+    ] as const) {
+      const set = closed.filter((p) => keep(p.candidateId));
+      const removes = (p: (typeof closed)[number]) => {
+        const f = byCandidate.get(p.candidateId);
+        return f?.status === "READY" && gate.removes(f.features);
+      };
+      const kept = set.filter((p) => !removes(p)).map(net);
+      const removed = set.filter(removes).map(net);
+      const ci = bootstrapDiffCI(kept, removed);
+      rows.push([
+        `${gate.name}: ${gate.describe}`,
+        label,
+        `${kept.length} kept, mean ${pct(mean(kept))}`,
+        `${removed.length} removed, mean ${pct(mean(removed))}`,
+        kept.length && removed.length ? `${pct(mean(kept) - mean(removed))} [${pct(ci[0])}, ${pct(ci[1])}]` : "n/a",
+      ]);
+    }
+  }
+  out.push(table(["gate", "venue", "kept", "removed", "kept - removed [90% CI]"], rows));
+  console.log(out.join("\n"));
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1261,6 +1326,10 @@ export async function main(argv: string[]): Promise<void> {
       await signalsCmd(await getSnapshot(false), flags);
       return;
     }
+    case "paper-forensics": {
+      await paperForensicsCmd(flags);
+      return;
+    }
     case "survivor": {
       await survivorCmd(await getSnapshot(false), flags);
       return;
@@ -1303,6 +1372,9 @@ export async function main(argv: string[]): Promise<void> {
   signals --table <C2 json> [--field firedAt] [--chain solana]
                                C2 signals: do signal candidates do better at decision, and does entering at
                                the signal beat entering at decision (paired)? Both wick modes, date halves
+  paper-forensics [--strategy "V0 all Solana"] [--min 100]
+                               F4 and the other forensics gates judged on real paper quotes, split by the
+                               live LaunchForensicsSnapshot and by launch venue (read-only)
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
                                B3: survivor entries at T+6/12/24h, tuned on the first half of dates and
                                tested on the second, against early entry on the same candidates

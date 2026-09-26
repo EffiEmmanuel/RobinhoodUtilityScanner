@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { asPaperTrade, loadPaperBook, type PaperBookPosition, summarizeFidelity } from "./fidelity";
+import { FORENSICS_GATES } from "./compare";
+import { asPaperTrade, flattenFeatures, loadPaperBook, loadPaperForensics, type PaperBookPosition, summarizeFidelity } from "./fidelity";
 import type { UniverseCandidate } from "./universe";
 
 const position: PaperBookPosition = {
@@ -53,5 +54,29 @@ describe("paper-vs-replay fidelity", () => {
     // One honeypot write-off the sim can't see wrecks the correlation; hence the separate count.
     expect(f.correlation).toBeCloseTo(0.0917, 3);
     expect(f.paperTotalUsd).toBeCloseTo(-6);
+  });
+});
+
+describe("paper forensics", () => {
+  it("flattens the live snapshot's nested features into the gates' dotted keys", () => {
+    const flat = flattenFeatures({ launchpad: "pumpfun", early: { first20BuyerSharePct: 70, launchSlotBuySharePct: 12 }, funding: { clusteredBuyerSharePct: null } });
+    expect(flat).toEqual({ launchpad: "pumpfun", "early.first20BuyerSharePct": 70, "early.launchSlotBuySharePct": 12, "funding.clusteredBuyerSharePct": null });
+    const f4 = FORENSICS_GATES.find((g) => g.name === "F4")!;
+    expect(f4.removes(flat)).toBe(true);
+    expect(f4.removes(flattenFeatures({ early: {} }))).toBe(false);
+  });
+
+  it("reads snapshots only for the given candidates, and copes before the snapshot table exists", async () => {
+    const sqls: string[] = [];
+    const rows = await loadPaperForensics(
+      async (sql) => {
+        sqls.push(sql);
+        return sqls.length === 1 ? [{ ok: false }] : [{ candidateId: "c1", address: "Xpump", chain: "solana", dexId: "pumpswap" }];
+      },
+      ["c1", "c'; drop table x;--"]
+    );
+    expect(sqls[1]).toContain("'c1','cdroptablex--'");
+    expect(sqls[1]).not.toContain("LaunchForensicsSnapshot");
+    expect(rows[0]).toMatchObject({ candidateId: "c1", status: null, features: {} });
   });
 });
