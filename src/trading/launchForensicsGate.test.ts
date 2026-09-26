@@ -86,21 +86,58 @@ describe("forensicsSolanaRpc", () => {
       if (String(url).includes("primary")) return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Indexed requests require a personal token" } }), { status: 403 });
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { value: [] } }));
     }) as typeof fetch;
-    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example" });
+    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example", rps: 1000 });
     await expect(rpc.call("getTokenAccountsByOwner", [])).resolves.toEqual({ value: [] });
     expect(seen).toEqual(["https://primary.example", "https://fallback.example"]);
   });
 
-  it("gives up after two retries on rate limits instead of hammering", async () => {
-    globalThis.fetch = vi.fn(async () => new Response("rate limited", { status: 429 })) as typeof fetch;
+  it("waits out rate limits with growing gaps, then gives up", async () => {
+    const sentAt: number[] = [];
+    globalThis.fetch = vi.fn(async () => {
+      sentAt.push(Date.now());
+      return new Response("rate limited", { status: 429 });
+    }) as typeof fetch;
     vi.useFakeTimers();
-    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example" });
+    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example", rps: 1000 });
     const p = rpc.call("getSlot", []);
     const assertion = expect(p).rejects.toThrow(/429/);
     await vi.runAllTimersAsync();
     await assertion;
     vi.useRealTimers();
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+    expect(sentAt).toHaveLength(5);
+    const gaps = sentAt.slice(1).map((t, i) => t - sentAt[i]);
+    expect(gaps.map((g) => Math.round(g / 1000))).toEqual([2, 4, 8, 16]);
+  });
+
+  it("honours the server's Retry-After", async () => {
+    const sentAt: number[] = [];
+    let n = 0;
+    globalThis.fetch = vi.fn(async () => {
+      sentAt.push(Date.now());
+      return n++ === 0 ? new Response("slow down", { status: 429, headers: { "retry-after": "30" } }) : new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: 7 }));
+    }) as typeof fetch;
+    vi.useFakeTimers();
+    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example", rps: 1000 });
+    const p = rpc.call("getSlot", []);
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toBe(7);
+    vi.useRealTimers();
+    expect(Math.round((sentAt[1] - sentAt[0]) / 1000)).toBe(30);
+  });
+
+  it("paces calls to the configured rate", async () => {
+    const sentAt: number[] = [];
+    globalThis.fetch = vi.fn(async () => {
+      sentAt.push(Date.now());
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: 1 }));
+    }) as typeof fetch;
+    vi.useFakeTimers();
+    const rpc = forensicsSolanaRpc({ rpcUrl: "https://primary.example", rpcFallbackUrl: "https://fallback.example", rps: 2 });
+    const all = Promise.all([rpc.call("a", []), rpc.call("b", []), rpc.call("c", [])]);
+    await vi.runAllTimersAsync();
+    await all;
+    vi.useRealTimers();
+    expect(sentAt[2] - sentAt[0]).toBeGreaterThanOrEqual(1000);
   });
 });
 
@@ -119,14 +156,54 @@ describe("computeNextLaunchForensics", () => {
     expect(snapshots.get("old")).toMatchObject({ status: "READY", features: expect.objectContaining({ launchpad: "pumpfun" }) });
   });
 
-  it("records a failed read as UNAVAILABLE once", async () => {
+  it("records a read that can't succeed as UNAVAILABLE once", async () => {
     candidates = [{ id: "c1", token: { address: "m" } }];
     const read = vi.fn(async () => {
-      throw new Error("getSignaturesForAddress: HTTP 500");
+      throw new Error("getTokenSupply: -32602 Invalid param: not a Token mint");
     });
-    expect(await computeNextLaunchForensics({ settings: settings(), budget: new RpcBudget(1000), rpc, read })).toBe("unavailable");
+    const deps = { settings: settings(), budget: new RpcBudget(1000), rpc, read, retries: new Map() };
+    expect(await computeNextLaunchForensics(deps)).toBe("unavailable");
     expect(snapshots.get("c1")).toMatchObject({ status: "UNAVAILABLE" });
-    expect(await computeNextLaunchForensics({ settings: settings(), budget: new RpcBudget(1000), rpc, read })).toBe("none");
+    expect(await computeNextLaunchForensics(deps)).toBe("none");
+  });
+
+  it("retries a rate-limited read later, further apart each time, before giving up", async () => {
+    candidates = [{ id: "c1", token: { address: "m" } }];
+    const read = vi.fn(async () => {
+      throw new Error("getTransaction: HTTP 429 Too many requests for a specific RPC call");
+    });
+    let now = 1_000_000;
+    const deps = { settings: settings({ maxAttempts: 3, retryBaseSeconds: 60 }), budget: new RpcBudget(1000), rpc, read, retries: new Map(), now: () => now };
+    expect(await computeNextLaunchForensics(deps)).toBe("deferred");
+    expect(snapshots.size).toBe(0);
+    // Not due yet: nothing else to read.
+    now += 59_000;
+    expect(await computeNextLaunchForensics(deps)).toBe("none");
+    now += 1_000;
+    expect(await computeNextLaunchForensics(deps)).toBe("deferred");
+    now += 119_000;
+    expect(await computeNextLaunchForensics(deps)).toBe("none");
+    now += 1_000;
+    expect(await computeNextLaunchForensics(deps)).toBe("unavailable");
+    expect(snapshots.get("c1")?.error).toMatch(/^after 3 attempt\(s\): .*429/);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it("stores a read that succeeds on retry", async () => {
+    candidates = [{ id: "c1", token: { address: "m" } }];
+    let calls = 0;
+    const read = vi.fn(async () => {
+      if (calls++ === 0) throw new Error("timed out after 120000ms");
+      return bundled;
+    });
+    let now = 1_000_000;
+    const retries = new Map();
+    const deps = { settings: settings(), budget: new RpcBudget(1000), rpc, read, retries, now: () => now };
+    expect(await computeNextLaunchForensics(deps)).toBe("deferred");
+    now += 60_000;
+    expect(await computeNextLaunchForensics(deps)).toBe("ready");
+    expect(snapshots.get("c1")).toMatchObject({ status: "READY" });
+    expect(retries.size).toBe(0);
   });
 
   it("doesn't start, and writes nothing, when the budget is nearly spent", async () => {
