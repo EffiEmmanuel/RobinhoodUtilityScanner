@@ -1149,64 +1149,73 @@ async function paperFidelityCmd(snapshot: UniverseSnapshot, flags: CliArgs["flag
 }
 
 /**
- * C2 smart-wallet signals: (1) does a signal pick better candidates? At
- * decision-time entry, signal-present vs absent (kept minus removed, as a
- * filter would). (2) does waiting for the signal help? The same candidates
- * entered at the signal vs at decision, paired. Both wick modes, date halves.
+ * C2 smart-wallet signals, per pre-registered variant, on the candidates in
+ * the signal table (C's out-of-sample test half):
+ *  - does a signal pick better candidates? fired vs not, entered at decision;
+ *  - is it the smart wallets, or just a busy token? fired vs the matched
+ *    control (same rule, random non-proven repeat buyers);
+ *  - does acting on the signal help? entry at the raw signal time (even
+ *    before the candidate exists: the upper bound of a signal-driven entry)
+ *    vs at decision, paired on the fired candidates; and signal-timed vs
+ *    control-timed entries.
  */
 async function signalsCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
   const file = typeof flags.table === "string" ? flags.table : undefined;
   if (!file) throw new Error("signals needs --table <C2 signal table .json>");
   const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>[] | { rows: Record<string, unknown>[] };
-  const signals = parseSignalRows(Array.isArray(raw) ? raw : raw.rows, typeof flags.field === "string" ? flags.field : undefined);
-  const chain = typeof flags.chain === "string" ? flags.chain : "solana";
+  const tableRows = Array.isArray(raw) ? raw : raw.rows;
+  const variants = (typeof flags.variants === "string" ? flags.variants : "V1").split(",");
   const exit = await exitConfig(snapshot, typeof flags.exit === "string" ? flags.exit : "v1.8");
   const { model } = await loadCosts(flags.costs === "p75" ? "p75" : "median");
   const refSize = Number(flags["ref-size"] ?? 1.25);
   const getSeries = seriesLoader(geckoClient(true));
-  const universe = snapshot.candidates.filter(universeFilter({ ...flags, chain }));
-  const sorted = universe.map((c) => c.createdAt).sort((a, b) => a - b);
-  const split = sorted[Math.floor(sorted.length / 2)] ?? 0;
-  const withSignal = universe.filter((c) => signals.has(c.candidateId));
+  const inTable = new Set(tableRows.map((r) => String(r.candidateId)));
+  const universe = snapshot.candidates.filter((c) => inTable.has(c.candidateId));
+  const ci = (a: number[], b: number[]) => {
+    if (!a.length || !b.length) return "n/a";
+    const [lo, hi] = bootstrapDiffCI(a, b);
+    return `${pct(mean(a) - mean(b))} [${pct(lo)}, ${pct(hi)}]`;
+  };
   const out: string[] = [
-    `## C2 signals, ${chain} (${exit.name} exits, ${usd(refSize)} positions)`,
+    `## C2 smart-wallet signals (${exit.name} exits, ${usd(refSize)} positions, median costs)`,
     "",
-    `${signals.size} signals in the table; ${withSignal.length} of ${universe.length} ${chain} candidates have one (${withSignal.filter((c) => signals.get(c.candidateId)! < c.createdAt).length} fired before the decision and enter at it).`,
+    `${universe.length} of the table's ${inTable.size} candidates are in the universe snapshot. Each cell: difference in mean net return per trade [90% CI].`,
     "",
   ];
   const rows: (string | number)[][] = [];
   for (const mode of ["worst", "close"] as const) {
     const cfg = { name: exit.name, exitRules: () => exit.rules, costs: model, refSizeUsd: refSize, intrabar: mode };
-    const atDec = (await runStrategy(universe, getSeries, { ...cfg, entry: atDecision() })).filter((r) => r.valued);
-    const atSig = (await runStrategy(withSignal, getSeries, { ...cfg, entry: atSignal(signals) })).filter((r) => r.valued);
-    for (const [label, keep] of [
-      ["all", () => true],
-      ["early half", (c: UniverseCandidate) => c.createdAt < split],
-      ["late half", (c: UniverseCandidate) => c.createdAt >= split],
-    ] as const) {
-      const dec = atDec.filter((r) => keep(r.candidate));
-      const yes = dec.filter((r) => signals.has(r.candidate.candidateId)).map((r) => r.valued!.netPct);
-      const no = dec.filter((r) => !signals.has(r.candidate.candidateId)).map((r) => r.valued!.netPct);
-      const ci = bootstrapDiffCI(yes, no);
-      const paired = summarizePairs(label, pairRows(dec.filter((r) => signals.has(r.candidate.candidateId)), atSig.filter((r) => keep(r.candidate))));
+    const atDec = new Map((await runStrategy(universe, getSeries, { ...cfg, entry: atDecision() })).filter((r) => r.valued).map((r) => [r.candidate.candidateId, r]));
+    const decPct = (ids: string[]) => ids.filter((id) => atDec.has(id)).map((id) => atDec.get(id)!.valued!.netPct);
+    for (const v of variants) {
+      const sig = parseSignalRows(tableRows, `${v}.firedAtUnix`);
+      const ctl = parseSignalRows(tableRows, `${v}.control.firedAtUnix`);
+      const fired = universe.filter((c) => sig.has(c.candidateId)).map((c) => c.candidateId);
+      const notFired = universe.filter((c) => !sig.has(c.candidateId)).map((c) => c.candidateId);
+      const ctlFired = universe.filter((c) => ctl.has(c.candidateId)).map((c) => c.candidateId);
+      const runAt = async (m: Map<string, number>, label: string) =>
+        (await runStrategy(universe.filter((c) => m.has(c.candidateId)), getSeries, { ...cfg, entry: atSignal(m, label, { allowBeforeDecision: true }) })).filter((r) => r.valued);
+      const sigRuns = await runAt(sig, v);
+      const ctlRuns = await runAt(ctl, `${v} control`);
+      const paired = summarizePairs("paired", pairRows(fired.filter((id) => atDec.has(id)).map((id) => atDec.get(id)!), sigRuns));
       rows.push([
+        v,
         mode,
-        label,
-        `${yes.length} with / ${no.length} without`,
-        yes.length && no.length ? `${pct(mean(yes) - mean(no))} [${pct(ci[0])}, ${pct(ci[1])}]` : "n/a",
-        `${pct(mean(yes))}`,
-        paired.n ? `${pct(paired.diffMeanPct)} [${pct(paired.diffCI90[0])}, ${pct(paired.diffCI90[1])}] ${paired.bBetter}/${paired.bWorse} n=${paired.n}` : "n/a",
-        paired.n ? pct(paired.bMeanPct) : "n/a",
+        `${fired.length} / ${ctlFired.length}`,
+        ci(decPct(fired), decPct(notFired)),
+        ci(decPct(fired), decPct(ctlFired)),
+        paired.n ? `${pct(paired.diffMeanPct)} [${pct(paired.diffCI90[0])}, ${pct(paired.diffCI90[1])}] n=${paired.n}` : "n/a",
+        ci(
+          sigRuns.map((r) => r.valued!.netPct),
+          ctlRuns.map((r) => r.valued!.netPct)
+        ),
+        sigRuns.length ? pct(mean(sigRuns.map((r) => r.valued!.netPct))) : "n/a",
       ]);
-    }
-    if (mode === "worst") {
-      const best = atSig.sort((a, b) => b.valued!.netPct - a.valued!.netPct).slice(0, 8);
-      out.push(`Best entries at the signal (worst-case wicks): ${best.map((r) => `${r.candidate.symbol ?? "?"} ${pct(r.valued!.netPct, 0)}`).join(", ")}`, "");
     }
   }
   out.push(
     table(
-      ["wicks", "dates", "candidates", "signal picks better? with - without, at decision", "with signal, at decision", "waiting for it: at signal - at decision (paired)", "with signal, at signal"],
+      ["variant", "wicks", "fired / control fired", "fired - not fired (at decision)", "fired - control (at decision)", "at signal - at decision (paired)", "at signal - control at its signal", "mean at signal"],
       rows
     )
   );
@@ -1369,9 +1378,9 @@ export async function main(argv: string[]): Promise<void> {
   paper-fidelity [--min 30] [--refresh-universe] [--cached]
                                replay each paper strategy's closed positions (read-only paper book) at the
                                paper entry, fill and size, and compare trade by trade: the sim's calibration check
-  signals --table <C2 json> [--field firedAt] [--chain solana]
-                               C2 signals: do signal candidates do better at decision, and does entering at
-                               the signal beat entering at decision (paired)? Both wick modes, date halves
+  signals --table <C2 json> [--variants V1,V1s,...]
+                               C2 signals per variant: fired vs not and vs the matched control at decision,
+                               and entry at the signal vs at decision (paired). Both wick modes
   paper-forensics [--strategy "V0 all Solana"] [--min 100]
                                F4 and the other forensics gates judged on real paper quotes, split by the
                                live LaunchForensicsSnapshot and by launch venue (read-only)

@@ -112,12 +112,15 @@ export function survivor(p: SurvivorParams): EntryStrategy {
  * as candidateId -> unix seconds. A signal before the decision time enters
  * at the decision: the bot can't act on a candidate it hasn't created yet.
  */
-export function atSignal(signals: Map<string, number>, label = "signal"): EntryStrategy {
+export function atSignal(signals: Map<string, number>, label = "signal", opts: { allowBeforeDecision?: boolean } = {}): EntryStrategy {
   return {
     name: `at-${label}`,
     decide: ({ candidate }) => {
       const ts = signals.get(candidate.candidateId);
       if (ts === undefined) return { skip: `no ${label}` };
+      // allowBeforeDecision: a hypothetical signal-driven entry that doesn't
+      // wait for the candidate (the upper bound of acting on the signal alone).
+      if (opts.allowBeforeDecision) return { ts };
       return { ts: Math.max(ts, candidate.createdAt), note: ts < candidate.createdAt ? `${label} before decision` : undefined };
     },
   };

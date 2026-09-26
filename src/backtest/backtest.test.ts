@@ -294,6 +294,7 @@ describe("signal entries", () => {
     expect(e.decide({ candidate: c("a"), closedBy: () => [] })).toEqual({ ts: T0 + 300, note: undefined });
     expect(e.decide({ candidate: c("b"), closedBy: () => [] })).toEqual({ ts: T0, note: "signal before decision" });
     expect(e.decide({ candidate: c("x"), closedBy: () => [] })).toEqual({ skip: "no signal" });
+    expect(atSignal(new Map([["b", T0 - 60]]), "signal", { allowBeforeDecision: true }).decide({ candidate: c("b"), closedBy: () => [] })).toEqual({ ts: T0 - 60 });
   });
 });
 
