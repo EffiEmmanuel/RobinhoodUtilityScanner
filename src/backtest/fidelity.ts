@@ -25,6 +25,13 @@ export interface PaperBookPosition {
   realizedPnlUsd: number | null;
   exitReason: string | null;
   mfePercent: number | null;
+  // Optional so a paper.json cached before they were read still loads.
+  maePercent?: number | null;
+  gasUsd?: number | null; // modeled gas across all fills
+  liquidityUsdAtDecision?: number | null;
+  qualityScore?: number | null;
+  startEquityUsd?: number | null; // the strategy's
+  firstMarkPriceUsd?: number | null; // the stop baseline's input
 }
 
 export interface PaperBook {
@@ -43,8 +50,11 @@ export async function loadPaperBook(query: (sql: string) => Promise<Row[]>): Pro
   const rows = await query(`
     select p.id, p."strategyId", s.name as "strategyName", s."strategyVersionId", p."candidateId", p.status,
            extract(epoch from p."openedAt") as opened_at, extract(epoch from p."closedAt") as closed_at,
-           p."sizeUsd", p."entryPriceUsd", p."costBasisUsd", p."realizedPnlUsd", p."exitReason", p."mfePercent"
-      from "PaperPosition" p join "PaperStrategy" s on s.id = p."strategyId"`);
+           p."sizeUsd", p."entryPriceUsd", p."costBasisUsd", p."realizedPnlUsd", p."exitReason", p."mfePercent", p."maePercent", p."firstMarkPriceUsd",
+           p.meta->>'liquidityUsdAtDecision' as liquidity, p.meta->>'qualityScore' as quality, f.gas,
+           s."startEquityUsd"
+      from "PaperPosition" p join "PaperStrategy" s on s.id = p."strategyId"
+      left join (select "positionId", sum("gasUsd") as gas from "PaperFill" group by 1) f on f."positionId" = p.id`);
   const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
   return {
     capturedAt,
@@ -64,6 +74,12 @@ export async function loadPaperBook(query: (sql: string) => Promise<Row[]>): Pro
       realizedPnlUsd: num(r.realizedPnlUsd),
       exitReason: r.exitReason === null ? null : String(r.exitReason),
       mfePercent: num(r.mfePercent),
+      maePercent: num(r.maePercent),
+      gasUsd: num(r.gas),
+      liquidityUsdAtDecision: num(r.liquidity),
+      qualityScore: num(r.quality),
+      startEquityUsd: num(r.startEquityUsd),
+      firstMarkPriceUsd: num(r.firstMarkPriceUsd),
     })),
   };
 }

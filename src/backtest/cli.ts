@@ -4,6 +4,31 @@ import type { ExitRules } from "../trading/strategy";
 import { type ChainCalibration, MIN_CHAIN_FILLS, calibrateChain, costModelFrom, exitCategory, type FillSample, fillSamples } from "./calibrate";
 import { GeckoTerminalClient } from "./candles";
 import { classifyBlock } from "./gateAudit";
+import {
+  classifyLoss,
+  classifyWin,
+  distribution,
+  evidenceStage,
+  type ExcursionRow,
+  LOSS_CLASS_MEANING,
+  type LossClass,
+  liquidityBucket,
+  maeLadder,
+  mfeLadder,
+  outlierDependence,
+  PAPER_HOLDOUT_FROM,
+  qualityBucket,
+  realizedDrawdown,
+  type ScoredTrade,
+  type SegmentRow,
+  scoreTrade,
+  segmentTable,
+  stats,
+  stopFillGap,
+  streaks,
+  timeSplit,
+  type WinClass,
+} from "./scorecard";
 import { asPaperTrade, type FidelityPair, loadPaperBook, loadPaperForensics, type PaperBook, type PaperPair, pairPaperStrategies, summarizeFidelity } from "./fidelity";
 import { type CostModel, DEFAULT_COSTS, chainCosts } from "./costs";
 import { decideGrid, detectionMcap, type EntryFilter, FORENSICS_GATES, type ForensicsRow, launchVenue, passesEntryFilter, type PairSummary, pairRows, summarizeByPeak, summarizeByVenue, summarizePairs, summarizePumpVsOther } from "./compare";
@@ -13,7 +38,7 @@ import { type PriceSeries, loadPriceSeries } from "./marketData";
 import { chainReports, curveSample, formatChainReports, num, pct, table, usd } from "./report";
 import { type RunConfig, type RunRow, runStrategy } from "./run";
 import type { IntrabarMode } from "./simulate";
-import { bootstrapDiffCI, bootstrapMeanCI, mean, mulberry32, simulatePortfolio, tradeStats } from "./stats";
+import { bootstrapDiffCI, bootstrapMeanCI, mean, mulberry32, quantile, simulatePortfolio, type TradeStats, tradeStats } from "./stats";
 import { type UniverseCandidate, type UniverseSnapshot, loadUniverse, readSnapshot, saveSnapshot, withReadOnlyProdQuery } from "./universe";
 
 export const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -1483,6 +1508,154 @@ async function plannerReasonsCmd(snapshot: UniverseSnapshot, flags: CliArgs["fla
   );
 }
 
+async function paperScorecardCmd(snapshot: UniverseSnapshot, flags: CliArgs["flags"]): Promise<void> {
+  const focus = typeof flags.strategy === "string" ? flags.strategy : "V0 all Solana";
+  const minHalf = Number(flags["min-half"] ?? 10);
+  let book: PaperBook;
+  if (flags.cached) book = JSON.parse(await readFile(PAPER_FILE, "utf8")) as PaperBook;
+  else {
+    console.error("reading the paper book from the production DB (read-only)...");
+    book = await withReadOnlyProdQuery(loadPaperBook);
+    await mkdir(CACHE_DIR, { recursive: true });
+    await writeFile(PAPER_FILE, JSON.stringify(book));
+  }
+  if (!book.tablesExist) {
+    console.log("The paper tables don't exist in this database yet.");
+    return;
+  }
+  const venueOf = new Map(snapshot.candidates.map((c) => [c.candidateId, launchVenue(c)]));
+  const scored = book.positions.map(scoreTrade).filter((t): t is ScoredTrade => t !== null);
+  const names = [...new Set(scored.map((t) => t.strategyName))].sort();
+  const startEquity = new Map(book.positions.map((p) => [p.strategyName, p.startEquityUsd ?? 21]));
+  const holdoutFrom = typeof flags["holdout-from"] === "string" ? Date.parse(flags["holdout-from"]) / 1000 : PAPER_HOLDOUT_FROM;
+  const iso = (s: number) => new Date(s * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const ci = ([lo, hi]: [number, number]) => `[${pct(lo)}, ${pct(hi)}]`;
+
+  const scoreRows: (string | number)[][] = [];
+  const distRows: (string | number)[][] = [];
+  const oosRows: (string | number)[][] = [];
+  for (const name of names) {
+    const ts = scored.filter((t) => t.strategyName === name);
+    const s = stats(ts);
+    const net = ts.map((t) => t.netPct);
+    const o = outlierDependence(net);
+    const st = streaks(ts);
+    const dd = realizedDrawdown(ts, startEquity.get(name) ?? 21);
+    const holdMin = mean(ts.map((t) => (t.closedAt - t.openedAt) / 60));
+    scoreRows.push([
+      name,
+      `${s.n} (${evidenceStage(s.n)})`,
+      pct(s.grossExpectancyPct),
+      `${pct(s.expectancyPct)} ${ci(s.expectancyCI90)}`,
+      pct(s.winRate * 100, 0),
+      `${pct(s.avgWinPct)} / ${pct(s.avgLossPct)}`,
+      num(s.profitFactor),
+      `${pct(o.meanExTop1)} / ${pct(o.meanExTop5)}`,
+      `${pct(dd.maxDrawdownPct, 0)} (${usd(dd.endEquityUsd)})`,
+      `${st.maxLoss} / ${st.maxWin} (now ${st.current > 0 ? "+" : ""}${st.current})`,
+      `${holdMin.toFixed(0)}m`,
+    ]);
+    const d = distribution(net);
+    distRows.push([name, pct(d.p10), pct(d.p25), pct(d.p50), pct(d.p75), pct(d.p90), pct(d.p95), pct(d.p99), num(d.sd, 1)]);
+    const halves = timeSplit(ts.filter((t) => t.openedAt < holdoutFrom));
+    const [a, b, h] = [stats(halves.dev), stats(halves.holdout), stats(ts.filter((t) => t.openedAt >= holdoutFrom))];
+    const agree = a.n >= minHalf && b.n >= minHalf ? (Math.sign(a.expectancyPct) === Math.sign(b.expectancyPct) ? "same sign" : "FLIPS") : "too few";
+    const cell = (x: TradeStats) => (x.n ? `${pct(x.expectancyPct)} ${ci(x.expectancyCI90)} n=${x.n}` : "n=0");
+    oosRows.push([name, iso(halves.cutoff), cell(a), cell(b), agree, cell(h)]);
+  }
+
+  const mine = scored.filter((t) => t.strategyName === focus);
+  const losses = mine.filter((t) => t.netPct <= 0);
+  const wins = mine.filter((t) => t.netPct > 0);
+  const lossSum = losses.reduce((a, t) => a + t.netPct, 0);
+  const lossRows = (Object.keys(LOSS_CLASS_MEANING) as LossClass[]).map((cls) => {
+    const g = losses.filter((t) => classifyLoss(t) === cls);
+    const sum = g.reduce((a, t) => a + t.netPct, 0);
+    return [cls, g.length, pct((g.length / (losses.length || 1)) * 100, 0), pct(lossSum ? (sum / lossSum) * 100 : NaN, 0), pct(mean(g.map((t) => t.netPct))), LOSS_CLASS_MEANING[cls]];
+  });
+  const winRows = (["RUNNER", "TRAILED", "OTHER_WIN"] as WinClass[]).map((cls) => {
+    const g = wins.filter((t) => classifyWin(t) === cls);
+    return [cls, g.length, pct(mean(g.map((t) => t.netPct))), pct(g.reduce((a, t) => a + t.netPct, 0) / (mine.length || 1), 2)];
+  });
+  const gaps = mine.map((t) => stopFillGap(t)).filter((g): g is NonNullable<ReturnType<typeof stopFillGap>> => g !== null);
+  const maxGap = Math.max(0, ...gaps.map((g) => Math.abs(g.gapPts)));
+  const gapLine =
+    maxGap < 0.5
+      ? `Stop fills: across ${gaps.length} loss stops the exit (from the stop baseline, as live) is within ${maxGap.toFixed(2)} pts of the trigger: paper sells at the quote that tripped the stop, so it models no execution delay. Live stop slippage has to come from live fills (executionQuality), not from here. "catastrophic loss -X%" is the first mark already past the line: price gapped between marks.`
+      : `Stop fills: ${gaps.length} loss stops, mean gap ${num(mean(gaps.map((g) => g.gapPts)), 1)} pts from the trigger (<1h: ${num(mean(gaps.filter((g) => g.age === "<1h").map((g) => g.gapPts)), 1)}, >=1h: ${num(mean(gaps.filter((g) => g.age === ">=1h").map((g) => g.gapPts)), 1)}); negative = worse. Marks thin after the first hour, so later gaps are bigger by construction.`;
+  const gasShare = mean(mine.map((t) => (t.sizeUsd > 0 ? (t.gasUsd / t.sizeUsd) * 100 : NaN)));
+  const ladder = (rows: ExcursionRow[], sign: string) =>
+    rows.map((r) => [`${sign}${r.threshold}%`, r.reached, `${r.endedPositive} (${pct(r.reached ? (r.endedPositive / r.reached) * 100 : NaN, 0)})`, pct(r.meanNetPct)]);
+  const cutoff = timeSplit(mine.filter((t) => t.openedAt < holdoutFrom)).cutoff;
+  const segHeaders = ["segment", "n", "net mean [90% CI]", "win", "dev 1st half", "dev 2nd half", "verdict (dev halves)", "locked holdout"];
+  const segRows = (rows: SegmentRow[]) =>
+    rows.map((r) => [
+      r.segment,
+      r.n,
+      `${pct(r.meanPct)} ${ci(r.ci90)}`,
+      pct(r.winRate * 100, 0),
+      `${pct(r.firstHalfMeanPct)} n=${r.firstHalfN}`,
+      `${pct(r.secondHalfMeanPct)} n=${r.secondHalfN}`,
+      r.verdict,
+      r.holdoutN ? `${pct(r.holdoutMeanPct)} n=${r.holdoutN}` : "n=0",
+    ]);
+  const seg = (key: (t: ScoredTrade) => string) => table(segHeaders, segRows(segmentTable(mine, key, cutoff, minHalf, holdoutFrom)));
+
+  console.log(
+    [
+      "## Paper scorecard (real Jupiter quotes; net = after modeled gas, % of cost basis)",
+      "",
+      "Evidence stage by closed trades: sanity <100, preliminary <300, meaningful <1000, strong 1000+. CIs are 90% bootstrap. Gross (before modeled gas) is the size-independent number: at ~$0.55 paper sizes gas is a large part of net. Drawdown is on the realized equity curve from the strategy's start equity (open positions not marked).",
+      "The strategies enter the same candidates, so they aren't independent samples: judge one against another with paper-compare (paired), not by these rows side by side.",
+      "",
+      table(["strategy", "closed", "gross exp.", "net expectancy [90% CI]", "win", "avg win / loss", "PF", "mean ex top1 / top5", "max DD (end eq.)", "loss / win streak", "avg hold"], scoreRows),
+      "",
+      "### Net return distribution per trade",
+      "",
+      table(["strategy", "P10", "P25", "P50", "P75", "P90", "P95", "P99", "sd (pts)"], distRows),
+      "",
+      `### Out of sample: locked holdout = positions opened from ${iso(holdoutFrom)} UTC${holdoutFrom === PAPER_HOLDOUT_FROM ? " (PAPER_HOLDOUT_FROM)" : " (--holdout-from)"}`,
+      "",
+      "Development is everything before it, split at its median open time as a stability check. Rules are found on development and confirmed only on the holdout.",
+      "",
+      table(["strategy", "dev split at (UTC)", "dev 1st half", "dev 2nd half", "dev halves", "locked holdout"], oosRows),
+      "",
+      `### "${focus}": why it loses (${losses.length} losses, rules on MFE/MAE/exit)`,
+      "",
+      table(["class", "n", "of losses", "of loss pts", "mean net", "meaning"], lossRows),
+      "",
+      `### "${focus}": where the profit comes from (${wins.length} wins)`,
+      "",
+      table(["class", "n", "mean net", "contribution per trade"], winRows),
+      "",
+      `### "${focus}": costs and stop fills`,
+      "",
+      `Modeled gas averages ${pct(gasShare)} of position size per round trip (paper sizes are small; at a live size this shrinks proportionally).`,
+      gapLine,
+      "",
+      `### "${focus}": MFE ladder (touched +X% at some mark)`,
+      "",
+      table(["MFE >=", "reached", "ended net positive", "mean net"], ladder(mfeLadder(mine), "+")),
+      "",
+      `### "${focus}": MAE ladder (sank X% below the stop baseline at some mark)`,
+      "",
+      "Not a stop-level test: the few dips that recover can include the runners. Replay a stop level paired (compare / paper strategy) before adopting it.",
+      "",
+      table(["MAE <=", "reached", "ended net positive", "mean net"], ladder(maeLadder(mine), "")),
+      "",
+      `### "${focus}": segments (development split at ${iso(cutoff)}; each half needs ${minHalf}+; holdout shown, never folded in)`,
+      "",
+      "Exploratory: many segments are tested at once, so a lone CI clear of 0 is a lead to pre-register as a new paper strategy, not a rule. Liquidity \"unknown\" is DexScreener reporting none (pump.fun curves, new pools), not zero.",
+      "",
+      seg((t) => `venue ${venueOf.get(t.candidateId) ?? "unknown"}`),
+      "",
+      seg((t) => `liquidity ${liquidityBucket(t.liquidityUsd)}`),
+      "",
+      seg((t) => `quality ${qualityBucket(t.qualityScore)}`),
+    ].join("\n")
+  );
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { command, flags } = parseArgs(argv);
   switch (command) {
@@ -1543,6 +1716,10 @@ export async function main(argv: string[]): Promise<void> {
       await paperGateAuditCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
       return;
     }
+    case "paper-scorecard": {
+      await paperScorecardCmd(await getSnapshot(Boolean(flags["refresh-universe"])), flags);
+      return;
+    }
     case "planner-reasons": {
       await plannerReasonsCmd(await getSnapshot(false), flags);
       return;
@@ -1598,6 +1775,10 @@ export async function main(argv: string[]): Promise<void> {
   paper-gate-audit [--strategies "V0 all Solana,V0 non-pump (E2)"] [--refresh-universe]
                                which live gate blocked each paper-traded candidate, and per gate the blocked
                                trades vs the rest on real quotes (safety gates and kill switch report-only)
+  paper-scorecard [--strategy "V0 all Solana"] [--holdout-from iso] [--min-half 10] [--cached] [--refresh-universe]
+                               per paper strategy: gross/net expectancy, PF, distribution, outlier dependence,
+                               drawdown, streaks, dev halves vs the locked holdout; for --strategy also loss/win classes,
+                               stop fill gaps, gas share, MFE/MAE ladders and out-of-sample segments
   planner-reasons [--strategy "V0 all Solana"]
                                the AI planner's stored REJECT_TRADE reasoning for paper winners vs losers it blocked
   survivor [--chain solana] [--exit v1.8] [--min-train-trades 15]
