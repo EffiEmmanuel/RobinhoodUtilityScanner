@@ -523,6 +523,11 @@
         text-align: center;
         padding: 26px 14px;
       }
+      .table-note {
+        padding: 8px 14px 12px;
+        color: var(--text-muted);
+        font-size: 11px;
+      }
 
       .badge {
         display: inline-block;
@@ -1492,6 +1497,33 @@
                   <tbody id="paper-kpi-body"></tbody>
                 </table>
               </div>
+              <div class="card-head" style="margin-top: 14px">
+                <h2>Paper trades <span class="badge PAPER">PAPER</span></h2>
+                <span class="count-chip" id="paper-trades-count">E2 first</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Token</th>
+                      <th>Strategy</th>
+                      <th>Status</th>
+                      <th>Invested</th>
+                      <th>P&amp;L $</th>
+                      <th>P&amp;L %</th>
+                      <th>Entry mcap*</th>
+                      <th>Exit mcap*</th>
+                      <th>Entry price</th>
+                      <th>Exit price</th>
+                      <th>Opened</th>
+                      <th>Closed</th>
+                      <th>Exit reason</th>
+                    </tr>
+                  </thead>
+                  <tbody id="paper-trades-body"></tbody>
+                </table>
+              </div>
+              <div class="table-note">* Market caps are estimates from decision-time token supply and recorded prices. Open trades use the latest paper mark for P&amp;L and exit market cap.</div>
             </div>
             <div class="card">
               <div class="card-head">
@@ -1791,6 +1823,8 @@
           kpiVersion: document.getElementById("kpi-version"),
           paperKpiBody: document.getElementById("paper-kpi-body"),
           paperKpiStatus: document.getElementById("paper-kpi-status"),
+          paperTradesBody: document.getElementById("paper-trades-body"),
+          paperTradesCount: document.getElementById("paper-trades-count"),
           closedCount: document.getElementById("closed-count"),
           noTradeFeed: document.getElementById("no-trade-feed"),
           noTradeWindow: document.getElementById("no-trade-window"),
@@ -2534,12 +2568,14 @@
           if (!p || !p.strategies) {
             els.paperKpiStatus.textContent = "unavailable";
             els.paperKpiBody.innerHTML = '<tr class="empty-row"><td colspan="11">Paper strategy KPIs unavailable.</td></tr>';
+            els.paperTradesBody.innerHTML = '<tr class="empty-row"><td colspan="13">Paper trades unavailable.</td></tr>';
             return;
           }
           els.paperKpiStatus.textContent =
             (p.enabled ? "running" : "off (PAPER_STRATEGIES_ENABLED)") + " · " + p.quotesUsedToday + " quotes today";
           if (!p.strategies.length) {
             els.paperKpiBody.innerHTML = '<tr class="empty-row"><td colspan="11">No paper strategies yet.</td></tr>';
+            els.paperTradesBody.innerHTML = '<tr class="empty-row"><td colspan="13">No paper trades yet.</td></tr>';
             return;
           }
           var num = function (n, digits) {
@@ -2565,6 +2601,39 @@
               );
             })
             .join("");
+          var trades = p.strategies
+            .flatMap(function (s) {
+              return (s.trades || []).map(function (t) { return Object.assign({ strategyName: s.name }, t); });
+            })
+            .sort(function (a, b) {
+              var aE2 = /E2/i.test(a.strategyName) ? 1 : 0;
+              var bE2 = /E2/i.test(b.strategyName) ? 1 : 0;
+              return bE2 - aE2 || new Date(b.openedAt) - new Date(a.openedAt);
+            });
+          els.paperTradesCount.textContent = trades.length + " trades · E2 first";
+          if (!trades.length) {
+            els.paperTradesBody.innerHTML = '<tr class="empty-row"><td colspan="13">No paper trades yet.</td></tr>';
+          } else {
+            els.paperTradesBody.innerHTML = trades.map(function (t) {
+              var label = t.tokenSymbol || t.tokenName || (t.tokenAddress.slice(0, 6) + "…" + t.tokenAddress.slice(-4));
+              var pnlClass = t.pnlUsd > 0 ? "num-good" : t.pnlUsd < 0 ? "num-bad" : "";
+              return "<tr>" +
+                '<td class="token-cell" title="' + esc(t.tokenAddress) + '">' + esc(label) + "</td>" +
+                "<td>" + esc(t.strategyName) + "</td>" +
+                "<td>" + esc(t.status) + "</td>" +
+                "<td>" + fmtUsd(t.investedUsd) + "</td>" +
+                '<td class="' + pnlClass + '">' + fmtUsdSpan(t.pnlUsd) + "</td>" +
+                '<td class="' + pnlClass + '">' + fmtPercentSpan(t.pnlPercent) + "</td>" +
+                "<td>" + fmtUsd(t.entryMarketCapUsd) + "</td>" +
+                "<td>" + fmtUsd(t.exitMarketCapUsd) + "</td>" +
+                "<td>" + fmtTokenPrice(t.entryPriceUsd) + "</td>" +
+                "<td>" + fmtTokenPrice(t.exitPriceUsd) + "</td>" +
+                "<td>" + fmtAgo(t.openedAt) + "</td>" +
+                "<td>" + (t.closedAt ? fmtAgo(t.closedAt) : "Open") + "</td>" +
+                '<td class="token-cell">' + esc(t.exitReason || "—") + "</td>" +
+                "</tr>";
+            }).join("");
+          }
         }
 
         var IN_PROGRESS_STATUSES = {

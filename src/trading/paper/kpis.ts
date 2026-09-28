@@ -28,19 +28,52 @@ export interface PaperStrategyKpi {
   maxDrawdownPct: number | null;
   equityCurve: { at: string; equityUsd: number }[];
   recent: { symbolAddress: string; openedAt: string; closedAt: string | null; pnlUsd: number | null; exitReason: string | null; peakPct: number | null }[];
+  trades: PaperTradeRow[];
+}
+
+export interface PaperTradeRow {
+  id: string;
+  tokenAddress: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  chain: string;
+  status: string;
+  openedAt: string;
+  closedAt: string | null;
+  investedUsd: number;
+  pnlUsd: number | null;
+  pnlPercent: number | null;
+  entryMarketCapUsd: number | null;
+  exitMarketCapUsd: number | null;
+  entryPriceUsd: number | null;
+  exitPriceUsd: number | null;
+  exitReason: string | null;
+  qualityScore: number | null;
+  socialScore: number | null;
+  tradeLane: string | null;
+  peakPercent: number | null;
+  drawdownPercent: number | null;
 }
 
 export async function getPaperStrategyKpis(): Promise<{ quotesUsedToday: number; strategies: PaperStrategyKpi[] }> {
   const strategies = await db.paperStrategy.findMany({ orderBy: { createdAt: "asc" } });
   const out: PaperStrategyKpi[] = [];
   for (const s of strategies) {
-    const [closed, openCount, gas, snapshots, recent] = await Promise.all([
+    const [closed, openCount, gas, snapshots, recent, positions] = await Promise.all([
       db.paperPosition.findMany({ where: { strategyId: s.id, status: "CLOSED" }, select: { realizedPnlUsd: true, costBasisUsd: true } }),
       db.paperPosition.count({ where: { strategyId: s.id, status: "OPEN" } }),
       db.paperFill.aggregate({ where: { strategyId: s.id }, _sum: { gasUsd: true } }),
       db.paperEquitySnapshot.findMany({ where: { strategyId: s.id }, orderBy: { capturedAt: "asc" }, select: { capturedAt: true, equityUsd: true } }),
       db.paperPosition.findMany({ where: { strategyId: s.id }, orderBy: { openedAt: "desc" }, take: 20 }),
+      db.paperPosition.findMany({ where: { strategyId: s.id }, orderBy: { openedAt: "desc" } }),
     ]);
+    const [fills, candidates] = await Promise.all([
+      db.paperFill.findMany({ where: { strategyId: s.id }, orderBy: { ts: "asc" } }),
+      db.tradeCandidate.findMany({ where: { id: { in: positions.map((p) => p.candidateId) } }, include: { token: { select: { name: true, symbol: true } } } }),
+    ]);
+    const fillsByPosition = new Map<string, typeof fills>();
+    for (const fill of fills) fillsByPosition.set(fill.positionId, [...(fillsByPosition.get(fill.positionId) ?? []), fill]);
+    const candidateById = new Map(candidates.map((c) => [c.id, c]));
     const rows = closed.map((p) => {
       const net = p.realizedPnlUsd ?? 0;
       const pct = p.costBasisUsd > 0 ? (net / p.costBasisUsd) * 100 : 0;
@@ -82,6 +115,44 @@ export async function getPaperStrategyKpis(): Promise<{ quotesUsedToday: number;
         exitReason: p.exitReason,
         peakPct: p.mfePercent,
       })),
+      trades: positions.map((p) => {
+        const positionFills = fillsByPosition.get(p.id) ?? [];
+        const sells = positionFills.filter((f) => f.side === "SELL");
+        const soldRaw = sells.reduce((sum, f) => sum + BigInt(f.tokensRaw), 0n);
+        const exitPriceUsd = soldRaw > 0n
+          ? sells.reduce((sum, f) => sum + (f.priceUsd ?? 0) * Number(BigInt(f.tokensRaw)), 0) / Number(soldRaw)
+          : p.status === "OPEN" ? p.lastMarkPriceUsd : null;
+        const meta = p.meta && typeof p.meta === "object" ? p.meta as Record<string, unknown> : {};
+        const supply = typeof meta.supply === "number" ? meta.supply : null;
+        const currentValue = p.status === "OPEN" && p.lastMarkPriceUsd !== null
+          ? Number(BigInt(p.tokensRemainingRaw)) / 10 ** (p.decimals ?? 0) * p.lastMarkPriceUsd
+          : 0;
+        const pnlUsd = p.status === "CLOSED" ? p.realizedPnlUsd : p.realizedProceedsUsd + currentValue - p.costBasisUsd;
+        const candidate = candidateById.get(p.candidateId);
+        return {
+          id: p.id,
+          tokenAddress: p.tokenAddress,
+          tokenName: candidate?.token.name ?? null,
+          tokenSymbol: candidate?.token.symbol ?? null,
+          chain: p.chain,
+          status: p.status,
+          openedAt: p.openedAt.toISOString(),
+          closedAt: p.closedAt?.toISOString() ?? null,
+          investedUsd: p.costBasisUsd,
+          pnlUsd,
+          pnlPercent: p.costBasisUsd > 0 && pnlUsd !== null ? pnlUsd / p.costBasisUsd * 100 : null,
+          entryMarketCapUsd: supply !== null && p.entryPriceUsd !== null ? supply * p.entryPriceUsd : null,
+          exitMarketCapUsd: supply !== null && exitPriceUsd !== null ? supply * exitPriceUsd : null,
+          entryPriceUsd: p.entryPriceUsd,
+          exitPriceUsd,
+          exitReason: p.exitReason,
+          qualityScore: typeof meta.qualityScore === "number" ? meta.qualityScore : null,
+          socialScore: typeof meta.socialScore === "number" ? meta.socialScore : null,
+          tradeLane: typeof meta.tradeLane === "string" ? meta.tradeLane : null,
+          peakPercent: p.mfePercent,
+          drawdownPercent: p.maePercent,
+        };
+      }),
     });
   }
   return { quotesUsedToday: quoteBudget.usedToday, strategies: out };
